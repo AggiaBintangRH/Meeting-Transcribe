@@ -1,0 +1,102 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual Environment
+.venv/
+venv/
+env/
+ENV/
+
+# VS Code
+.vscode/
+
+# JetBrains
+.idea/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Cache
+.cache/
+.pytest_cache/
+.mypy_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Hugging Face
+huggingface/
+hf_cache/
+
+# Torch
+torch_cache/
+
+# Model folders
+models/
+checkpoints/
+weights/
+pretrained_models/
+downloads/
+
+# Audio
+*.wav
+*.mp3
+*.flac
+
+# Results
+output/
+outputs/
+results/
+temp/
+tmp/
+
+# Dataset
+data/
+datasets/
+
+# ONNX / Torch models
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.onnx
+*.safetensors
+
+# Whisper cache
+.whisper/
+
+# Build
+build/
+dist/
+*.egg-info/
+/.build-cache
+/.claude
+/.venv-dicow
+
+# Secrets — never commit. Use .env.example as the template.
+.env
+
+# Private data: real meeting audio, transcripts, and sidecar logs.
+# This project's whole premise is that recordings never leave the machine.
+recordings/
+logs/
+
+# Built app bundle (multi-GB, rebuild with build.sh)
+*.app/
+
+# Build cache: 1.3 GB of downloaded python-build-standalone runtime (build.sh
+# re-fetches it). Never belongs in git.
+/.build-cache/
+
+# macOS cruft
+.DS_Store
+
+# SwiftPM build artifacts (swift build regenerates these)
+.build/
