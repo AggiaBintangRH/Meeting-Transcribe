@@ -79,7 +79,6 @@ dist/
 /.build-cache
 /.claude
 /.venv-dicow
-*.md
 
 # Secrets — never commit. Use .env.example as the template.
 .env
@@ -88,7 +87,6 @@ dist/
 # This project's whole premise is that recordings never leave the machine.
 recordings/
 logs/
-*.md
 
 # Built app bundle (multi-GB, rebuild with build.sh)
 *.app/
@@ -99,3 +97,8 @@ logs/
 
 # macOS cruft
 .DS_Store
+
+# Internal notes (CLAUDE.md, SESSION-HANDOFF.md, PLAN*.md) stay local —
+# but the README is the repo's front page, so it ships.
+*.md
+!README.md
