@@ -93,3 +93,9 @@ logs/
 # Built app bundle (multi-GB, rebuild with build.sh)
 *.app/
 /.build-cache
+
+# SwiftPM build artifacts (swift build regenerates these)
+.build/
+
+# macOS cruft
+.DS_Store
