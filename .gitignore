@@ -79,6 +79,7 @@ dist/
 /.build-cache
 /.claude
 /.venv-dicow
+*.md
 
 # Secrets — never commit. Use .env.example as the template.
 .env
@@ -87,16 +88,8 @@ dist/
 # This project's whole premise is that recordings never leave the machine.
 recordings/
 logs/
+*.md
 
 # Built app bundle (multi-GB, rebuild with build.sh)
 *.app/
-
-# Build cache: 1.3 GB of downloaded python-build-standalone runtime (build.sh
-# re-fetches it). Never belongs in git.
-/.build-cache/
-
-# macOS cruft
-.DS_Store
-
-# SwiftPM build artifacts (swift build regenerates these)
-.build/
+/.build-cache

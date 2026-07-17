@@ -1,0 +1,211 @@
+{
+  "": {
+    "dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MeetingTranscriber.d",
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MeetingTranscriber.o",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/primary.swiftdeps"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/MeetingTranscriberApp.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MeetingTranscriberApp.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MeetingTranscriberApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MeetingTranscriberApp.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MeetingTranscriberApp.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/Theme.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/Theme.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/Theme~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/Theme.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/Theme.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioBufferProcessor.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioBufferProcessor.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioBufferProcessor~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioBufferProcessor.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioBufferProcessor.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioDeviceManager.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioDeviceManager.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioDeviceManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioDeviceManager.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioDeviceManager.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioRecorder.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioRecorder.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioRecorder~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioRecorder.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioRecorder.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioResampler.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioResampler.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioResampler~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioResampler.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/AudioResampler.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/MicrophoneSettings.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneSettings.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneSettings~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneSettings.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneSettings.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/NemotronASRService.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/NemotronASRService.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/NemotronASRService~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/NemotronASRService.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/NemotronASRService.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/PythonRuntime.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/PythonRuntime.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/PythonRuntime~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/PythonRuntime.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/PythonRuntime.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/SileroVADService.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SileroVADService.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SileroVADService~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SileroVADService.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SileroVADService.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/VoiceActivityDetector.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VoiceActivityDetector.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VoiceActivityDetector~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VoiceActivityDetector.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VoiceActivityDetector.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelCatalog.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelCatalog.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelCatalog~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelCatalog.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelCatalog.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelLoader.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelLoader.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelLoader~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelLoader.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ModelLoader.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRModels.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRModels.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRModels~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRModels.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRModels.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRService.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRService.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRService~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRService.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedASRService.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DiarizationService.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationService.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationService~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationService.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationService.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/OverlapRepairService.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapRepairService.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapRepairService~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapRepairService.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapRepairService.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/SpeakerProfileStore.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SpeakerProfileStore.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SpeakerProfileStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SpeakerProfileStore.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SpeakerProfileStore.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/ContentView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ContentView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ContentView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ContentView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ContentView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/LoadingOverlayView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/LoadingOverlayView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/LoadingOverlayView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/LoadingOverlayView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/LoadingOverlayView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/MainAreaView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MainAreaView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MainAreaView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MainAreaView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MainAreaView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/RecordCardView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RecordCardView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RecordCardView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RecordCardView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RecordCardView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/SidebarView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SidebarView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SidebarView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SidebarView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SidebarView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/StatusChipsView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/StatusChipsView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/StatusChipsView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/StatusChipsView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/StatusChipsView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/TranscriptView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/TranscriptView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/TranscriptView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/TranscriptView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/TranscriptView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/ChunkedModelTab.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedModelTab.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedModelTab~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedModelTab.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/ChunkedModelTab.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/DiarizationTab.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationTab.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationTab~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationTab.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DiarizationTab.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/MicrophoneTab.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneTab.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneTab~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneTab.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/MicrophoneTab.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/OverlapTab.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapTab.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapTab~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapTab.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/OverlapTab.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/RealtimeModelTab.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RealtimeModelTab.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RealtimeModelTab~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RealtimeModelTab.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/RealtimeModelTab.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsComponents.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsComponents.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsComponents~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsComponents.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsComponents.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsView.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsView.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsView~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsView.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/SettingsView.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/VADTab.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VADTab.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VADTab~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VADTab.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/VADTab.dia"
+  },
+  "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/DerivedSources/resource_bundle_accessor.swift": {
+    "object": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/resource_bundle_accessor.swift.o",
+    "swiftmodule": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/resource_bundle_accessor~partial.swiftmodule",
+    "swift-dependencies": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/resource_bundle_accessor.swiftdeps",
+    "diagnostics": "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/release/MeetingTranscriber.build/resource_bundle_accessor.dia"
+  }
+}

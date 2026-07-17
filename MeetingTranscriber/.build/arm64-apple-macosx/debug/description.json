@@ -1,0 +1,933 @@
+{
+  "builtTestProducts" : [
+
+  ],
+  "copyCommands" : {
+    "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber_MeetingTranscriber.bundle/Assets.xcassets" : {
+      "inputs" : [
+        {
+          "kind" : "directory",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Assets.xcassets"
+        }
+      ],
+      "outputs" : [
+        {
+          "kind" : "directory",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber_MeetingTranscriber.bundle/Assets.xcassets"
+        }
+      ]
+    }
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.MeetingTranscriber-arm64-apple-macosx-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/sources",
+      "importPath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/MeetingTranscriberApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/Theme.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioBufferProcessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioDeviceManager.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioRecorder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioResampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/MicrophoneSettings.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/NemotronASRService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/PythonRuntime.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/SileroVADService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/TranscriptMerge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/VoiceActivityDetector.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelCatalog.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelLoader.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRModels.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DiarizationService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DicowService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/OverlapRepairService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/SpeakerProfileStore.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/ContentView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/LoadingOverlayView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/MainAreaView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/RecordCardView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/SidebarView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/StatusChipsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/TranscriptView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/ChunkedModelTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/DiarizationTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/MicrophoneTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/OverlapTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/RealtimeModelTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsComponents.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/VADTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DerivedSources/resource_bundle_accessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<MeetingTranscriber-arm64-apple-macosx-debug.module-resources>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "MeetingTranscriber",
+      "moduleOutputPath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/Modules/MeetingTranscriber.swiftmodule",
+      "objects" : [
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MeetingTranscriberApp.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/Theme.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioBufferProcessor.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioDeviceManager.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioRecorder.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioResampler.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MicrophoneSettings.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/NemotronASRService.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/PythonRuntime.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SileroVADService.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/TranscriptMerge.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/VoiceActivityDetector.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ModelCatalog.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ModelLoader.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedASRModels.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedASRService.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DiarizationService.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DicowService.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/OverlapRepairService.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SpeakerProfileStore.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ContentView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/LoadingOverlayView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MainAreaView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/RecordCardView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SidebarView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/StatusChipsView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/TranscriptView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedModelTab.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DiarizationTab.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MicrophoneTab.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/OverlapTab.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/RealtimeModelTab.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SettingsComponents.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SettingsView.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/VADTab.swift.o",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/resource_bundle_accessor.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j20",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+        "-module-cache-path",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "MeetingTranscriber_main",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "meetingtranscriber"
+      ],
+      "outputFileMapPath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MeetingTranscriberApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/Theme.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioBufferProcessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioDeviceManager.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioRecorder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioResampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MicrophoneSettings.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/NemotronASRService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/PythonRuntime.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SileroVADService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/TranscriptMerge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/VoiceActivityDetector.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ModelCatalog.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ModelLoader.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedASRModels.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedASRService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DiarizationService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DicowService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/OverlapRepairService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SpeakerProfileStore.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ContentView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/LoadingOverlayView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MainAreaView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/RecordCardView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SidebarView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/StatusChipsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/TranscriptView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedModelTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DiarizationTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MicrophoneTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/OverlapTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/RealtimeModelTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SettingsComponents.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SettingsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/VADTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/resource_bundle_accessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/Modules/MeetingTranscriber.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/MeetingTranscriberApp.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/Theme.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioBufferProcessor.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioDeviceManager.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioRecorder.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioResampler.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/MicrophoneSettings.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/NemotronASRService.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/PythonRuntime.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/SileroVADService.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/TranscriptMerge.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/VoiceActivityDetector.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelCatalog.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelLoader.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRModels.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRService.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DiarizationService.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DicowService.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/OverlapRepairService.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/SpeakerProfileStore.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/ContentView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/LoadingOverlayView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/MainAreaView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/RecordCardView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/SidebarView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/StatusChipsView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/TranscriptView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/ChunkedModelTab.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/DiarizationTab.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/MicrophoneTab.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/OverlapTab.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/RealtimeModelTab.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsComponents.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsView.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/VADTab.swift",
+        "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DerivedSources/resource_bundle_accessor.swift"
+      ],
+      "tempsPath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "MeetingTranscriber" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "MeetingTranscriber",
+      "-package-name",
+      "meetingtranscriber",
+      "-c",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/MeetingTranscriberApp.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/Theme.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioBufferProcessor.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioDeviceManager.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioRecorder.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioResampler.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/MicrophoneSettings.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/NemotronASRService.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/PythonRuntime.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/SileroVADService.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/TranscriptMerge.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/VoiceActivityDetector.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelCatalog.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelLoader.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRModels.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRService.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DiarizationService.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DicowService.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/OverlapRepairService.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/SpeakerProfileStore.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/ContentView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/LoadingOverlayView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/MainAreaView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/RecordCardView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/SidebarView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/StatusChipsView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/TranscriptView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/ChunkedModelTab.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/DiarizationTab.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/MicrophoneTab.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/OverlapTab.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/RealtimeModelTab.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsComponents.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsView.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/VADTab.swift",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DerivedSources/resource_bundle_accessor.swift",
+      "-I",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j20",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_AVAILABLE",
+      "-module-cache-path",
+      "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "MeetingTranscriber_main",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "meetingtranscriber",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "MeetingTranscriber" : [
+
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber-entitlement.plist"
+    },
+    "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/MeetingTranscriberApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/App/Theme.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioBufferProcessor.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioDeviceManager.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioRecorder.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/AudioResampler.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/MicrophoneSettings.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/NemotronASRService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/PythonRuntime.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/SileroVADService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/TranscriptMerge.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Audio/VoiceActivityDetector.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelCatalog.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Models/ModelLoader.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRModels.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/ChunkedASRService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DiarizationService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/DicowService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/OverlapRepairService.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Transcription/SpeakerProfileStore.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/ContentView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/LoadingOverlayView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/MainAreaView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/RecordCardView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/SidebarView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/StatusChipsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Main/TranscriptView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/ChunkedModelTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/DiarizationTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/MicrophoneTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/OverlapTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/RealtimeModelTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsComponents.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/Sources/MeetingTranscriber/Views/Settings/VADTab.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DerivedSources/resource_bundle_accessor.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/sources"
+    },
+    "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioBufferProcessor.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioDeviceManager.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioRecorder.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/AudioResampler.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedASRModels.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedASRService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ChunkedModelTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ContentView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DiarizationService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DiarizationTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/DicowService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/LoadingOverlayView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MainAreaView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MeetingTranscriberApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MicrophoneSettings.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/MicrophoneTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ModelCatalog.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/ModelLoader.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/NemotronASRService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/OverlapRepairService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/OverlapTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/PythonRuntime.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/RealtimeModelTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/RecordCardView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SettingsComponents.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SettingsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SidebarView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SileroVADService.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/SpeakerProfileStore.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/StatusChipsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/Theme.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/TranscriptMerge.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/TranscriptView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/VADTab.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/VoiceActivityDetector.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.build/resource_bundle_accessor.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/MeetingTranscriber.product/Objects.LinkFileList"
+    },
+    "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/donimacstudio/Documents/AI/Meeting Transcribe/MeetingTranscriber/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}
