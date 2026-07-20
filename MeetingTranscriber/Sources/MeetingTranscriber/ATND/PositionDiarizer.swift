@@ -38,6 +38,15 @@ final class PositionDiarizer: ObservableObject {
     private var smoother = DirectionSmoother()
     private var clusterer = PositionClusterer()
 
+    /// Fires when the beam settles on a genuinely different talker cluster than
+    /// the current one — the recorder uses it to split the live transcript into a
+    /// new row in real time. Reset each session in `start(...)`.
+    private var changeDetector = ClusterChangeDetector()
+
+    /// Called (on the MainActor, from `ingest`) when `changeDetector` confirms a
+    /// talker switch. Installed by `AudioRecorder`; nil = no real-time splitting.
+    var onClusterChange: (() -> Void)?
+
     /// cluster id → display name.
     private var names: [Int: String] = [:]
 
@@ -60,6 +69,7 @@ final class PositionDiarizer: ObservableObject {
         self.nowFn = now
         self.smoother = DirectionSmoother(windowSec: smoothingSec)
         self.clusterer = PositionClusterer(tauDeg: tauDeg)
+        self.changeDetector = ClusterChangeDetector()
         self.names = [:]
         self.lastNoticeElapsed = nil
         self.pendingEnrollment = nil
@@ -101,6 +111,10 @@ final class PositionDiarizer: ObservableObject {
             let result = clusterer.assign(sample)
             if result.isNew {
                 assignName(clusterID: result.clusterID)
+            }
+            // Real-time row split: fire on a confirmed switch to a different cluster.
+            if changeDetector.push(t: sample.t, clusterID: result.clusterID) {
+                onClusterChange?()
             }
         }
     }
@@ -161,6 +175,21 @@ final class PositionDiarizer: ObservableObject {
 
     func sampleCount(in range: ClosedRange<Double>) -> Int {
         clusterer.sampleCount(in: range)
+    }
+
+    /// Per-turn position labels over `range` — one entry per contiguous talker
+    /// span (so a beam change inside the range yields multiple rows). Each maps to
+    /// `(positionIDBase + clusterID, name)`. Valid after `stop()` (data kept), same
+    /// as `label(for:)`.
+    func labeledTurns(in range: ClosedRange<Double>,
+                      minDurationSec: Double = 0.6)
+        -> [(start: Double, end: Double, id: Int, name: String)] {
+        clusterer.turns(in: range, minDurationSec: minDurationSec).map { turn in
+            (start: turn.start,
+             end: turn.end,
+             id: Self.positionIDBase + turn.clusterID,
+             name: names[turn.clusterID] ?? "Speaker \(turn.clusterID + 1)")
+        }
     }
 
     /// Rename a position cluster. `clusterID` is the RAW cluster id (already

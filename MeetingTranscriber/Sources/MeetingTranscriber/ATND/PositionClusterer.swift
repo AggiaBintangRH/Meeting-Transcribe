@@ -173,4 +173,121 @@ struct PositionClusterer {
     func sampleCount(in range: ClosedRange<Double>) -> Int {
         assignments.reduce(0) { $0 + (range.contains($1.t) ? 1 : 0) }
     }
+
+    /// Contiguous same-cluster runs of the assignment stream within `range`.
+    /// Each returned turn is one talker's continuous span; a beam change mid-range
+    /// yields two turns so the display can split rows at the switch.
+    ///
+    /// - `minDurationSec`/`minSamples`: density gate — runs shorter/sparser than
+    ///   this are dropped as flicker (the 0.4s smoother already kills per-notice
+    ///   jitter; this catches longer strays).
+    /// - `maxGapSec`: an ATND-silence hole larger than this breaks a run — no turn
+    ///   may span it (so real silence stays uncovered → UNKNOWN downstream).
+    func turns(in range: ClosedRange<Double>,
+               minDurationSec: Double = 0.6,
+               maxGapSec: Double = 1.0,
+               minSamples: Int = 3) -> [(start: Double, end: Double, clusterID: Int)] {
+        // `assignments` is appended in time order, so in-range stays time-ordered.
+        let inRange = assignments.filter { range.contains($0.t) }
+        guard !inRange.isEmpty else { return [] }
+
+        struct Run { var start: Double; var end: Double; var clusterID: Int; var count: Int }
+
+        // 1. Raw runs: new run when the cluster changes OR the inter-sample gap
+        //    exceeds maxGapSec (an ATND-silence hole — never bridged).
+        var runs: [Run] = []
+        for a in inRange {
+            if var last = runs.last,
+               last.clusterID == a.clusterID,
+               a.t - last.end <= maxGapSec {
+                last.end = a.t
+                last.count += 1
+                runs[runs.count - 1] = last
+            } else {
+                runs.append(Run(start: a.t, end: a.t, clusterID: a.clusterID, count: 1))
+            }
+        }
+
+        // 2a. Flicker absorption: drop sub-min runs (a stray 1–3-sample flicker
+        //     inside a stable turn, or unlabeled boundary slop between two clusters).
+        let survivors = runs.filter { $0.end - $0.start >= minDurationSec && $0.count >= minSamples }
+
+        // 2b. Merge adjacent SAME-cluster survivors separated by <= maxGapSec
+        //     (so a dropped flicker's same-cluster flanks rejoin into one turn).
+        var merged: [Run] = []
+        for r in survivors {
+            if var last = merged.last,
+               last.clusterID == r.clusterID,
+               r.start - last.end <= maxGapSec {
+                last.end = r.end
+                last.count += r.count
+                merged[merged.count - 1] = last
+            } else {
+                merged.append(r)
+            }
+        }
+
+        // 3. Sorted by start (already in order; explicit for clarity).
+        return merged
+            .map { (start: $0.start, end: $0.end, clusterID: $0.clusterID) }
+            .sorted { $0.start < $1.start }
+    }
+}
+
+/// Pure detector that fires exactly once when the beam settles on a genuinely
+/// different talker cluster than the current stable one. Used for real-time row
+/// splitting; no app types, unit-testable in isolation.
+struct ClusterChangeDetector {
+    /// How many consecutive same-new-cluster samples confirm a change (~0.3s at 10 Hz).
+    var consecutiveRequired = 3
+    /// Minimum seconds between fires — don't fight the VAD flush cadence.
+    var minIntervalSec = 2.0
+
+    private var stableCluster: Int?
+    private var candidate: Int?
+    private var candidateCount = 0
+    private var lastFired: Double?
+
+    /// Returns true ONLY when `clusterID` differs from the current stable cluster,
+    /// has been seen `consecutiveRequired` times in a row, AND `t - lastFired >=
+    /// minIntervalSec`. The FIRST stable cluster of a session never fires (nothing
+    /// to split). On a fire, `clusterID` becomes the new stable cluster.
+    mutating func push(t: Double, clusterID: Int) -> Bool {
+        // Establish the first stable cluster silently — nothing to split yet.
+        guard let stable = stableCluster else {
+            stableCluster = clusterID
+            candidate = nil
+            candidateCount = 0
+            return false
+        }
+        // Back on the stable cluster — reset any building candidate.
+        if clusterID == stable {
+            candidate = nil
+            candidateCount = 0
+            return false
+        }
+        // A different cluster — accumulate confirmation.
+        if clusterID == candidate {
+            candidateCount += 1
+        } else {
+            candidate = clusterID
+            candidateCount = 1
+        }
+        guard candidateCount >= consecutiveRequired else { return false }
+        // Confirmed change, but rate-limit: suppress a fire too soon after the
+        // last one (keep the candidate building so it fires once the interval passes).
+        if let last = lastFired, t - last < minIntervalSec { return false }
+        stableCluster = clusterID
+        candidate = nil
+        candidateCount = 0
+        lastFired = t
+        return true
+    }
+
+    mutating func reset() {
+        stableCluster = nil
+        candidate = nil
+        candidateCount = 0
+        lastFired = nil
+    }
 }

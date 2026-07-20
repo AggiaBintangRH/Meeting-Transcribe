@@ -252,9 +252,10 @@ final class AudioRecorder: ObservableObject {
                     self.partialSpeakerName = nil
                 } else {
                     self.partialTranscript = text
-                    // Trailing 2s window ≈ the beam active right now (after smoothing).
+                    // Trailing 1s window ≈ the beam active right now (after smoothing).
+                    // Short so the live-partial label flips quickly on a talker switch.
                     self.partialSpeakerName = self.positionDiarizer?.label(
-                        for: max(0, self.recordingElapsed - 2.0)...self.recordingElapsed,
+                        for: max(0, self.recordingElapsed - 1.0)...self.recordingElapsed,
                         minSamples: 3)?.name
                 }
             }
@@ -301,6 +302,21 @@ final class AudioRecorder: ObservableObject {
         lastDiarBoundary = 0
         configureDiarization()
         configurePositionDiarization()
+        // Real-time speaker split: when the beam settles on a different talker,
+        // end the old speaker's realtime segment now and relabel existing rows.
+        // Detection lags the real switch by ~0.7s (0.4s smoother warm-up + 3
+        // confirmation samples at 10 Hz), so the new speaker's first fraction of a
+        // second lands in the old segment — same class of approximation as the
+        // existing time→char sentence split. No-op when the feature is off
+        // (positionDiarizer == nil → this optional-chain never installs anything).
+        // The realtime engine is modelLoader.nemotronASR (there is no `self.asr`
+        // property — `asr` is a local in beginCapture); flush() is a safe no-op
+        // when idle, and empty-text finals are already dropped in onTranscript.
+        positionDiarizer?.onClusterChange = { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.modelLoader.nemotronASR?.flush()  // end the old speaker's realtime segment now
+            self.rebuildDisplayRows()              // relabel existing rows' fills instantly
+        }
         // Optionally start each recording with a clean speaker store.
         if UserDefaults.standard.object(forKey: "diarization.resetOnStart") as? Bool ?? true {
             modelLoader.diarization?.resetProfiles()
@@ -693,16 +709,36 @@ final class AudioRecorder: ObservableObject {
                 positionLog("SKIP gap<0.75s [\(fmt3(a))..\(fmt3(b))]")
                 continue
             }
-            // ~25% coverage at ~10 Hz, floor 3. This is the density gate — a gap
-            // where ATND heard nothing returns nil and STAYS unknown.
-            let need = max(3, Int(0.25 * dur * 10))
-            let count = pos.sampleCount(in: a...b)
-            guard let (pid, pname) = pos.label(for: a...b, minSamples: need) else {
-                positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(count) need=\(need)")
+            // One fill PER TURN — a beam change mid-gap splits into multiple rows.
+            // The per-turn minSamples/minDuration inside `turns(...)` is the density
+            // gate: a gap where ATND heard nothing (or only flicker) yields no turns
+            // and STAYS unknown. (Replaces the old whole-gap `need` sample gate.)
+            var turns = pos.labeledTurns(in: a...b)
+            if turns.isEmpty {
+                let count = pos.sampleCount(in: a...b)
+                positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(count) no-turns")
                 continue
             }
-            positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(pid):\(pname) samples=\(count) need=\(need)")
-            fills.append((a, b, pid, pname))
+            // Boundary snapping — the 0.4s smoother swallows ~0.4s warm-up per
+            // utterance, so turns start/end a beat inside the real gap.
+            // Extend the first/last turn out to the gap edges when the reach is
+            // small; close small inter-turn holes at their midpoint. A hole larger
+            // than 1.0s is real ATND silence → leave it (stays UNKNOWN).
+            if turns[0].start - a <= 1.0 { turns[0].start = a }
+            let last = turns.count - 1
+            if b - turns[last].end <= 1.0 { turns[last].end = b }
+            for i in 0..<(turns.count - 1) {
+                let hole = turns[i + 1].start - turns[i].end
+                if hole > 0, hole <= 1.0 {
+                    let mid = (turns[i].end + turns[i + 1].start) / 2
+                    turns[i].end = mid
+                    turns[i + 1].start = mid
+                }
+            }
+            for t in turns {
+                positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(t.id):\(t.name) [\(fmt3(t.start))..\(fmt3(t.end))]")
+                fills.append((t.start, t.end, t.id, t.name))
+            }
         }
         return fills
     }
@@ -885,6 +921,14 @@ final class AudioRecorder: ObservableObject {
         // the window (pyannote if it has a turn there, else the ATND position
         // fill), so it doesn't drop back to UNKNOWN the moment it commits.
         if !seg.confirmed {
+            // A beam change split this window into multiple fills → split the live
+            // (unconfirmed) text into per-speaker rows too, so the switch shows in
+            // real time. A single fill (or none) stays one provisional row.
+            if filled.count > 1 {
+                return assignSentences(seg.text, window: window, ranges: filled,
+                                       segID: seg.id.uuidString, regions: regions,
+                                       confirmed: false)
+            }
             func overlap(_ r: (start: Double, end: Double, id: Int, name: String)) -> Double {
                 max(0, min(r.end, window.upperBound) - max(r.start, window.lowerBound))
             }
@@ -913,7 +957,8 @@ final class AudioRecorder: ObservableObject {
                                  window: ClosedRange<Double>,
                                  ranges: [(start: Double, end: Double, id: Int, name: String)],
                                  segID: String,
-                                 regions: [(start: Double, end: Double)]) -> [SpeakerUtterance] {
+                                 regions: [(start: Double, end: Double)],
+                                 confirmed: Bool = true) -> [SpeakerUtterance] {
         let sentences = splitSentences(text)
         guard !sentences.isEmpty else { return [] }
         let totalChars = max(1, sentences.reduce(0) { $0 + $1.count })
@@ -957,7 +1002,7 @@ final class AudioRecorder: ObservableObject {
             let overlapped = regions.contains { max($0.start, p.start) < min($0.end, p.end) }
             return SpeakerUtterance(id: "\(segID)-\(i)", speaker: p.name, speakerID: p.id,
                                     start: p.start, end: p.end, text: p.text,
-                                    confirmed: true, overlapped: overlapped)
+                                    confirmed: confirmed, overlapped: overlapped)
         }
     }
 
