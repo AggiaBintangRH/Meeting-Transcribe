@@ -868,10 +868,9 @@ final class AudioRecorder: ObservableObject {
                                      start: w?.lowerBound, end: w?.upperBound,
                                      text: seg.text, confirmed: true, overlapped: overlapped)]
         }
-        guard seg.confirmed, let window = seg.window else {
-            let w = seg.window
+        guard let window = seg.window else {
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: nil,
-                                     speakerID: nil, start: w?.lowerBound, end: w?.upperBound,
+                                     speakerID: nil, start: nil, end: nil,
                                      text: seg.text, confirmed: seg.confirmed)]
         }
         let ranges = speakerRanges(in: window)
@@ -879,6 +878,23 @@ final class AudioRecorder: ObservableObject {
         // labels (pyannote wins where it has a turn). Off/silent → fills is [].
         let fills = positionGapFill(window: window, covered: ranges)
         let filled = (ranges + fills).sorted { $0.start < $1.start }
+
+        // Unconfirmed (realtime) segments stay a single provisional row — the text
+        // isn't final, so it isn't sentence-split — but it must still carry the
+        // speaker the live view already showed. Label it with whoever dominates
+        // the window (pyannote if it has a turn there, else the ATND position
+        // fill), so it doesn't drop back to UNKNOWN the moment it commits.
+        if !seg.confirmed {
+            func overlap(_ r: (start: Double, end: Double, id: Int, name: String)) -> Double {
+                max(0, min(r.end, window.upperBound) - max(r.start, window.lowerBound))
+            }
+            let best = filled.max { overlap($0) < overlap($1) }
+            return [SpeakerUtterance(id: seg.id.uuidString, speaker: best?.name,
+                                     speakerID: best?.id, start: window.lowerBound,
+                                     end: window.upperBound, text: seg.text,
+                                     confirmed: false)]
+        }
+
         if filled.isEmpty {
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: nil,
                                      speakerID: nil, start: window.lowerBound,
