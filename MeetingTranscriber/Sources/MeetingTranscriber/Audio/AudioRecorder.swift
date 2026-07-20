@@ -109,6 +109,10 @@ final class AudioRecorder: ObservableObject {
     private var chunkFileByWindow: [Double: URL] = [:]
     private var sessionSpeakerIDs = Set<Int>()
     private var liveTurns: [DiarizationService.Turn] = []      // absolute-time turns collected so far
+    // Position-based diarization (ATND beam) — off unless atnd.position.enabled.
+    // Recorder-owned, one per session; nil means the feature is off and the
+    // pyannote path is byte-identical to before.
+    private var positionDiarizer: PositionDiarizer?
     private var diarElapsed: Double = 0                        // seconds since the last diar chunk
     private var lastDiarBoundary: Double = 0                   // recording-time where this diar chunk began
 
@@ -288,6 +292,7 @@ final class AudioRecorder: ObservableObject {
         diarElapsed = 0
         lastDiarBoundary = 0
         configureDiarization()
+        configurePositionDiarization()
         // Optionally start each recording with a clean speaker store.
         if UserDefaults.standard.object(forKey: "diarization.resetOnStart") as? Bool ?? true {
             modelLoader.diarization?.resetProfiles()
@@ -436,6 +441,9 @@ final class AudioRecorder: ObservableObject {
 
     private func stop() {
         stopped = true
+        // Stop ingesting beam notices, but KEEP the collected data — the final
+        // diarization pass still fuses against it via fusedTurns/label(for:).
+        positionDiarizer?.stop()
         modelLoader.nemotronASR?.flush() // finalize any trailing speech
         if modelLoader.chunkedASR != nil {
             pendingChunkWindows.append(lastChunkBoundary...max(recordingElapsed, lastChunkBoundary + 0.01))
@@ -575,8 +583,9 @@ final class AudioRecorder: ObservableObject {
                                             end: $0.end + windowStart,
                                             id: $0.id, name: $0.name)
                 }
-                self.liveTurns.append(contentsOf: absolute)
-                for turn in absolute { self.sessionSpeakerIDs.insert(turn.id) }
+                let fused = self.fusedTurns(absolute)
+                self.liveTurns.append(contentsOf: fused)
+                for turn in fused { self.sessionSpeakerIDs.insert(turn.id) }
                 self.speakerCount = self.sessionSpeakerIDs.count
                 self.rebuildDisplayRows()
                 // Tail-only stop mode: this chunk result IS the tail — complete the gate.
@@ -615,6 +624,53 @@ final class AudioRecorder: ObservableObject {
                 self.maybeStartOverlapRepair()
                 self.checkStopProcessingDone()
             }
+        }
+    }
+
+    // MARK: - Position diarization (ATND beam) fusion
+
+    /// Create + start the position diarizer for this session, but ONLY when the
+    /// feature is explicitly enabled AND the beam service is actually listening.
+    /// Otherwise leave it nil — `fusedTurns` is then an identity pass-through and
+    /// the pyannote path is byte-identical to before this feature existed.
+    private func configurePositionDiarization() {
+        positionDiarizer = nil
+        let d = UserDefaults.standard
+        guard d.bool(forKey: "atnd.position.enabled"),
+              ATNDBeamService.shared.state == .listening else { return }
+
+        let tauDeg = d.object(forKey: "atnd.position.tauDeg") as? Double ?? 15
+        let smoothingMs = d.object(forKey: "atnd.position.smoothingMs") as? Double ?? 400
+        let mode: PositionDiarizer.Mode =
+            (d.string(forKey: "atnd.position.mode") == "enrollment") ? .enrollment : .firstCome
+
+        let diarizer = PositionDiarizer()
+        diarizer.start(tauDeg: tauDeg,
+                       smoothingSec: smoothingMs / 1000,
+                       mode: mode,
+                       now: { [weak self] in self?.recordingElapsed ?? 0 })
+        positionDiarizer = diarizer
+    }
+
+    /// Keep pyannote's boundaries; swap in the position label when ATND had
+    /// enough samples during the turn, else keep pyannote's label. When the
+    /// feature is off (`positionDiarizer` nil) this returns its input unchanged.
+    private func fusedTurns(_ turns: [DiarizationService.Turn]) -> [DiarizationService.Turn] {
+        guard let pos = positionDiarizer else { return turns }
+        return turns.map { t in
+            let dur = t.end - t.start
+            // >=3 samples AND >=~30% coverage at 10 Hz.
+            let need = max(3, Int(0.3 * dur * 10))
+            let count = pos.sampleCount(in: t.start...t.end)
+            guard count >= need, let (pid, pname) = pos.label(for: t.start...t.end) else {
+                positionLog("FALLBACK turn=[\(fmt3(t.start))..\(fmt3(t.end))] "
+                            + "pyannote=\(t.id):\(t.name) samples=\(count) need=\(need)")
+                return t
+            }
+            positionLog("APPLIED  turn=[\(fmt3(t.start))..\(fmt3(t.end))] "
+                        + "pyannote=\(t.id):\(t.name) -> position=\(pid):\(pname) "
+                        + "samples=\(count) need=\(need)")
+            return DiarizationService.Turn(start: t.start, end: t.end, id: pid, name: pname)
         }
     }
 
@@ -731,8 +787,9 @@ final class AudioRecorder: ObservableObject {
 
     /// Final pass: the globally-clustered turns replace the running live set.
     private func applyFinalSpeakers(_ turns: [DiarizationService.Turn]) {
-        speakerCount = Set(turns.map(\.id)).count
-        liveTurns = turns
+        let fused = fusedTurns(turns)
+        speakerCount = Set(fused.map(\.id)).count
+        liveTurns = fused
         rebuildDisplayRows()
     }
 
@@ -913,7 +970,13 @@ final class AudioRecorder: ObservableObject {
 
     /// Rename a speaker profile and refresh all its rows in the transcript.
     func renameSpeaker(id: Int, to name: String) {
-        SpeakerProfileStore.rename(id: id, to: name)
+        // Position ids are disjoint (>= positionIDBase) and must NEVER reach the
+        // Python-owned SpeakerProfileStore — route them to the position diarizer.
+        if id >= PositionDiarizer.positionIDBase {
+            positionDiarizer?.rename(clusterID: id - PositionDiarizer.positionIDBase, to: name)
+        } else {
+            SpeakerProfileStore.rename(id: id, to: name)
+        }
         liveTurns = liveTurns.map {
             $0.id == id
                 ? DiarizationService.Turn(start: $0.start, end: $0.end, id: $0.id, name: name)
@@ -1460,6 +1523,23 @@ final class AudioRecorder: ObservableObject {
         let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("overlap-repair-decisions.log")
+        if !FileManager.default.fileExists(atPath: file.path) {
+            FileManager.default.createFile(atPath: file.path, contents: nil)
+        }
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let line = "[\(stamp)] \(message)\n"
+        guard let handle = try? FileHandle(forWritingTo: file) else { return }
+        handle.seekToEndOfFile()
+        if let data = line.data(using: .utf8) { handle.write(data) }
+        try? handle.close()
+    }
+
+    /// Append a line to logs/position-diarization.log (position-fusion decisions).
+    /// Mirrors overlapLog: one APPLIED/FALLBACK line per fused turn.
+    private func positionLog(_ message: String) {
+        let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("position-diarization.log")
         if !FileManager.default.fileExists(atPath: file.path) {
             FileManager.default.createFile(atPath: file.path, contents: nil)
         }
