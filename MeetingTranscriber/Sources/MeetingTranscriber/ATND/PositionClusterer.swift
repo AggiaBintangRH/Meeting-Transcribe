@@ -240,8 +240,9 @@ struct PositionClusterer {
 struct ClusterChangeDetector {
     /// How many consecutive same-new-cluster samples confirm a change (~0.3s at 10 Hz).
     var consecutiveRequired = 3
-    /// Minimum seconds between fires — don't fight the VAD flush cadence.
-    var minIntervalSec = 2.0
+    /// Minimum seconds between fires — keeps a jittery existing-cluster oscillation
+    /// from thrashing the display, while still allowing ~1 s speaker turns.
+    var minIntervalSec = 0.6
 
     private var stableCluster: Int?
     private var candidate: Int?
@@ -280,6 +281,20 @@ struct ClusterChangeDetector {
         stableCluster = clusterID
         candidate = nil
         candidateCount = 0
+        lastFired = t
+        return true
+    }
+
+    /// Switch the stable cluster IMMEDIATELY, with no confirmation or rate-limit —
+    /// for a brand-new direction (outside every stored speaker's range), which is
+    /// an unambiguous new speaker, not jitter. Returns true to fire, except for the
+    /// very first speaker of the session (nothing to split from).
+    mutating func forceChange(to clusterID: Int, at t: Double) -> Bool {
+        candidate = nil
+        candidateCount = 0
+        let hadStable = stableCluster != nil
+        stableCluster = clusterID
+        guard hadStable else { return false }
         lastFired = t
         return true
     }

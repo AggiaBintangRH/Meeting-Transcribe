@@ -111,9 +111,15 @@ final class PositionDiarizer: ObservableObject {
             let result = clusterer.assign(sample)
             if result.isNew {
                 assignName(clusterID: result.clusterID)
-            }
-            // Real-time row split: fire on a confirmed switch to a different cluster.
-            if changeDetector.push(t: sample.t, clusterID: result.clusterID) {
+                // A direction outside every stored speaker's range is a new
+                // speaker — switch the row immediately, no debounce, so a short
+                // (~1 s) turn to a new direction isn't swallowed by the rate limit.
+                if changeDetector.forceChange(to: result.clusterID, at: sample.t) {
+                    onClusterChange?()
+                }
+            } else if changeDetector.push(t: sample.t, clusterID: result.clusterID) {
+                // Switch back to a KNOWN speaker: confirmed + rate-limited, so
+                // jitter between two nearby stored speakers can't thrash the rows.
                 onClusterChange?()
             }
         }

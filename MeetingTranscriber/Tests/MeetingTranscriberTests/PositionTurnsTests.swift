@@ -90,7 +90,7 @@ final class PositionTurnsTests: XCTestCase {
     // MARK: - 5. ClusterChangeDetector confirmation, rate-limit, first-cluster
 
     func testClusterChangeDetector() {
-        var d = ClusterChangeDetector()   // consecutiveRequired 3, minIntervalSec 2.0
+        var d = ClusterChangeDetector()   // consecutiveRequired 3, minIntervalSec 0.6
 
         // First stable cluster never fires.
         XCTAssertFalse(d.push(t: 0.0, clusterID: 0))
@@ -100,13 +100,30 @@ final class PositionTurnsTests: XCTestCase {
         // Third consecutive → fire.
         XCTAssertTrue(d.push(t: 0.3, clusterID: 1))
 
-        // A rapid second change is suppressed by minIntervalSec (t - 0.3 < 2.0).
+        // A rapid second change is suppressed by minIntervalSec (t - 0.3 < 0.6).
         XCTAssertFalse(d.push(t: 0.4, clusterID: 2))
         XCTAssertFalse(d.push(t: 0.5, clusterID: 2))
         XCTAssertFalse(d.push(t: 0.6, clusterID: 2))   // confirmed but rate-limited
 
         // Once the interval passes, the still-building candidate fires.
-        XCTAssertTrue(d.push(t: 2.4, clusterID: 2))
+        XCTAssertTrue(d.push(t: 1.0, clusterID: 2))
+    }
+
+    func testForceChangeFiresImmediatelyExceptFirst() {
+        var d = ClusterChangeDetector()
+
+        // The very first speaker establishes silently — nothing to split from.
+        XCTAssertFalse(d.forceChange(to: 0, at: 0.0))
+        // A brand-new direction fires immediately, no confirmation, no rate limit.
+        XCTAssertTrue(d.forceChange(to: 1, at: 1.0))
+        // Another new direction ~1 s later still fires immediately — this is the
+        // case that the 0.6 s push() rate-limit alone would have swallowed.
+        XCTAssertTrue(d.forceChange(to: 2, at: 2.0))
+        // Even back-to-back (no debounce on a genuinely new cluster).
+        XCTAssertTrue(d.forceChange(to: 3, at: 2.1))
+        // After a force to cluster 2, staying on 2 via push() does not re-fire.
+        _ = d.forceChange(to: 2, at: 3.0)
+        XCTAssertFalse(d.push(t: 3.1, clusterID: 2))
     }
 
     func testDetectorResetClearsStableCluster() {
