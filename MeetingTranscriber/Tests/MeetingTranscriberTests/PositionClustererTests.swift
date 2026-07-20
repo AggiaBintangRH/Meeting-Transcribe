@@ -164,4 +164,28 @@ final class PositionClustererTests: XCTestCase {
         // Same azimuth, 40° elevation gap → φ must contribute → two clusters.
         XCTAssertEqual(c.clusters.count, 2)
     }
+
+    // MARK: - 8. Smoother keeps emitting under an accumulated (non-exact) clock
+
+    func testSmootherKeepsEmittingUnderAccumulatedClock() {
+        // Reproduces the real recording clock: recordingElapsed += 4096/48000
+        // per audio buffer. The old buffer-span gate locked the filter silent a
+        // couple of seconds in; the elapsed-time gate must not.
+        var s = DirectionSmoother(windowSec: 0.4)
+        let v = PositionMath.unitVector(rotateDeg: 156, angleDeg: 48)
+        let step = 4096.0 / 48000.0   // ~0.0853s, a non-dyadic fraction
+        var t = 0.0
+        var emittedAfter2s = 0
+        var totalAfter2s = 0
+        for _ in 0..<400 {            // ~34s of stream
+            let out = s.push(t: t, vector: v)
+            if t > 2.0 {
+                totalAfter2s += 1
+                if out != nil { emittedAfter2s += 1 }
+            }
+            t += step
+        }
+        // A stationary talker past warm-up must emit on essentially every push.
+        XCTAssertGreaterThan(Double(emittedAfter2s) / Double(totalAfter2s), 0.95)
+    }
 }

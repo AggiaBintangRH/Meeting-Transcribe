@@ -37,6 +37,14 @@ struct DirectionSmoother {
     var windowSec: Double = 0.4
 
     private var buffer: [DirectionSample] = []
+    /// Time of the first sample since the last reset/gap. The warm-up gate
+    /// measures elapsed time from here, NOT the span of the surviving buffer:
+    /// that span only reaches `windowSec` when a sample lands exactly on the
+    /// trailing-window cutoff, which an accumulated (non-exact) clock like
+    /// `recordingElapsed` essentially never does — using it locks the filter
+    /// silent a couple of seconds into a real recording. Elapsed time is
+    /// monotonic, so it crosses the threshold once and stays crossed.
+    private var windowStart: Double?
 
     init(windowSec: Double = 0.4) {
         self.windowSec = windowSec
@@ -46,7 +54,9 @@ struct DirectionSmoother {
         // A gap larger than the window means the stream broke — start fresh.
         if let last = buffer.last, t - last.t > windowSec {
             buffer.removeAll(keepingCapacity: true)
+            windowStart = nil
         }
+        if windowStart == nil { windowStart = t }
         buffer.append(DirectionSample(t: t, vector: vector))
 
         // Drop anything older than the trailing window.
@@ -55,10 +65,10 @@ struct DirectionSmoother {
             buffer.removeFirst()
         }
 
-        // Need at least 3 samples that actually span the full window.
+        // Warm up for a full window after a reset/gap, then emit whenever the
+        // trailing window holds enough samples for a stable median.
         guard buffer.count >= 3,
-              let first = buffer.first, let last = buffer.last,
-              last.t - first.t >= windowSec else {
+              let start = windowStart, t - start >= windowSec else {
             return nil
         }
 
@@ -68,12 +78,13 @@ struct DirectionSmoother {
         let med = SIMD3<Double>(Self.median(xs), Self.median(ys), Self.median(zs))
         let len = simd_length(med)
         // Degenerate (opposing vectors cancelling) → fall back to the newest.
-        let unit = len > 1e-9 ? med / len : last.vector
+        let unit = len > 1e-9 ? med / len : vector
         return DirectionSample(t: t, vector: unit)
     }
 
     mutating func reset() {
         buffer.removeAll(keepingCapacity: true)
+        windowStart = nil
     }
 
     private static func median(_ sorted: [Double]) -> Double {

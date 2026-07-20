@@ -22,6 +22,8 @@ Usage:
     python3 scripts/atnd1061-multicast-simulator.py
     python3 scripts/atnd1061-multicast-simulator.py --group 239.0.0.100 --port 17000
     python3 scripts/atnd1061-multicast-simulator.py --source-ip 192.168.1.50
+    python3 scripts/atnd1061-multicast-simulator.py --switch-jitter 8   # settle after switch
+    python3 scripts/atnd1061-multicast-simulator.py --beam-override 2:33:200  # move a beam
 """
 from __future__ import annotations
 
@@ -32,7 +34,7 @@ import select
 import socket
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 CR = b"\x0d"
 
@@ -89,22 +91,52 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beams", default="",
                    help="Beams active at startup, e.g. 1 or 1,2 (two = overlap). "
                         "Needed when there is no terminal to press keys in.")
+    p.add_argument("--switch-jitter", type=int, default=0, metavar="N",
+                   help="For N samples after the active beam set changes, widen the "
+                        "talker-direction noise (models the array settling after a "
+                        "talker switch) so the diarizer's smoothing can be exercised.")
+    p.add_argument("--beam-override", action="append", default=[], metavar="CH:ANGLE:ROTATE",
+                   help="Redefine a beam's direction, e.g. 2:33:200. Repeatable. "
+                        "Use it to place two beams at nearly the same bearing and test "
+                        "the merge threshold.")
     return p.parse_args()
+
+
+def apply_overrides(specs: list[str]) -> None:
+    """Rewrite BEAMS[key] angle/rotate from CH:ANGLE:ROTATE specs."""
+    for spec in specs:
+        parts = spec.split(":")
+        if len(parts) != 3:
+            raise SystemExit(f"--beam-override: {spec!r} must be CH:ANGLE:ROTATE")
+        key, angle_s, rotate_s = (p.strip() for p in parts)
+        if key not in BEAMS:
+            raise SystemExit(f"--beam-override: beam {key!r} is not 1-6")
+        try:
+            angle, rotate = int(angle_s), int(rotate_s)
+        except ValueError:
+            raise SystemExit(f"--beam-override: {spec!r} angle/rotate must be integers")
+        if not (0 <= angle <= 90 and 0 <= rotate <= 360):
+            raise SystemExit(f"--beam-override: {spec!r} angle 0-90, rotate 0-360")
+        BEAMS[key] = replace(BEAMS[key], angle=angle, rotate=rotate)
 
 
 def clamp(value: int, lo: int, hi: int) -> int:
     return min(hi, max(lo, value))
 
 
-def camera_notice(active: list[Beam]) -> bytes:
+def camera_notice(active: list[Beam], jitter: bool = False) -> bytes:
     """Talker position. Reports ONE speaker even when several are active —
-    the real array picks a single target for the camera to point at."""
+    the real array picks a single target for the camera to point at.
+
+    `jitter=True` widens the per-sample noise, modelling the array settling
+    for a few samples right after a talker switch."""
     if not active:
         payload = "0,,,,"
     else:
         b = active[0]  # dominant talker
-        angle = clamp(b.angle + random.randint(-2, 2), 0, 90)
-        rotate = (b.rotate + random.randint(-3, 3)) % 360
+        a_amp, r_amp = (15, 20) if jitter else (2, 3)
+        angle = clamp(b.angle + random.randint(-a_amp, a_amp), 0, 90)
+        rotate = (b.rotate + random.randint(-r_amp, r_amp)) % 360
         payload = f"1,{b.channel},{angle},{rotate},{b.camera}"
     return f"MD camera_control_notice 0000 00 NC {payload}".encode() + CR
 
@@ -196,6 +228,10 @@ def main() -> int:
     if args.no_levels and args.no_talker:
         raise SystemExit("--no-levels and --no-talker together would send nothing")
 
+    if args.switch_jitter < 0:
+        raise SystemExit("--switch-jitter must be 0 or more")
+    apply_overrides(args.beam_override)
+
     sock = make_socket(args.source_ip, args.ttl)
     destination = (args.group, args.port)
 
@@ -223,6 +259,7 @@ def main() -> int:
 
     next_send = 0.0
     send_state: dict = {}
+    jitter_left = 0   # samples of widened noise still owed after a switch
     with key_reader() as read_key:
         while True:
             now = time.monotonic()
@@ -232,6 +269,7 @@ def main() -> int:
                 return 0
             if key == "0":
                 active = []
+                jitter_left = args.switch_jitter
                 print(f"  {status_line(active)}")
             elif key in BEAMS:
                 beam = BEAMS[key]
@@ -239,11 +277,15 @@ def main() -> int:
                     active.remove(beam)
                 else:
                     active.append(beam)
+                jitter_left = args.switch_jitter
                 print(f"  {status_line(active)}")
 
             if now >= next_send:
                 if not args.no_talker:
-                    send(sock, camera_notice(active), destination, send_state)
+                    send(sock, camera_notice(active, jitter=jitter_left > 0),
+                         destination, send_state)
+                    if jitter_left > 0:
+                        jitter_left -= 1
                 if not args.no_levels:
                     send(sock, level_notice(active), destination, send_state)
                 next_send = now + args.interval
