@@ -3,46 +3,61 @@ import SwiftUI
 /// Top-right status chips: RMS meter, ATND, recording state.
 struct StatusChipsView: View {
     @ObservedObject var recorder: AudioRecorder
+    @ObservedObject private var beam = ATNDBeamService.shared
 
     private var isRecording: Bool { recorder.state == .recording }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             chip {
                 Image(systemName: "waveform")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(Theme.teal)
-                Text("RMS \(String(format: "%.4f", recorder.rms))")
-                    .font(.system(size: 11, weight: .bold).monospaced())
-                    .foregroundColor(Theme.textBody)
+                label("RMS", dim: true)
+                label(String(format: "%.4f", recorder.rms), color: Theme.textBody)
             }
             vadChip
-            chip {
-                Image(systemName: "person.2.fill")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(recorder.speakerCount != nil ? Theme.teal : Theme.textDim)
-                if recorder.diarizing {
-                    Text("ATND …")
-                        .font(.system(size: 11, weight: .bold).monospaced())
-                        .foregroundColor(Theme.textSecondary)
-                } else if let count = recorder.speakerCount {
-                    Text("ATND \(count)")
-                        .font(.system(size: 11, weight: .heavy).monospaced())
-                        .foregroundColor(Theme.textBright)
-                } else {
-                    Text("ATND –")
-                        .font(.system(size: 11, weight: .bold).monospaced())
-                        .foregroundColor(Theme.textDim)
-                }
-            }
+            atndChip
             chip {
                 Circle()
                     .fill(isRecording ? Theme.red : Theme.teal)
                     .frame(width: 7, height: 7)
-                Text(isRecording ? "REC" : "IDLE")
-                    .font(.system(size: 11, weight: .heavy).monospaced())
-                    .foregroundColor(Theme.textBright)
+                label(isRecording ? "REC" : "IDLE", weight: .heavy, color: Theme.textBright)
             }
+        }
+    }
+
+    /// Live beam data from the ATND1061's multicast stream: which beam channel
+    /// is speaking, and where it points. Independent of recording.
+    private var atndChip: some View {
+        chip {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(beam.talker != nil ? Theme.teal : Theme.textDim)
+
+            // Channel reads bright, its bearing sits back — the beam is the
+            // fact, the angles are the detail.
+            if let t = beam.talker, case .listening = beam.state {
+                label("CH\(t.channel)", weight: .heavy, color: Theme.teal)
+                label(String(format: "%2d° %3d°", t.elevation, t.rotation),
+                      color: Theme.textSubtle)
+            } else {
+                label("ATND", dim: true)
+                label("–", dim: true)
+            }
+        }
+        .frame(minWidth: 104, alignment: .leading)
+        .animation(.easeOut(duration: 0.15), value: beam.talker)
+        .help(atndHelp)
+    }
+
+    /// The chip is too small to show a failure inline — surface it on hover.
+    private var atndHelp: String {
+        switch beam.state {
+        case .failed(let message):  return message
+        case .listening:            return "Listening for ATND1061 beam notices."
+        case .waitingForControl:    return "Waiting for the TCP connection — the array only sends beam data once connected. Connect in Settings → ATND."
+        case .off:                  return "ATND1061 is off — enable it in Settings → ATND."
         }
     }
 
@@ -53,31 +68,43 @@ struct StatusChipsView: View {
                 Image(systemName: "person.wave.2")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(Theme.textDim)
-                Text("VAD –")
-                    .font(.system(size: 11, weight: .bold).monospaced())
-                    .foregroundColor(Theme.textDim)
+                label("VAD", dim: true)
+                label("–", dim: true)
             } else if !recorder.vadEnabled {
                 Image(systemName: "person.wave.2")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(Theme.textDim)
-                Text("VAD OFF")
-                    .font(.system(size: 11, weight: .bold).monospaced())
-                    .foregroundColor(Theme.textDim)
+                label("VAD", dim: true)
+                label("OFF", dim: true)
             } else {
                 VoiceBars(level: recorder.rms, active: recorder.isSpeaking)
-                Text(recorder.isSpeaking ? "TALKING" : "SILENT")
-                    .font(.system(size: 11, weight: .heavy).monospaced())
-                    .foregroundColor(recorder.isSpeaking ? Theme.teal : Theme.textSubtle)
+                label(recorder.isSpeaking ? "TALKING" : "SILENT",
+                      weight: .heavy,
+                      color: recorder.isSpeaking ? Theme.teal : Theme.textSubtle)
             }
         }
+        .frame(minWidth: 96, alignment: .leading)
         .animation(.easeOut(duration: 0.15), value: recorder.isSpeaking)
+    }
+
+    /// Chip text. Every label refuses to wrap or shrink — without this the
+    /// row silently breaks "IDLE" into "IDL/E" once the window gets narrow.
+    private func label(_ text: String,
+                       weight: Font.Weight = .bold,
+                       dim: Bool = false,
+                       color: Color? = nil) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: weight).monospaced())
+            .foregroundColor(color ?? (dim ? Theme.textDim : Theme.textBody))
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     private func chip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         HStack(spacing: 6) { content() }
             .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.chip))
+            .frame(height: 30)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.chip))
     }
 }
 

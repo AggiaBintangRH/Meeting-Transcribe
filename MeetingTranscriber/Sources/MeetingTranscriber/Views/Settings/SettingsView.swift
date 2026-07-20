@@ -8,22 +8,34 @@ struct SettingsView: View {
     enum Section: String, CaseIterable {
         case models = "Models"
         case microphone = "Microphone"
+        case atnd = "ATND"
 
         var icon: String {
             switch self {
             case .models: return "cpu"
             case .microphone: return "mic.fill"
+            case .atnd: return "antenna.radiowaves.left.and.right"
+            }
+        }
+
+        /// Header line under the section title (sections with sub-tabs use theirs).
+        var subtitle: String {
+            switch self {
+            case .models, .atnd: return ""
+            case .microphone: return "Input device and channel selection"
             }
         }
     }
 
     // Sub-tabs inside Models
-    enum ModelTab: String, CaseIterable {
+    enum ModelTab: String, CaseIterable, SettingsSubTab {
         case realtime = "Realtime"
         case chunked = "Chunked"
         case vad = "VAD"
         case diarization = "Diarization"
         case overlap = "Overlap"
+
+        var title: String { rawValue }
 
         var icon: String {
             switch self {
@@ -46,8 +58,31 @@ struct SettingsView: View {
         }
     }
 
+    // Sub-tabs inside ATND
+    enum ATNDSubTab: String, CaseIterable, SettingsSubTab {
+        case connection = "Connection"
+        case command = "Command"
+
+        var title: String { rawValue }
+
+        var icon: String {
+            switch self {
+            case .connection: return "network"
+            case .command: return "terminal.fill"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .connection: return "ATND1061 beamforming array — beam and talker data over IP"
+            case .command: return "Send IP control commands to the array"
+            }
+        }
+    }
+
     @State private var section: Section = .models
     @State private var modelTab: ModelTab = .realtime
+    @State private var atndTab: ATNDSubTab = .connection
     @Namespace private var tabIndicator
 
     var body: some View {
@@ -125,17 +160,22 @@ struct SettingsView: View {
                 Text(section.rawValue)
                     .font(.system(size: 18, weight: .bold))
                     .foregroundColor(Theme.textPrimary)
-                Text(section == .models ? modelTab.subtitle : "Input device and channel selection")
+                Text(headerSubtitle)
                     .font(.system(size: 12))
                     .foregroundColor(Theme.textDim)
                     .animation(.none, value: modelTab)
+                    .animation(.none, value: atndTab)
             }
             .padding(.horizontal, 24)
             .padding(.top, 20)
             .padding(.bottom, 14)
 
             if section == .models {
-                subTabBar
+                SubTabBar(selection: $modelTab, geometryID: "activeModelTab", namespace: tabIndicator)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 16)
+            } else if section == .atnd {
+                SubTabBar(selection: $atndTab, geometryID: "activeATNDTab", namespace: tabIndicator)
                     .padding(.horizontal, 24)
                     .padding(.bottom, 16)
             }
@@ -155,51 +195,32 @@ struct SettingsView: View {
                         }
                     case .microphone:
                         MicrophoneTab()
+                    case .atnd:
+                        switch atndTab {
+                        case .connection: ATNDConnectionTab()
+                        case .command:    ATNDCommandTab()
+                        }
                     }
                 }
                 .padding(24)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .id("\(section)-\(modelTab)") // re-render for transition
+                .id("\(section)-\(modelTab)-\(atndTab)") // re-render for transition
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
             .animation(.spring(response: 0.32, dampingFraction: 0.86), value: modelTab)
+            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: atndTab)
             .animation(.spring(response: 0.32, dampingFraction: 0.86), value: section)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.bg)
     }
 
-    private var subTabBar: some View {
-        HStack(spacing: 4) {
-            ForEach(ModelTab.allCases, id: \.self) { t in
-                Button(action: {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { modelTab = t }
-                }) {
-                    HStack(spacing: 7) {
-                        Image(systemName: t.icon)
-                            .font(.system(size: 11, weight: .bold))
-                        Text(t.rawValue)
-                            .font(.system(size: 12, weight: .bold))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                    .foregroundColor(modelTab == t ? Theme.selectedTabText : Theme.textMuted)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .frame(maxWidth: .infinity)
-                    .background {
-                        if modelTab == t {
-                            RoundedRectangle(cornerRadius: 9)
-                                .fill(Theme.teal)
-                                .matchedGeometryEffect(id: "activeTab", in: tabIndicator)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
+    /// Sections with sub-tabs show the active sub-tab's subtitle.
+    private var headerSubtitle: String {
+        switch section {
+        case .models: return modelTab.subtitle
+        case .atnd:   return atndTab.subtitle
+        default:      return section.subtitle
         }
-        .padding(4)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.chip.opacity(0.6)))
     }
 }

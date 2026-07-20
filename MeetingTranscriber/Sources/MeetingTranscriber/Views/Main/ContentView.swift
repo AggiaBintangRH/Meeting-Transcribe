@@ -18,6 +18,10 @@ struct ContentView: View {
             if recorder.state == .preparing || recorder.modelLoader.failureMessage != nil {
                 LoadingOverlayView(loader: recorder.modelLoader)
             }
+
+            if recorder.state == .processing {
+                ProcessingOverlayView(recorder: recorder)
+            }
         }
         .animation(.easeOut(duration: 0.2), value: recorder.state)
         .background(Theme.bg)

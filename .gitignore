@@ -38,12 +38,13 @@ hf_cache/
 # Torch
 torch_cache/
 
-# Model folders
-models/
-checkpoints/
-weights/
-pretrained_models/
-downloads/
+# Model folders (root-anchored: unanchored "models/" also matched
+# Sources/MeetingTranscriber/Models/ on case-insensitive macOS)
+/models/
+/checkpoints/
+/weights/
+/pretrained_models/
+/downloads/
 
 # Audio
 *.wav

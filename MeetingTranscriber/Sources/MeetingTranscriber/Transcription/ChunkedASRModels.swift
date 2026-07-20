@@ -48,6 +48,15 @@ final class VoxtralMiniModel: ChunkedASRModel {
     }
 }
 
+/// Granite Speech 4.1 2B NAR — English/French/German/Spanish/Portuguese only.
+final class GraniteSpeechModel: ChunkedASRModel {
+    let info = ModelCatalog.chunkedModel(id: "granite")
+    var repoID: String { info.hfRepo }
+
+    /// generate() has no language parameter (swallowed by **kwargs) — never send one.
+    func languageArgument(for code: String) -> String? { nil }
+}
+
 // MARK: - Factory
 
 enum ChunkedASRModelFactory {
@@ -56,6 +65,7 @@ enum ChunkedASRModelFactory {
         switch UserDefaults.standard.string(forKey: "chunked.model") ?? "qwen3" {
         case "whisper": return WhisperLargeV3Model()
         case "voxtral": return VoxtralMiniModel()
+        case "granite": return GraniteSpeechModel()
         default:        return Qwen3ASRModel()
         }
     }

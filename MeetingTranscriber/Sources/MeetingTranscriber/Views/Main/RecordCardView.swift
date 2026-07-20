@@ -9,17 +9,19 @@ struct RecordCardView: View {
 
     private var title: String {
         switch recorder.state {
-        case .idle:      return "Ready to record"
-        case .preparing: return "Loading models…"
-        case .recording: return "Recording…"
+        case .idle:       return "Ready to record"
+        case .preparing:  return "Loading models…"
+        case .recording:  return "Recording…"
+        case .processing: return "Finishing up…"
         }
     }
 
     private var buttonLabel: String {
         switch recorder.state {
-        case .idle:      return "START RECORDING"
-        case .preparing: return "LOADING…"
-        case .recording: return "STOP RECORDING"
+        case .idle:       return "START RECORDING"
+        case .preparing:  return "LOADING…"
+        case .recording:  return "STOP RECORDING"
+        case .processing: return "PROCESSING…"
         }
     }
 
@@ -49,7 +51,7 @@ struct RecordCardView: View {
                 }
             }
             .buttonStyle(.plain)
-            .disabled(isPreparing)
+            .disabled(isPreparing || recorder.state == .processing)
 
             Text(buttonLabel)
                 .font(.system(size: 12, weight: .heavy))

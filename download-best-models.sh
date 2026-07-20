@@ -252,7 +252,7 @@ else
 fi
 
 # -------------------------------------------------------------
-# 2. CHUNKED ASR (selectable — all 3 downloaded for A/B testing)
+# 2. CHUNKED ASR (selectable — all 4 downloaded for A/B testing)
 # -------------------------------------------------------------
 dl "mlx-community/Qwen3-ASR-1.7B-bf16" "Qwen3-ASR 1.7B (MLX bf16)"
 dl "mlx-community/whisper-large-v3-mlx" "Whisper large-v3 (MLX fp16)"
@@ -264,6 +264,8 @@ echo "==> Installing mlx-whisper (Whisper MLX runtime)..."
 pipi "mlx-whisper" || FAILED+=("mlx-whisper install")
 # Voxtral: Transcribe 2 batch model is API-only; open weights = 4B Realtime 2602
 dl "mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16" "Voxtral Mini 4B Realtime 2602 (MLX fp16)"
+# Granite Speech 4.1 2B NAR: EN/FR/DE/ES/PT ONLY — no Indonesian (English A/B option)
+dl "mlx-community/granite-speech-4.1-2b-nar-mlx" "Granite Speech 4.1 2B NAR (MLX bf16)"
 
 # -------------------------------------------------------------
 # 3. DIARIZATION — pyannote community-1 (PyTorch MPS)
@@ -499,7 +501,7 @@ EOF
 # End-to-end test of every chunked model exactly like the app's sidecar:
 # load + transcribe 0.5s of silence. If these pass, the app works.
 echo ""
-echo "==> Verifying chunked models end-to-end (Whisper via mlx-whisper, Qwen3 via mlx-audio)..."
+echo "==> Verifying chunked models end-to-end (Whisper via mlx-whisper, Qwen3 + Granite via mlx-audio)..."
 HF_HUB_OFFLINE=1 "$PY" - <<'EOF'
 import numpy as np, tempfile, wave, os, sys, traceback
 
@@ -535,6 +537,19 @@ try:
     print("   OK: Qwen3-ASR 1.7B (mlx-audio) loads and transcribes")
 except Exception:
     print("   FAILED: Qwen3-ASR — full traceback:")
+    traceback.print_exc(file=sys.stdout)
+    failed = True
+
+# 3. Granite Speech 4.1 2B NAR via mlx-audio
+try:
+    from mlx_audio.stt import load
+    model = load("mlx-community/granite-speech-4.1-2b-nar-mlx")
+    path = silence_wav()
+    model.generate(path)
+    os.unlink(path)
+    print("   OK: Granite Speech 4.1 NAR (mlx-audio) loads and transcribes")
+except Exception:
+    print("   FAILED: Granite Speech 4.1 NAR — full traceback:")
     traceback.print_exc(file=sys.stdout)
     failed = True
 

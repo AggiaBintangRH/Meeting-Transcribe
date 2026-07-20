@@ -7,7 +7,7 @@ import Foundation
 @MainActor
 final class AudioRecorder: ObservableObject {
 
-    enum State { case idle, preparing, recording }
+    enum State { case idle, preparing, recording, processing }
 
     @Published var state: State = .idle
     @Published var rms: Float = 0.0
@@ -59,6 +59,9 @@ final class AudioRecorder: ObservableObject {
 
     // Diarization (runs after the recording ends)
     @Published var diarizing = false
+    /// Still written by the diarization passes below, but no view reads it
+    /// since the ATND status chip was changed to show live beam data
+    /// (StatusChipsView, 2026-07-17). Kept as the diarization result count.
     @Published var speakerCount: Int?
     @Published var diarizationError: String?
 
@@ -67,12 +70,25 @@ final class AudioRecorder: ObservableObject {
     @Published var overlapRepairProgress: String?
     @Published var overlapRepairError: String?
 
+    /// One line in the processing overlay — a leg of the post-stop work.
+    /// Reuses `ModelLoader.ItemState` for the icons; the loader itself doesn't
+    /// fit here (its `loadAll` runs one item at a time, these run concurrently).
+    struct StopStep: Identifiable, Equatable {
+        let id: String            // "chunk" | "diarize" | "repair"
+        let name: String
+        var state: ModelLoader.ItemState
+    }
+
+    @Published private(set) var stopSteps: [StopStep] = []
+
     // Gating for the "wait for last chunk AND diarization final" sequencing.
     private var stopped = false
     private var finalDiarDone = false
     private var lastChunkDone = false
     private var awaitingTailWindowStart: Double? = nil
     private var diarTailWatchdog: Task<Void, Never>?
+    private var finalDiarWatchdog: Task<Void, Never>?
+    private var stopWatchdog: Task<Void, Never>?
     private var repairTask: Task<Void, Never>?
 
     private var chunkElapsed: Double = 0      // seconds since last chunk flush
@@ -116,9 +132,10 @@ final class AudioRecorder: ObservableObject {
 
     func toggle() {
         switch state {
-        case .idle:      start()
-        case .recording: stop()
-        case .preparing: break // ignore taps while loading
+        case .idle:       start()
+        case .recording:  stop()
+        case .preparing:  break // ignore taps while loading
+        case .processing: break // ignore taps while the stop work finishes
         }
     }
 
@@ -258,6 +275,11 @@ final class AudioRecorder: ObservableObject {
         awaitingTailWindowStart = nil
         diarTailWatchdog?.cancel()
         diarTailWatchdog = nil
+        finalDiarWatchdog?.cancel()
+        finalDiarWatchdog = nil
+        stopWatchdog?.cancel()
+        stopWatchdog = nil
+        stopSteps = []
         // Fresh per-session speaker state, then wire the live/final callbacks.
         chunkFileByWindow = [:]
         sessionSpeakerIDs = []
@@ -415,9 +437,15 @@ final class AudioRecorder: ObservableObject {
     private func stop() {
         stopped = true
         modelLoader.nemotronASR?.flush() // finalize any trailing speech
-        pendingChunkWindows.append(lastChunkBoundary...max(recordingElapsed, lastChunkBoundary + 0.01))
-        lastChunkBoundary = recordingElapsed
-        startChunkFlush(modelLoader.chunkedASR) // transcribe the last partial chunk
+        if modelLoader.chunkedASR != nil {
+            pendingChunkWindows.append(lastChunkBoundary...max(recordingElapsed, lastChunkBoundary + 0.01))
+            lastChunkBoundary = recordingElapsed
+            startChunkFlush(modelLoader.chunkedASR) // transcribe the last partial chunk
+        } else {
+            // Nothing would ever drain a queued window without a chunked model,
+            // so don't queue one — the gate has to complete here instead.
+            lastChunkDone = true
+        }
         engine?.inputNode.removeTap(onBus: 0)
         engine?.stop()
         engine = nil
@@ -425,13 +453,18 @@ final class AudioRecorder: ObservableObject {
         vad = nil
         rms = 0
         isSpeaking = false
-        state = .idle
 
         // Who spoke when — either append a tail (continue from live labels) or
         // re-diarize the whole recording (best global clustering).
         let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
         let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? true
         let willRunStopPass = finalOn && modelLoader.diarization != nil
+
+        // Everything below lands asynchronously; block the controls until it does.
+        buildStopSteps(willRunStopPass: willRunStopPass)
+        state = .processing
+        startStopWatchdog()
+
         if willRunStopPass {
             if continueOnStop {
                 diarizeTailChunk()
@@ -439,6 +472,7 @@ final class AudioRecorder: ObservableObject {
                 startDiarization(recording)
             } else {
                 finalDiarDone = true
+                setStopStep("diarize", .done)
                 maybeStartOverlapRepair()
             }
         } else {
@@ -446,6 +480,79 @@ final class AudioRecorder: ObservableObject {
             finalDiarDone = true
             maybeStartOverlapRepair()
         }
+        checkStopProcessingDone()
+    }
+
+    // MARK: - Stop processing gate (the blocking overlay)
+
+    /// The legs the overlay lists for this stop, in the order they finish.
+    /// `repair` only appears when the feature is on AND its engine loaded —
+    /// otherwise there is nothing to wait for.
+    private func buildStopSteps(willRunStopPass: Bool) {
+        var steps = [StopStep(id: "chunk", name: "Transcribing final audio",
+                              state: lastChunkDone ? .done : .loading)]
+        if willRunStopPass {
+            steps.append(StopStep(id: "diarize", name: "Identifying speakers", state: .loading))
+        }
+        if overlapRepairWillRun {
+            steps.append(StopStep(id: "repair", name: "Repairing overlapping speech",
+                                  state: .pending))
+        }
+        stopSteps = steps
+    }
+
+    private func setStopStep(_ id: String, _ state: ModelLoader.ItemState) {
+        guard let i = stopSteps.firstIndex(where: { $0.id == id }) else { return }
+        stopSteps[i].state = state
+    }
+
+    /// Whether a repair leg is worth listing — mirrors `maybeStartOverlapRepair`'s
+    /// feature + engine checks, without the gates that are still pending at stop.
+    private var overlapRepairWillRun: Bool {
+        let d = UserDefaults.standard
+        guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? false else { return false }
+        let engine = d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id
+        return engine == ModelCatalog.overlapDicow.id
+            ? modelLoader.dicowRepair != nil
+            : modelLoader.overlapRepair != nil
+    }
+
+    /// All post-stop work landed → drop the overlay and re-enable Start.
+    /// Idempotent; every leg's completion path calls it.
+    private func checkStopProcessingDone() {
+        guard state == .processing, lastChunkDone, finalDiarDone,
+              !overlapRepairing, repairTask == nil else { return }
+        stopWatchdog?.cancel()
+        stopWatchdog = nil
+        state = .idle
+    }
+
+    /// Last resort: never hold the controls hostage. The background work keeps
+    /// running and still updates the transcript if it lands.
+    private func startStopWatchdog() {
+        stopWatchdog?.cancel()
+        stopWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(600))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.state == .processing else { return }
+                for i in self.stopSteps.indices
+                where self.stopSteps[i].state == .pending || self.stopSteps[i].state == .loading {
+                    self.stopSteps[i].state = .failed("timed out")
+                }
+                self.stopWatchdog = nil
+                self.state = .idle
+            }
+        }
+    }
+
+    /// Escape hatch offered by the overlay after a while: stop blocking, cancel
+    /// nothing. Degrades to the pre-overlay behaviour — work continues silently.
+    func continueInBackground() {
+        guard state == .processing else { return }
+        stopWatchdog?.cancel()
+        stopWatchdog = nil
+        state = .idle
     }
 
     // MARK: - Diarization
@@ -485,7 +592,11 @@ final class AudioRecorder: ObservableObject {
                 self.applyFinalSpeakers(turns)
                 self.diarizing = false
                 self.finalDiarDone = true
+                self.finalDiarWatchdog?.cancel()
+                self.finalDiarWatchdog = nil
+                self.setStopStep("diarize", .done)
                 self.maybeStartOverlapRepair()
+                self.checkStopProcessingDone()
             }
         }
 
@@ -498,7 +609,11 @@ final class AudioRecorder: ObservableObject {
                 self.awaitingTailWindowStart = nil
                 self.diarTailWatchdog?.cancel()
                 self.diarTailWatchdog = nil
+                self.finalDiarWatchdog?.cancel()
+                self.finalDiarWatchdog = nil
+                self.setStopStep("diarize", .failed(message))
                 self.maybeStartOverlapRepair()
+                self.checkStopProcessingDone()
             }
         }
     }
@@ -581,7 +696,9 @@ final class AudioRecorder: ObservableObject {
         awaitingTailWindowStart = nil
         diarizing = false
         finalDiarDone = true
+        setStopStep("diarize", diarizationError.map { .failed($0) } ?? .done)
         maybeStartOverlapRepair()
+        checkStopProcessingDone()
     }
 
     /// At stop: batch refinement over the full recording (best accuracy).
@@ -593,6 +710,23 @@ final class AudioRecorder: ObservableObject {
         let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
         let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers, exclusive: !detectOverlap)
+        // A final pass over a long meeting legitimately takes a while, so scale
+        // the limit with the recording — never below 3 minutes.
+        let limit = max(180, recordingElapsed)
+        finalDiarWatchdog?.cancel()
+        finalDiarWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(limit))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, !self.finalDiarDone else { return }
+                self.diarizing = false
+                self.diarizationError = "Final diarization timed out"
+                self.finalDiarDone = true
+                self.setStopStep("diarize", .failed("Final diarization timed out"))
+                self.maybeStartOverlapRepair()
+                self.checkStopProcessingDone()
+            }
+        }
     }
 
     /// Final pass: the globally-clustered turns replace the running live set.
@@ -832,6 +966,7 @@ final class AudioRecorder: ObservableObject {
     private func checkLastChunkDone() {
         guard stopped, pendingChunkWindows.isEmpty, !chunkedBusy, !lastChunkDone else { return }
         lastChunkDone = true
+        setStopStep("chunk", chunkedError.map { .failed($0) } ?? .done)
         // Recording is fully processed — drop any leftover realtime (unconfirmed)
         // segments so a fragment from just before Stop can't survive as an orphan
         // "SPEAKER UNKNOWN" row (e.g. if the last chunk errored/timed out before its
@@ -841,6 +976,7 @@ final class AudioRecorder: ObservableObject {
             rebuildDisplayRows()
         }
         maybeStartOverlapRepair()
+        checkStopProcessingDone()
     }
 
     /// Start overlap repair only once both the last chunk and the diarization
@@ -850,21 +986,24 @@ final class AudioRecorder: ObservableObject {
         guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? false else { return }
         guard stopped, finalDiarDone, lastChunkDone else { return }
         guard repairTask == nil, !overlapRepairing else { return }
-        guard let recording = lastRecordingURL else { return }
+        guard let recording = lastRecordingURL else { finishRepairStep(.done); return }
 
         let engine = d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id
         if engine == ModelCatalog.overlapDicow.id {
-            guard let service = modelLoader.dicowRepair else { return }
+            guard let service = modelLoader.dicowRepair else {
+                finishRepairStep(.failed("engine unavailable")); return
+            }
             let windowSec = Double(d.object(forKey: "overlap.dicow.windowSec") as? Int ?? 10)
             // DiCoW's sidecar rejects >30s windows, so drop them here (with a log)
             // rather than burning a request on a guaranteed error.
             let windows = repairWindows(windowSec: windowSec, maxDurationSec: dicowMaxWindowSec)
             guard !windows.isEmpty else {
                 overlapLog("DiCoW: no 2-speaker overlap windows to repair")
-                return
+                finishRepairStep(.done); return
             }
             overlapRepairing = true
             overlapRepairError = nil
+            setStopStep("repair", .loading)
             overlapLog("starting overlap repair (DiCoW): \(windows.count) window(s), windowSec=\(Int(windowSec))")
             repairTask = Task { @MainActor [weak self] in
                 await self?.runDicowRepair(windows: windows, service: service, recording: recording)
@@ -872,19 +1011,29 @@ final class AudioRecorder: ObservableObject {
             return
         }
 
-        guard let service = modelLoader.overlapRepair else { return }
+        guard let service = modelLoader.overlapRepair else {
+            finishRepairStep(.failed("engine unavailable")); return
+        }
         let windowSec = Double(d.object(forKey: "overlap.mossformer.windowSec") as? Int ?? 10)
         let windows = repairWindows(windowSec: windowSec)
         guard !windows.isEmpty else {
             overlapLog("no 2-speaker overlap windows to repair")
-            return
+            finishRepairStep(.done); return
         }
         overlapRepairing = true
         overlapRepairError = nil
+        setStopStep("repair", .loading)
         overlapLog("starting overlap repair: \(windows.count) window(s), windowSec=\(Int(windowSec))")
         repairTask = Task { @MainActor [weak self] in
             await self?.runOverlapRepair(windows: windows, service: service, recording: recording)
         }
+    }
+
+    /// Repair bailed out before a driver ever started, so nothing else will settle
+    /// the overlay's repair row — do it here and re-check the gate.
+    private func finishRepairStep(_ state: ModelLoader.ItemState) {
+        setStopStep("repair", state)
+        checkStopProcessingDone()
     }
 
     /// Merged 2-speaker overlap windows to repair, in chronological order.
@@ -961,6 +1110,7 @@ final class AudioRecorder: ObservableObject {
                                   recording: URL) async {
         let n = windows.count
         for (i, w) in windows.enumerated() {
+            if Task.isCancelled { break }   // a new session owns the transcript now
             overlapRepairProgress = "\(i + 1)/\(n)"
             let tmpDir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("moss-\(UUID().uuidString)")
@@ -987,6 +1137,8 @@ final class AudioRecorder: ObservableObject {
         overlapRepairing = false
         overlapRepairProgress = nil
         repairTask = nil
+        setStopStep("repair", .done)
+        checkStopProcessingDone()
         overlapLog("overlap repair complete")
     }
 
@@ -1078,6 +1230,7 @@ final class AudioRecorder: ObservableObject {
 
         let n = windows.count
         for (i, w) in windows.enumerated() {
+            if Task.isCancelled { break }   // a new session owns the transcript now
             overlapRepairProgress = "\(i + 1)/\(n)"
             let ranges = speakerRanges(in: w.start...w.end)
             let targets = w.speakerIDs.map { id in
@@ -1101,6 +1254,8 @@ final class AudioRecorder: ObservableObject {
         overlapRepairing = false
         overlapRepairProgress = nil
         repairTask = nil
+        setStopStep("repair", .done)
+        checkStopProcessingDone()
         overlapLog("DiCoW overlap repair complete")
     }
 

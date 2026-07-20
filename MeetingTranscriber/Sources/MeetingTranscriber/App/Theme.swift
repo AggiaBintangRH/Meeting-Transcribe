@@ -8,6 +8,7 @@ enum Theme {
     static let chip      = Color(red: 0.145, green: 0.145, blue: 0.153)
     static let teal      = Color(red: 0.169, green: 0.780, blue: 0.702)
     static let red       = Color(red: 0.902, green: 0.290, blue: 0.290)
+    static let amber     = Color(red: 0.949, green: 0.651, blue: 0.251) // trouble, but still working on it
     static let textDim   = Color.white.opacity(0.45)
     static let textFaint = Color.white.opacity(0.30)
     static let divider   = Color.white.opacity(0.06)

@@ -17,6 +17,10 @@ struct MeetingTranscriberApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         migrateSettings()
+        // Start the ATND1061 beam listener if it is enabled. It runs for the
+        // whole app lifetime — independent of recording and of the TCP control
+        // link — and re-syncs itself on later settings changes.
+        Task { @MainActor in ATNDBeamService.shared.syncWithSettings() }
         // Bring window to front when launched via `swift run`
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)

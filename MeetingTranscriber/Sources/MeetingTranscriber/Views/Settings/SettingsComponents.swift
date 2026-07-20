@@ -68,6 +68,58 @@ struct ModelCardView: View {
     }
 }
 
+/// A sub-tab inside a settings section (Models' model tabs, ATND's tabs).
+protocol SettingsSubTab: Hashable, CaseIterable, Identifiable {
+    var title: String { get }
+    var icon: String { get }
+}
+
+extension SettingsSubTab {
+    var id: Self { self }
+}
+
+/// Pill bar of sub-tabs with a sliding selection indicator.
+struct SubTabBar<Tab: SettingsSubTab>: View {
+    @Binding var selection: Tab
+    /// Unique per bar — two bars must not share one matchedGeometry id.
+    let geometryID: String
+    let namespace: Namespace.ID
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(Tab.allCases)) { t in
+                Button(action: {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { selection = t }
+                }) {
+                    HStack(spacing: 7) {
+                        Image(systemName: t.icon)
+                            .font(.system(size: 11, weight: .bold))
+                        Text(t.title)
+                            .font(.system(size: 12, weight: .bold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .foregroundColor(selection == t ? Theme.selectedTabText : Theme.textMuted)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity)
+                    .background {
+                        if selection == t {
+                            RoundedRectangle(cornerRadius: 9)
+                                .fill(Theme.teal)
+                                .matchedGeometryEffect(id: geometryID, in: namespace)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(4)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Theme.chip.opacity(0.6)))
+    }
+}
+
 /// Labeled toggle in app style.
 struct SettingToggle: View {
     let label: String
