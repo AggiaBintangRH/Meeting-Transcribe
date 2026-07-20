@@ -49,6 +49,11 @@ final class ATNDBeamService: ObservableObject {
     /// nil = nobody speaking, stream gone stale, or listener off.
     @Published private(set) var talker: Talker?
 
+    /// Raw pass-through of every parsed notice, BEFORE the silence-hold/stale
+    /// logic rewrites history. Diarization needs the honest stream; the `talker`
+    /// publisher is for the status chip only.
+    let rawNotices = PassthroughSubject<(date: Date, notice: ParsedNotice), Never>()
+
     private var source: DispatchSourceRead?
     private let queue = DispatchQueue(label: "atnd.multicast")
 
@@ -261,6 +266,7 @@ final class ATNDBeamService: ObservableObject {
     // MARK: - Main actor state
 
     private func apply(_ notice: ParsedNotice) {
+        rawNotices.send((.now, notice))
         lastPacketAt = .now
         switch notice {
         case .talking(let t):

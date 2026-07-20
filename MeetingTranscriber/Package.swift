@@ -11,6 +11,11 @@ let package = Package(
             resources: [
                 .process("Assets.xcassets")
             ]
+        ),
+        .testTarget(
+            name: "MeetingTranscriberTests",
+            dependencies: ["MeetingTranscriber"],
+            path: "Tests/MeetingTranscriberTests"
         )
     ]
 )
