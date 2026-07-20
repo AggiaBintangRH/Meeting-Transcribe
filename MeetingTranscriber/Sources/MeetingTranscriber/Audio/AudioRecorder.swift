@@ -715,8 +715,19 @@ final class AudioRecorder: ObservableObject {
             // and STAYS unknown. (Replaces the old whole-gap `need` sample gate.)
             var turns = pos.labeledTurns(in: a...b)
             if turns.isEmpty {
+                // No run cleared the per-turn gate — typically a brief speaker
+                // switch whose samples fragment across two clusters, each run too
+                // short/sparse to survive on its own. Rather than leave the whole
+                // window UNKNOWN despite real ATND data, fall back to one dominant
+                // label for the gap. Only a gap with too few samples (real silence)
+                // stays UNKNOWN.
                 let count = pos.sampleCount(in: a...b)
-                positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(count) no-turns")
+                if let (pid, pname) = pos.label(for: a...b, minSamples: 3) {
+                    positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(pid):\(pname) (dominant, no clear turns) samples=\(count)")
+                    fills.append((a, b, pid, pname))
+                } else {
+                    positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(count) no-turns")
+                }
                 continue
             }
             // Boundary snapping — the 0.4s smoother swallows ~0.4s warm-up per
