@@ -62,6 +62,7 @@ struct SettingsView: View {
     enum ATNDSubTab: String, CaseIterable, SettingsSubTab {
         case connection = "Connection"
         case command = "Command"
+        case position = "Position ID"
 
         var title: String { rawValue }
 
@@ -69,6 +70,7 @@ struct SettingsView: View {
             switch self {
             case .connection: return "network"
             case .command: return "terminal.fill"
+            case .position: return "person.line.dotted.person.fill"
             }
         }
 
@@ -76,6 +78,7 @@ struct SettingsView: View {
             switch self {
             case .connection: return "ATND1061 beamforming array — beam and talker data over IP"
             case .command: return "Send IP control commands to the array"
+            case .position: return "Speaker identity from talker direction — replaces voice-based labels while the array is connected"
             }
         }
     }
@@ -199,6 +202,7 @@ struct SettingsView: View {
                         switch atndTab {
                         case .connection: ATNDConnectionTab()
                         case .command:    ATNDCommandTab()
+                        case .position:   ATNDPositionTab()
                         }
                     }
                 }

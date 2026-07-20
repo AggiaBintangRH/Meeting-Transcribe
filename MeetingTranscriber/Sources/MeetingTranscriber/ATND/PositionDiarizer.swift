@@ -21,9 +21,14 @@ final class PositionDiarizer: ObservableObject {
 
     enum Mode { case firstCome, enrollment }
 
-    /// Phase 3 will drive a name prompt off this; in Phase 2 it stays nil
-    /// (first-come auto-naming never sets it).
+    /// The cluster id currently awaiting a name in enrollment mode, or nil.
+    /// First-come mode never sets it. Additional births while a prompt is open
+    /// wait in `enrollmentQueue`; this always holds the head.
     @Published private(set) var pendingEnrollment: Int?
+
+    /// Clusters born while an enrollment prompt was already open, waiting their
+    /// turn. `pendingEnrollment` is the head; this is everything behind it.
+    private var enrollmentQueue: [Int] = []
 
     private(set) var isActive = false
 
@@ -58,6 +63,7 @@ final class PositionDiarizer: ObservableObject {
         self.names = [:]
         self.lastNoticeElapsed = nil
         self.pendingEnrollment = nil
+        self.enrollmentQueue = []
         self.isActive = true
 
         cancellable = ATNDBeamService.shared.rawNotices
@@ -99,18 +105,46 @@ final class PositionDiarizer: ObservableObject {
         }
     }
 
-    /// Name a freshly-born cluster. Phase 2 is always first-come: auto-name and
-    /// never raise `pendingEnrollment`. The enrollment branch is present but
-    /// dormant so Phase 3 only has to flip this label path.
+    /// Label a freshly-born cluster. First-come auto-names it immediately and
+    /// never raises a prompt. Enrollment does NOT name it yet — it raises
+    /// `pendingEnrollment` (queueing behind any prompt already open) and lets
+    /// `label(for:)` return a provisional "Speaker N" until the name arrives.
+    ///
+    /// Only the labeling differs by mode; the clustering that produced
+    /// `clusterID` (smoother + clusterer) ran identically before this call.
     private func assignName(clusterID: Int) {
         switch mode {
         case .firstCome:
             names[clusterID] = "Speaker \(names.count + 1)"
         case .enrollment:
-            // Dormant in Phase 2 — Phase 3 drives a name prompt off pendingEnrollment.
-            names[clusterID] = "Speaker \(names.count + 1)"
-            pendingEnrollment = clusterID
+            if pendingEnrollment == nil {
+                pendingEnrollment = clusterID
+            } else {
+                enrollmentQueue.append(clusterID)
+            }
         }
+    }
+
+    /// Name the head pending cluster (empty/whitespace name = keep provisional),
+    /// then publish the next queued birth, or nil when the queue drains.
+    func resolveEnrollment(name: String) {
+        guard let clusterID = pendingEnrollment else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            names[clusterID] = trimmed
+        }
+        advanceEnrollment()
+    }
+
+    /// Leave the head pending cluster with its provisional "Speaker N" and
+    /// publish the next queued birth (or nil).
+    func skipEnrollment() {
+        guard pendingEnrollment != nil else { return }
+        advanceEnrollment()
+    }
+
+    private func advanceEnrollment() {
+        pendingEnrollment = enrollmentQueue.isEmpty ? nil : enrollmentQueue.removeFirst()
     }
 
     // MARK: - Query (used by the fusion seam, valid after stop())

@@ -22,6 +22,18 @@ struct ContentView: View {
             if recorder.state == .processing {
                 ProcessingOverlayView(recorder: recorder)
             }
+
+            // Position-ID enrollment prompt: only built when the feature is on
+            // (diarizer exists); the view itself hides unless a speaker is
+            // pending a name. Recording keeps running underneath.
+            if let diarizer = recorder.positionDiarizer {
+                VStack {
+                    Spacer()
+                    EnrollmentPromptView(diarizer: diarizer)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .allowsHitTesting(diarizer.pendingEnrollment != nil)
+            }
         }
         .animation(.easeOut(duration: 0.2), value: recorder.state)
         .background(Theme.bg)

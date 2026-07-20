@@ -112,7 +112,7 @@ final class AudioRecorder: ObservableObject {
     // Position-based diarization (ATND beam) — off unless atnd.position.enabled.
     // Recorder-owned, one per session; nil means the feature is off and the
     // pyannote path is byte-identical to before.
-    private var positionDiarizer: PositionDiarizer?
+    @Published private(set) var positionDiarizer: PositionDiarizer?
     private var diarElapsed: Double = 0                        // seconds since the last diar chunk
     private var lastDiarBoundary: Double = 0                   // recording-time where this diar chunk began
 
