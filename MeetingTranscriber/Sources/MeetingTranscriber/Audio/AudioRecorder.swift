@@ -51,6 +51,9 @@ final class AudioRecorder: ObservableObject {
     @Published var segments: [TranscriptSegment] = []
     @Published var displayRows: [SpeakerUtterance] = []
     @Published var partialTranscript = ""
+    /// ATND position label for the live partial ("the beam active right now"),
+    /// or nil when the feature is off / ATND is silent → shows SPEAKER UNKNOWN.
+    @Published var partialSpeakerName: String?
 
     // Chunked ASR status (drives the small "refining…" indicator)
     @Published var chunkedBusy = false
@@ -110,8 +113,8 @@ final class AudioRecorder: ObservableObject {
     private var sessionSpeakerIDs = Set<Int>()
     private var liveTurns: [DiarizationService.Turn] = []      // absolute-time turns collected so far
     // Position-based diarization (ATND beam) — off unless atnd.position.enabled.
-    // Recorder-owned, one per session; nil means the feature is off and the
-    // pyannote path is byte-identical to before.
+    // Recorder-owned, one per session; nil means the feature is off, so
+    // positionGapFill returns [] and the display path is pure pyannote.
     @Published private(set) var positionDiarizer: PositionDiarizer?
     private var diarElapsed: Double = 0                        // seconds since the last diar chunk
     private var lastDiarBoundary: Double = 0                   // recording-time where this diar chunk began
@@ -235,7 +238,7 @@ final class AudioRecorder: ObservableObject {
                     // (fired by the flush in stop()) can't land after the last
                     // chunk's cleanup and survive as an orphan "SPEAKER UNKNOWN"
                     // row next to the confirmed, speaker-split transcript.
-                    guard !self.stopped else { self.partialTranscript = ""; return }
+                    guard !self.stopped else { self.partialTranscript = ""; self.partialSpeakerName = nil; return }
                     let end = self.recordingElapsed
                     let start = min(self.lastRealtimeFinalElapsed, end)
                     // Advance the marker on every final (incl. empty ones), since
@@ -246,8 +249,13 @@ final class AudioRecorder: ObservableObject {
                         self.rebuildDisplayRows()
                     }
                     self.partialTranscript = ""
+                    self.partialSpeakerName = nil
                 } else {
                     self.partialTranscript = text
+                    // Trailing 2s window ≈ the beam active right now (after smoothing).
+                    self.partialSpeakerName = self.positionDiarizer?.label(
+                        for: max(0, self.recordingElapsed - 2.0)...self.recordingElapsed,
+                        minSamples: 3)?.name
                 }
             }
         }
@@ -441,8 +449,8 @@ final class AudioRecorder: ObservableObject {
 
     private func stop() {
         stopped = true
-        // Stop ingesting beam notices, but KEEP the collected data — the final
-        // diarization pass still fuses against it via fusedTurns/label(for:).
+        // Stop ingesting beam notices, but KEEP the collected data — display-time
+        // gap-fill (positionGapFill → label(for:)) still queries it afterward.
         positionDiarizer?.stop()
         modelLoader.nemotronASR?.flush() // finalize any trailing speech
         if modelLoader.chunkedASR != nil {
@@ -583,9 +591,10 @@ final class AudioRecorder: ObservableObject {
                                             end: $0.end + windowStart,
                                             id: $0.id, name: $0.name)
                 }
-                let fused = self.fusedTurns(absolute)
-                self.liveTurns.append(contentsOf: fused)
-                for turn in fused { self.sessionSpeakerIDs.insert(turn.id) }
+                // Raw pyannote turns — pyannote is authoritative. Position labels
+                // are folded in only at display time (derivedRows), never here.
+                self.liveTurns.append(contentsOf: absolute)
+                for turn in absolute { self.sessionSpeakerIDs.insert(turn.id) }
                 self.speakerCount = self.sessionSpeakerIDs.count
                 self.rebuildDisplayRows()
                 // Tail-only stop mode: this chunk result IS the tail — complete the gate.
@@ -627,12 +636,19 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
-    // MARK: - Position diarization (ATND beam) fusion
+    // MARK: - Position diarization (ATND beam) gap-fill
+    //
+    // Policy (owner, 2026-07-20): pyannote is AUTHORITATIVE. Wherever pyannote has
+    // a turn, its own label wins. ATND position only fills the DISPLAY-time gaps
+    // pyannote has not (yet) covered — freshly-committed text, the first ~1-2s
+    // pyannote never turns, and the live partial. A pyannote chunk landing later
+    // OVERRIDES the fill automatically (it shrinks the gap on the next rebuild).
+    // Silence gaps where ATND also heard nothing STAY unknown — never force-filled.
 
     /// Create + start the position diarizer for this session, but ONLY when the
     /// feature is explicitly enabled AND the beam service is actually listening.
-    /// Otherwise leave it nil — `fusedTurns` is then an identity pass-through and
-    /// the pyannote path is byte-identical to before this feature existed.
+    /// Otherwise leave it nil — `positionGapFill` then returns [] and the display
+    /// path is pure pyannote, byte-identical to before this feature existed.
     private func configurePositionDiarization() {
         positionDiarizer = nil
         let d = UserDefaults.standard
@@ -652,26 +668,43 @@ final class AudioRecorder: ObservableObject {
         positionDiarizer = diarizer
     }
 
-    /// Keep pyannote's boundaries; swap in the position label when ATND had
-    /// enough samples during the turn, else keep pyannote's label. When the
-    /// feature is off (`positionDiarizer` nil) this returns its input unchanged.
-    private func fusedTurns(_ turns: [DiarizationService.Turn]) -> [DiarizationService.Turn] {
-        guard let pos = positionDiarizer else { return turns }
-        return turns.map { t in
-            let dur = t.end - t.start
-            // >=3 samples AND >=~30% coverage at 10 Hz.
-            let need = max(3, Int(0.3 * dur * 10))
-            let count = pos.sampleCount(in: t.start...t.end)
-            guard count >= need, let (pid, pname) = pos.label(for: t.start...t.end) else {
-                positionLog("FALLBACK turn=[\(fmt3(t.start))..\(fmt3(t.end))] "
-                            + "pyannote=\(t.id):\(t.name) samples=\(count) need=\(need)")
-                return t
-            }
-            positionLog("APPLIED  turn=[\(fmt3(t.start))..\(fmt3(t.end))] "
-                        + "pyannote=\(t.id):\(t.name) -> position=\(pid):\(pname) "
-                        + "samples=\(count) need=\(need)")
-            return DiarizationService.Turn(start: t.start, end: t.end, id: pid, name: pname)
+    /// Position-labeled ranges covering the sub-ranges of `window` that pyannote
+    /// has NOT (yet) covered. Empty when the feature is off or ATND was silent.
+    private func positionGapFill(window: ClosedRange<Double>,
+                                 covered: [(start: Double, end: Double, id: Int, name: String)])
+        -> [(start: Double, end: Double, id: Int, name: String)] {
+        guard let pos = positionDiarizer else { return [] }
+        let minGapSec = 0.75   // below this is pyannote boundary slop → filling flickers
+        // `covered` is already sorted by start (from speakerRanges). Walk it and
+        // emit the complement gaps of `window`.
+        var fills: [(start: Double, end: Double, id: Int, name: String)] = []
+        var cursor = window.lowerBound
+        // Build the ordered list of gap ranges (before/between/after covered ranges).
+        var gaps: [(Double, Double)] = []
+        for r in covered {
+            if r.start > cursor { gaps.append((cursor, r.start)) }
+            cursor = max(cursor, r.end)
         }
+        if window.upperBound > cursor { gaps.append((cursor, window.upperBound)) }
+
+        for (a, b) in gaps {
+            let dur = b - a
+            if dur < minGapSec {
+                positionLog("SKIP gap<0.75s [\(fmt3(a))..\(fmt3(b))]")
+                continue
+            }
+            // ~25% coverage at ~10 Hz, floor 3. This is the density gate — a gap
+            // where ATND heard nothing returns nil and STAYS unknown.
+            let need = max(3, Int(0.25 * dur * 10))
+            let count = pos.sampleCount(in: a...b)
+            guard let (pid, pname) = pos.label(for: a...b, minSamples: need) else {
+                positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(count) need=\(need)")
+                continue
+            }
+            positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(pid):\(pname) samples=\(count) need=\(need)")
+            fills.append((a, b, pid, pname))
+        }
+        return fills
     }
 
     /// Live: write the current chunk's audio to a temp WAV and diarize it.
@@ -785,11 +818,12 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
-    /// Final pass: the globally-clustered turns replace the running live set.
+    /// Final pass: the globally-clustered pyannote turns replace the running live
+    /// set. Raw pyannote (authoritative); position labels are folded in only at
+    /// display time (derivedRows), so liveTurns stays pure pyannote.
     private func applyFinalSpeakers(_ turns: [DiarizationService.Turn]) {
-        let fused = fusedTurns(turns)
-        speakerCount = Set(fused.map(\.id)).count
-        liveTurns = fused
+        speakerCount = Set(turns.map(\.id)).count
+        liveTurns = turns
         rebuildDisplayRows()
     }
 
@@ -841,13 +875,17 @@ final class AudioRecorder: ObservableObject {
                                      text: seg.text, confirmed: seg.confirmed)]
         }
         let ranges = speakerRanges(in: window)
-        if ranges.isEmpty {
+        // Fill only the time regions pyannote has not covered with ATND position
+        // labels (pyannote wins where it has a turn). Off/silent → fills is [].
+        let fills = positionGapFill(window: window, covered: ranges)
+        let filled = (ranges + fills).sorted { $0.start < $1.start }
+        if filled.isEmpty {
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: nil,
                                      speakerID: nil, start: window.lowerBound,
                                      end: window.upperBound, text: seg.text,
                                      confirmed: true)]
         }
-        return assignSentences(seg.text, window: window, ranges: ranges,
+        return assignSentences(seg.text, window: window, ranges: filled,
                                segID: seg.id.uuidString, regions: regions)
     }
 
@@ -1534,8 +1572,8 @@ final class AudioRecorder: ObservableObject {
         try? handle.close()
     }
 
-    /// Append a line to logs/position-diarization.log (position-fusion decisions).
-    /// Mirrors overlapLog: one APPLIED/FALLBACK line per fused turn.
+    /// Append a line to logs/position-diarization.log (position gap-fill decisions).
+    /// Mirrors overlapLog: one FILL/SKIP line per display-time gap.
     private func positionLog(_ message: String) {
         let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

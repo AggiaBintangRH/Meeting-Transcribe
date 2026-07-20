@@ -30,7 +30,7 @@ struct TranscriptView: View {
 
                         if !recorder.partialTranscript.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("SPEAKER UNKNOWN")
+                                Text((recorder.partialSpeakerName ?? "SPEAKER UNKNOWN").uppercased())
                                     .font(.system(size: 14, weight: .heavy))
                                     .kerning(0.8)
                                     .foregroundColor(Theme.speakerNameText)

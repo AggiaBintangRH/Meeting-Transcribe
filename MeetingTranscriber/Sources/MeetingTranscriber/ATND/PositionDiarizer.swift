@@ -147,12 +147,14 @@ final class PositionDiarizer: ObservableObject {
         pendingEnrollment = enrollmentQueue.isEmpty ? nil : enrollmentQueue.removeFirst()
     }
 
-    // MARK: - Query (used by the fusion seam, valid after stop())
+    // MARK: - Query (used by the gap-fill seam, valid after stop())
 
     /// Dominant cluster over `range`, as (position id, name), or nil if there
     /// were too few in-range samples. The id is `positionIDBase + clusterID`.
-    func label(for range: ClosedRange<Double>) -> (id: Int, name: String)? {
-        guard let clusterID = clusterer.dominantCluster(in: range, minSamples: 1) else { return nil }
+    /// `minSamples` is the density gate — a range with fewer in-range samples
+    /// returns nil (so a silent gap stays UNKNOWN rather than being force-filled).
+    func label(for range: ClosedRange<Double>, minSamples: Int = 1) -> (id: Int, name: String)? {
+        guard let clusterID = clusterer.dominantCluster(in: range, minSamples: minSamples) else { return nil }
         let name = names[clusterID] ?? "Speaker \(clusterID + 1)"
         return (Self.positionIDBase + clusterID, name)
     }
