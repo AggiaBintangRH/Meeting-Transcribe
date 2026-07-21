@@ -116,10 +116,13 @@ struct TranscriptView: View {
                     .buttonStyle(.plain)
                     .help("Rename this speaker (saved for future meetings)")
                 } else if let speaker = row.speaker {
+                    // Remote rows share this branch (no speakerID → not renameable)
+                    // but must never read as an Office speaker: amber is the Remote
+                    // capture role everywhere in the app, teal/default is Office.
                     Text(speaker.uppercased())
                         .font(.system(size: 14, weight: .heavy))
                         .kerning(0.8)
-                        .foregroundColor(Theme.speakerNameText)
+                        .foregroundColor(row.isRemote ? Theme.remoteRole : Theme.speakerNameText)
                 } else {
                     // Not diarized yet — placeholder until speaker turns arrive.
                     Text("SPEAKER UNKNOWN")

@@ -31,6 +31,17 @@ final class ModelLoader: ObservableObject {
         failureMessage = nil
     }
 
+    /// Refuse to start the session BEFORE any model loads, showing the reason in
+    /// the same overlay a load failure uses (one failed row + `failureMessage`,
+    /// which is what keeps the overlay on screen). The only caller today is the
+    /// dual-stream + Voxtral refusal in `AudioRecorder.prepareAndCapture`: the
+    /// configuration is unworkable, so loading a 4B model first would waste ~30 s
+    /// before saying so.
+    func failStartup(step: String, message: String) {
+        items = [Item(id: "startup", name: step, state: .failed(message))]
+        failureMessage = message
+    }
+
     /// Silero sidecar, started during loading; nil → heuristic VAD fallback.
     /// Kept alive across sessions so the model only loads once.
     private(set) var sileroVAD: SileroVADService?

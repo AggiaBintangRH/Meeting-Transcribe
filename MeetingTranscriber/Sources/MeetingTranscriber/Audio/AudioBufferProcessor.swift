@@ -36,6 +36,16 @@ final class AudioBufferProcessor {
         return sqrt(sum / Float(n))
     }
 
+    /// Root-mean-square level of already-extracted mono samples. Same math as
+    /// the buffer overload, for callers that hold a plain `[Float]` (the 16 kHz
+    /// accumulation buffers) rather than an `AVAudioPCMBuffer`.
+    static func rms(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        var sum: Float = 0
+        for s in samples { sum += s * s }
+        return sqrt(sum / Float(samples.count))
+    }
+
     /// Zero-crossing rate (0–1, crossings per sample) of a mono buffer.
     /// Voiced speech ≈ 0.02–0.12, fricatives up to ~0.35,
     /// low tones/bass < 0.02, hiss/cymbals > 0.4.

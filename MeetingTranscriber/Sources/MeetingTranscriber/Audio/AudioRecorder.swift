@@ -43,6 +43,24 @@ final class AudioRecorder: ObservableObject {
         var alignedChunkDuration: Double? = nil
     }
 
+    /// One transcribed Remote (conferencing) chunk. Deliberately NOT a
+    /// `TranscriptSegment`: remote text never goes through the office display
+    /// pipeline (`derivedRows` → speaker ranges → position gap-fill → word
+    /// attribution). It carries no diarization of its own in this phase, and
+    /// must never reach the ATND/position path, so it is a separate collection
+    /// that only meets office rows at the final sort in `rebuildDisplayRows`.
+    ///
+    /// Text only, by design: the transcript comes from the sidecar's `-2`
+    /// file-transcribe frame, which calls `transcribe_path()` directly and never
+    /// runs the forced aligner — so there are no `words`/`dur` and remote
+    /// attribution stays sentence-level. Acceptable: word-exact timing matters
+    /// where ATND and pyannote boundaries compete, which is Office-only.
+    struct RemoteSegment: Identifiable, Equatable {
+        let id = UUID()
+        var text: String
+        var window: ClosedRange<Double>   // recording-time span (shared clock)
+    }
+
     /// One rendered row: a single speaker's turn with its time span and text.
     struct SpeakerUtterance: Identifiable, Equatable {
         let id: String                    // stable per (segment, turn index)
@@ -53,6 +71,10 @@ final class AudioRecorder: ObservableObject {
         var text: String
         let confirmed: Bool
         var overlapped: Bool = false      // spoke over another speaker in this window
+        /// Row came from the Remote stream, not the room. Purely a display flag —
+        /// it keeps the two label spaces visually distinct and keeps remote rows
+        /// out of the rename path (`speakerID` is nil for them).
+        var isRemote: Bool = false
     }
 
     @Published var segments: [TranscriptSegment] = []
@@ -133,6 +155,30 @@ final class AudioRecorder: ObservableObject {
     private var diarElapsed: Double = 0                        // seconds since the last diar chunk
     private var lastDiarBoundary: Double = 0                   // recording-time where this diar chunk began
 
+    // MARK: Remote stream (dual-stream phase 3)
+    //
+    // Everything below is inert unless a Remote channel resolved for THIS session
+    // (`remoteStreamActive`). The remote side never influences timing: it has no
+    // cadence, no VAD, no RMS and no clock of its own — it rides the office chunk
+    // boundary and the single `recordingElapsed`, which is the whole reason both
+    // inputs must come from one Aggregate Device (see `MicrophoneSettings`).
+
+    /// True when this session resolved a usable Remote channel.
+    private var remoteStreamActive = false
+    /// 16 kHz remote samples accumulated since the last chunk boundary.
+    private var remoteChunkAudio: [Float] = []
+    /// Transcribed remote chunks, merged into `displayRows` by start time.
+    private var remoteSegments: [RemoteSegment] = []
+    /// Remote file-transcribe requests currently in flight.
+    private var remotePendingChunks = 0
+    /// Last remote failure, shown on the stop step. Never fatal — a remote
+    /// problem must not cost the user their office transcript.
+    private var remoteChunkError: String?
+    /// Stop gate, mirroring `lastChunkDone`. Starts true so a single-stream
+    /// session's gate is complete before it is ever consulted.
+    private var remoteLastChunkDone = true
+    private var remoteStopWatchdog: Task<Void, Never>?
+
     /// Publishes per-model progress for the loading overlay.
     let modelLoader = ModelLoader()
 
@@ -189,6 +235,22 @@ final class AudioRecorder: ObservableObject {
     /// Show the loading overlay while models load, then start capturing.
     private func prepareAndCapture() async {
         state = .preparing
+        // Hard refusal BEFORE any model loads: a Remote channel with Voxtral
+        // selected cannot work (see `dualStreamRefusalMessage`). Checked here
+        // rather than in `beginCapture` so the user is told before waiting out a
+        // 4B model load, and it lands in the same overlay every startup failure
+        // uses. Refusal, never a silent model swap — the owner picks chunked
+        // models deliberately, on measured WER.
+        let mic = MicrophoneSettings.current()
+        let chunkedID = UserDefaults.standard.string(forKey: "chunked.model") ?? "qwen3"
+        if let refusal = Self.dualStreamRefusalMessage(remoteChannel: mic.remoteChannel,
+                                                       chunkedModelID: chunkedID) {
+            dualStreamLog("REFUSED start — \(refusal)")
+            modelLoader.failStartup(step: "Remote stream + chunked model", message: refusal)
+            errorMessage = refusal
+            state = .idle
+            return
+        }
         let ok = await modelLoader.loadAll()
         guard ok else {
             state = .idle
@@ -277,6 +339,14 @@ final class AudioRecorder: ObservableObject {
         self.vad = vad
         let sampleRate = format.sampleRate
         let resampler = AudioResampler(inputFormat: monoFormat) // → 16 kHz for Silero/ASR
+        // Remote gets its OWN resampler: `AudioResampler` keeps converter state
+        // between buffers, so feeding two interleaved streams through one instance
+        // would corrupt both. Created only when there is both a Remote channel and
+        // a chunked sidecar to transcribe it with — nil keeps the tap on the
+        // single-stream path, and (just as important) stops the remote 16 kHz
+        // buffer from growing all meeting for audio nothing would ever consume.
+        let remoteWanted = remoteChannel != nil && modelLoader.chunkedASR != nil
+        let remoteResampler = remoteWanted ? AudioResampler(inputFormat: monoFormat) : nil
 
         // 5. Realtime ASR — stream audio in, receive partial/final transcripts
         let realtimeOn = UserDefaults.standard.object(forKey: "realtime.enabled") as? Bool ?? true
@@ -356,6 +426,21 @@ final class AudioRecorder: ObservableObject {
         chunkAudio = []
         diarElapsed = 0
         lastDiarBoundary = 0
+        // Fresh remote state. `remoteStreamActive` also requires the resampler:
+        // without it there is no 16 kHz audio to transcribe, so the remote side
+        // stays off (the WAV is still written — capture is phase 2's job).
+        remoteStreamActive = remoteResampler != nil
+        if remoteWanted && remoteResampler == nil {
+            dualStreamLog("Could not create the Remote resampler — the Remote WAV is still "
+                          + "written, but remote audio will not be transcribed this session.")
+        }
+        remoteChunkAudio = []
+        remoteSegments = []
+        remotePendingChunks = 0
+        remoteChunkError = nil
+        remoteLastChunkDone = !remoteStreamActive
+        remoteStopWatchdog?.cancel()
+        remoteStopWatchdog = nil
         configureDiarization()
         configurePositionDiarization()
         // Real-time speaker split: when the beam settles on a different talker,
@@ -437,13 +522,16 @@ final class AudioRecorder: ObservableObject {
 
             try? self.file?.write(from: mono)
             // Remote is written from THIS callback so the two files stay
-            // sample-aligned. Capture only — nothing downstream (resampler,
-            // recordingElapsed, VAD, RMS, chunk/diar cadence, ATND) reads it; that
-            // arrives in phase 3. A failed extraction just skips this buffer rather
-            // than aborting the office write above.
+            // sample-aligned, and resampled here so the 16 kHz stream is derived
+            // from exactly the same buffer as the office one. It feeds NOTHING
+            // that keeps time — not recordingElapsed, not the VAD, not the RMS
+            // meter, not the chunk/diar cadence, not ATND. A failed extraction
+            // just skips this buffer rather than aborting the office write above.
+            var remoteSamples16k: [Float] = []
             if let remoteTapChannel,
                let remoteMono = AudioBufferProcessor.extractChannel(buffer, channel: remoteTapChannel) {
                 try? self.remoteFile?.write(from: remoteMono)
+                remoteSamples16k = remoteResampler?.resample(remoteMono) ?? []
             }
             self.onBuffer?(mono)
 
@@ -474,6 +562,11 @@ final class AudioRecorder: ObservableObject {
                             || self.chunkElapsed >= chunkInterval * 1.5
                 // Accumulate audio for live diarization (its own cadence below)
                 self.chunkAudio.append(contentsOf: samples16k)
+                // Remote accumulates in parallel. Empty for a single-stream
+                // session, so this is a no-op there.
+                if !remoteSamples16k.isEmpty {
+                    self.remoteChunkAudio.append(contentsOf: remoteSamples16k)
+                }
 
                 if boundary, chunked != nil {
                     self.chunkElapsed = 0
@@ -484,6 +577,14 @@ final class AudioRecorder: ObservableObject {
                     self.pendingChunkWindows.append(windowStart...self.recordingElapsed)
                     self.lastChunkBoundary = self.recordingElapsed
                     self.startChunkFlush(chunked)
+                    // Remote rides the SAME boundary — one cadence, so the two
+                    // streams' windows stay aligned and comparable. The office
+                    // FLUSH (n=0) is queued first and the remote `-2` frame
+                    // second; the sidecar is single-threaded and processes its
+                    // stdin strictly in order, so they run sequentially with no
+                    // new concurrency of our own.
+                    self.flushRemoteChunk(window: windowStart...self.recordingElapsed,
+                                          chunked: chunked)
                 }
 
                 // Diarization boundary — independent of the ASR chunk interval.
@@ -510,6 +611,8 @@ final class AudioRecorder: ObservableObject {
             input.removeTap(onBus: 0)
             file = nil
             remoteFile = nil   // never leave the Remote handle open on a failed start
+            remoteStreamActive = false
+            remoteLastChunkDone = true
         }
     }
 
@@ -544,6 +647,10 @@ final class AudioRecorder: ObservableObject {
         // gap-fill (positionGapFill → label(for:)) still queries it afterward.
         positionDiarizer?.stop()
         modelLoader.nemotronASR?.flush() // finalize any trailing speech
+        // Remote's tail window is the office tail window — read BEFORE the office
+        // branch below advances `lastChunkBoundary`, so both streams' last windows
+        // still line up exactly as they did at every live boundary.
+        let tailStart = lastChunkBoundary
         if modelLoader.chunkedASR != nil {
             pendingChunkWindows.append(lastChunkBoundary...max(recordingElapsed, lastChunkBoundary + 0.01))
             lastChunkBoundary = recordingElapsed
@@ -561,6 +668,18 @@ final class AudioRecorder: ObservableObject {
         vad = nil
         rms = 0
         isSpeaking = false
+
+        // Remote tail, on the office tail's window. Inert for a single-stream
+        // session (`remoteLastChunkDone` is already true and stays true).
+        if remoteStreamActive {
+            flushRemoteChunk(window: tailStart...max(recordingElapsed, tailStart + 0.01),
+                             chunked: modelLoader.chunkedASR)
+            startRemoteStopWatchdog()
+            // Nothing in flight (idle channel, everything gated as silent) →
+            // complete the gate now instead of waiting for a callback that
+            // will never come.
+            checkRemoteChunksDone()
+        }
 
         // Who spoke when — either append a tail (continue from live labels) or
         // re-diarize the whole recording (best global clustering).
@@ -599,6 +718,15 @@ final class AudioRecorder: ObservableObject {
     private func buildStopSteps(willRunStopPass: Bool) {
         var steps = [StopStep(id: "chunk", name: "Transcribing final audio",
                               state: lastChunkDone ? .done : .loading)]
+        // Remote only appears for a dual-stream session. Its state is read the
+        // same way the chunk step's is, because the remote tail may already have
+        // completed (or been gated as silent) before this list is built.
+        if remoteStreamActive {
+            steps.append(StopStep(id: "remote", name: "Transcribing remote audio",
+                                  state: remoteLastChunkDone
+                                      ? (remoteChunkError.map { .failed($0) } ?? .done)
+                                      : .loading))
+        }
         if willRunStopPass {
             steps.append(StopStep(id: "diarize", name: "Identifying speakers", state: .loading))
         }
@@ -628,7 +756,7 @@ final class AudioRecorder: ObservableObject {
     /// All post-stop work landed → drop the overlay and re-enable Start.
     /// Idempotent; every leg's completion path calls it.
     private func checkStopProcessingDone() {
-        guard state == .processing, lastChunkDone, finalDiarDone,
+        guard state == .processing, lastChunkDone, remoteLastChunkDone, finalDiarDone,
               !overlapRepairing, repairTask == nil else { return }
         stopWatchdog?.cancel()
         stopWatchdog = nil
@@ -967,7 +1095,12 @@ final class AudioRecorder: ObservableObject {
         for seg in segments {
             rows.append(contentsOf: derivedRows(for: seg, regions: regions))
         }
-        displayRows = rows
+        // Office and Remote are two independent label spaces sharing one clock;
+        // they only ever meet here, at the final sort. With no remote segments
+        // the merge returns `rows` untouched — the single-stream path is exactly
+        // what it was.
+        displayRows = Self.mergeRowsByStartTime(office: rows,
+                                                remote: Self.remoteRows(remoteSegments))
     }
 
     /// The display rows one raw segment expands into — the single source of truth
@@ -1809,6 +1942,215 @@ final class AudioRecorder: ObservableObject {
         return office.deletingLastPathComponent().appendingPathComponent(name)
     }
 
+    // MARK: Remote stream — transcription, gating and rows
+
+    /// Label every Remote row carries in this phase. Remote diarization is
+    /// phase 4; until then the stream is known to be "not the room" and nothing
+    /// more, and the label says exactly that rather than implying an identity.
+    nonisolated static let remoteSpeakerLabel = "Remote Speaker - Speaker Unknown"
+
+    /// Offset phase 4 will add to remote-local speaker ids, mirroring the proven
+    /// `PositionDiarizer.positionIDBase = 100_000` split: a downstream consumer
+    /// then tells the three label spaces apart with one integer comparison
+    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position). Declared here now so
+    /// the ranges are chosen together and cannot collide later; NOTHING uses it
+    /// yet — remote rows carry no speaker id at all in this phase, so no remote
+    /// id can reach `SpeakerProfileStore`/profiles.json.
+    nonisolated static let remoteIDBase = 10_000
+
+    /// RMS below which a remote chunk is treated as silence and never sent to the
+    /// sidecar. An idle conferencing channel is otherwise a standing ~14 % GPU
+    /// cost every chunk interval for a guaranteed-empty transcript (measured duty
+    /// per 30 s chunk on this M4: Qwen3 4.3 s, Whisper 4.2 s, Granite 5.6 s).
+    ///
+    /// 0.004 ≈ −48 dBFS: a digital loopback carrying nothing sits at or very near
+    /// 0.0, and even room-noise-through-a-codec stays far below this, while
+    /// ordinary speech is an order of magnitude above it. Erring low is the safe
+    /// direction — a false "not silent" costs one wasted transcription, a false
+    /// "silent" would drop real speech.
+    nonisolated static let remoteSilenceRMS: Float = 0.004
+
+    /// Why this remote chunk is not worth transcribing, or nil to go ahead.
+    /// Pure, so the gate can be tested without audio hardware or a sidecar.
+    nonisolated static func remoteChunkSkipReason(_ samples: [Float],
+                                                  threshold: Float = remoteSilenceRMS) -> String? {
+        // Under half a second there is nothing an ASR model can usefully say, and
+        // a stray fragment would still cost a full round trip.
+        guard samples.count >= 8_000 else {
+            return "under 0.5s (\(samples.count) samples)"
+        }
+        let level = AudioBufferProcessor.rms(samples)
+        guard level >= threshold else {
+            return String(format: "near-silent (rms %.5f < %.5f)", level, threshold)
+        }
+        return nil
+    }
+
+    /// The display rows the remote segments render as. All one label space, no
+    /// speaker ids (nothing to rename), no overlap tagging — remote text never
+    /// goes through the office pipeline.
+    ///
+    /// Sorted by start time here rather than relying on append order: segments
+    /// are appended when their transcription lands, which is chronological today
+    /// (one sidecar, one queue) but is not something the merge should depend on.
+    nonisolated static func remoteRows(_ segments: [RemoteSegment]) -> [SpeakerUtterance] {
+        segments.sorted { $0.window.lowerBound < $1.window.lowerBound }.compactMap { seg in
+            let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return nil }
+            return SpeakerUtterance(id: seg.id.uuidString,
+                                    speaker: remoteSpeakerLabel, speakerID: nil,
+                                    start: seg.window.lowerBound, end: seg.window.upperBound,
+                                    text: text, confirmed: true, overlapped: false,
+                                    isRemote: true)
+        }
+    }
+
+    /// Interleave office and remote rows by start time into one transcript.
+    ///
+    /// A merge walk, NOT a sort of the combined list: office rows keep their own
+    /// order exactly as `rebuildDisplayRows` produced it, and each remote row is
+    /// placed before the first office row that starts later. Re-sorting the whole
+    /// list would silently reorder office rows the office pipeline placed
+    /// deliberately — separation-debug segments, for instance, carry real windows
+    /// but are pinned to the end on purpose.
+    ///
+    /// A tie puts Office first (the room is the primary record). A row with no
+    /// start time — an unconfirmed realtime segment with no window yet — sorts as
+    /// +∞, the same convention `insertPinnedSorted` uses, so remote rows go ahead
+    /// of it; it still keeps its place among the office rows.
+    ///
+    /// With no remote rows this returns `office` untouched: the single-stream
+    /// transcript is not re-sorted, re-ordered or otherwise disturbed by this
+    /// feature existing. `remote` is expected sorted (see `remoteRows`).
+    nonisolated static func mergeRowsByStartTime(office: [SpeakerUtterance],
+                                                 remote: [SpeakerUtterance]) -> [SpeakerUtterance] {
+        guard !remote.isEmpty else { return office }
+        func key(_ r: SpeakerUtterance) -> Double { r.start ?? .greatestFiniteMagnitude }
+        var out: [SpeakerUtterance] = []
+        out.reserveCapacity(office.count + remote.count)
+        var i = 0, j = 0
+        while i < office.count, j < remote.count {
+            if key(remote[j]) < key(office[i]) {
+                out.append(remote[j]); j += 1
+            } else {
+                out.append(office[i]); i += 1
+            }
+        }
+        out.append(contentsOf: office[i...])
+        out.append(contentsOf: remote[j...])
+        return out
+    }
+
+    /// Startup refusal for the one dual-stream configuration that cannot work:
+    /// Voxtral needs ~27 s to transcribe a 30 s chunk (Qwen3 4.3 s, Whisper 4.2 s,
+    /// Granite 5.6 s, all measured on this M4), i.e. ~90 % duty for a SINGLE
+    /// stream. A second stream pushes it past 100 %: chunk N+1 arrives before N
+    /// has finished and the sidecar's queue grows without bound for the rest of
+    /// the meeting. Nil = start normally.
+    ///
+    /// Refusal rather than a silent fallback to another model: the owner selects
+    /// chunked models deliberately, on measured WER, and quietly substituting one
+    /// would make the transcript's provenance a lie.
+    nonisolated static func dualStreamRefusalMessage(remoteChannel: Int?,
+                                                     chunkedModelID: String) -> String? {
+        guard remoteChannel != nil, chunkedModelID == "voxtral" else { return nil }
+        return "Voxtral cannot transcribe two streams. It needs about 27 s per 30 s chunk "
+             + "(Qwen3 4.3 s, Whisper 4.2 s, Granite 5.6 s), so the Remote stream would fall "
+             + "permanently behind. Pick another chunked model in Settings → Models → Chunked, "
+             + "or turn the Remote channel off in Settings → Microphone."
+    }
+
+    /// Hand the remote audio accumulated since the last boundary to the chunked
+    /// sidecar's file-transcribe path, unless the silence gate rejects it.
+    /// Always clears `remoteChunkAudio` — a skipped chunk's audio is dropped, not
+    /// carried into the next window, so remote windows keep matching office ones.
+    private func flushRemoteChunk(window: ClosedRange<Double>, chunked: ChunkedASRService?) {
+        guard remoteStreamActive else { return }
+        let samples = remoteChunkAudio
+        remoteChunkAudio = []
+        guard let chunked else { return }
+        if let reason = Self.remoteChunkSkipReason(samples) {
+            dualStreamLog("SKIP remote [\(fmt(window.lowerBound))-\(fmt(window.upperBound))] \(reason)")
+            return
+        }
+        remotePendingChunks += 1
+        Task { [weak self] in
+            guard let self else { return }
+            let url = await Task.detached(priority: .utility) {
+                Self.writeTempWAV(samples: samples, prefix: "remote-chunk")
+            }.value
+            guard let url else {
+                self.remoteChunkError = "Could not write remote audio for transcription"
+                self.dualStreamLog("FAIL remote [\(self.fmt(window.lowerBound))-"
+                                   + "\(self.fmt(window.upperBound))] could not write a temp WAV")
+                self.finishRemoteChunk()
+                return
+            }
+            do {
+                let text = try await chunked.transcribeFile(path: url.path)
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    self.dualStreamLog("remote [\(self.fmt(window.lowerBound))-"
+                                       + "\(self.fmt(window.upperBound))] empty transcript")
+                } else {
+                    self.remoteSegments.append(RemoteSegment(text: trimmed, window: window))
+                    self.rebuildDisplayRows()
+                    self.dualStreamLog("remote [\(self.fmt(window.lowerBound))-"
+                                       + "\(self.fmt(window.upperBound))] \(trimmed)")
+                }
+            } catch {
+                // Same philosophy as `onChunkError`: log and carry on. Remote
+                // trouble must never cost the user their office transcript.
+                self.remoteChunkError = "Some remote audio could not be transcribed — "
+                                      + "see logs/dual-stream.log"
+                self.dualStreamLog("FAIL remote [\(self.fmt(window.lowerBound))-"
+                                   + "\(self.fmt(window.upperBound))] \(error.localizedDescription)")
+            }
+            try? FileManager.default.removeItem(at: url)
+            self.finishRemoteChunk()
+        }
+    }
+
+    /// One remote request settled (either way) — maybe complete the stop gate.
+    private func finishRemoteChunk() {
+        remotePendingChunks = max(0, remotePendingChunks - 1)
+        checkRemoteChunksDone()
+    }
+
+    /// The remote leg of the stop gate, mirroring `checkLastChunkDone`.
+    /// Idempotent; every remote exit path calls it.
+    private func checkRemoteChunksDone() {
+        guard stopped, remotePendingChunks == 0, !remoteLastChunkDone else { return }
+        remoteLastChunkDone = true
+        remoteStopWatchdog?.cancel()
+        remoteStopWatchdog = nil
+        setStopStep("remote", remoteChunkError.map { .failed($0) } ?? .done)
+        checkStopProcessingDone()
+    }
+
+    /// Remote can never hold the blocking stop overlay hostage. Each request
+    /// already has the sidecar client's own 120 s timeout; this is the backstop
+    /// for anything that never resolves at all, on the same pattern as
+    /// `chunkWatchdog` / `finalDiarWatchdog`.
+    private func startRemoteStopWatchdog() {
+        remoteStopWatchdog?.cancel()
+        remoteStopWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(180))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, !self.remoteLastChunkDone else { return }
+                let message = "Remote transcription timed out — see logs/dual-stream.log"
+                self.remoteChunkError = message
+                self.remotePendingChunks = 0
+                self.remoteLastChunkDone = true
+                self.remoteStopWatchdog = nil
+                self.dualStreamLog(message)
+                self.setStopStep("remote", .failed(message))
+                self.checkStopProcessingDone()
+            }
+        }
+    }
+
     /// Append a line to logs/dual-stream.log. Mirrors `overlapLog`: one line per
     /// decision, so a Remote stream that silently degraded to single-stream on the
     /// owner's machine is diagnosable after the fact.
@@ -1827,11 +2169,14 @@ final class AudioRecorder: ObservableObject {
         try? handle.close()
     }
 
-    /// Write 16 kHz mono float samples to a temp WAV (for chunk diarization).
+    /// Write 16 kHz mono float samples to a temp WAV (chunk diarization, and the
+    /// remote chunk handed to the sidecar's file-transcribe frame — `prefix` only
+    /// names the file, so the two are told apart in the temp dir).
     /// Pure/self-contained, so it runs off the main actor from the detached task.
-    private nonisolated static func writeTempWAV(samples: [Float]) -> URL? {
+    private nonisolated static func writeTempWAV(samples: [Float],
+                                                 prefix: String = "diar-chunk") -> URL? {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("diar-chunk-\(UUID().uuidString).wav")
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString).wav")
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                          sampleRate: 16_000, channels: 1,
                                          interleaved: false),
