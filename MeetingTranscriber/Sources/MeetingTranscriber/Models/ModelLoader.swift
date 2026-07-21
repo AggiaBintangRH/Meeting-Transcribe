@@ -95,6 +95,13 @@ final class ModelLoader: ObservableObject {
         if d.object(forKey: "realtime.enabled") as? Bool ?? true {
             steps.append(Step(model: ModelCatalog.realtime, checkInstalled: true))
         }
+        // Word aligner — no sidecar of its own (it loads inside the chunked ASR
+        // process), so this step only verifies the weights are there. Checked
+        // BEFORE the chunked step: without them the chunked sidecar itself fails
+        // to start, and "aligner not downloaded" is the useful message.
+        if d.object(forKey: "align.enabled") as? Bool ?? false {
+            steps.append(Step(model: ModelCatalog.wordAligner, checkInstalled: true))
+        }
         // Chunked model (rolling accurate pass) — per settings selection
         let chunkedID = d.string(forKey: "chunked.model") ?? "qwen3"
         steps.append(Step(model: ModelCatalog.chunkedModel(id: chunkedID), checkInstalled: true))
@@ -128,6 +135,12 @@ final class ModelLoader: ObservableObject {
     private func load(_ step: Step) async throws {
         if step.checkInstalled, !ModelCatalog.isInstalled(step.model) {
             throw LoadError.notDownloaded(step.model.name)
+        }
+
+        // Word aligner: nothing to start — the chunked ASR sidecar loads it
+        // itself when Config.alignRepoID is set. The check above is the step.
+        if step.model.id == ModelCatalog.wordAligner.id {
+            return
         }
 
         // Silero VAD: start the Python sidecar (real model load).

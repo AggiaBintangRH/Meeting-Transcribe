@@ -34,6 +34,13 @@ final class AudioRecorder: ObservableObject {
         // its own "MossFormer2 Index N" row (name in pinnedSpeakerName). No
         // attribution, no merge — never replaces speaker text.
         var isSeparationDebug: Bool = false
+        // Word timestamps from the optional forced aligner (nil when alignment
+        // is off or failed). Times are CHUNK-RELATIVE seconds exactly as the
+        // sidecar sent them; `alignedChunkDuration` is that chunk buffer's
+        // length, kept so the conversion to recording time can be sanity-checked
+        // against `window`. Stored only — nothing reads these yet.
+        var words: [ChunkedASRService.AlignedWord]? = nil
+        var alignedChunkDuration: Double? = nil
     }
 
     /// One rendered row: a single speaker's turn with its time span and text.
@@ -329,7 +336,7 @@ final class AudioRecorder: ObservableObject {
             UserDefaults.standard.object(forKey: "diarization.intervalSec") as? Int ?? 30
         )
         chunkedError = nil
-        chunked?.onChunkTranscript = { [weak self] text in
+        chunked?.onChunkTranscript = { [weak self] text, words, chunkDuration in
             Task { @MainActor in
                 guard let self else { return }
                 self.chunkWatchdog?.cancel()
@@ -342,7 +349,12 @@ final class AudioRecorder: ObservableObject {
                     ? nil : self.pendingChunkWindows.removeFirst()
                 self.segments.removeAll { !$0.confirmed }
                 if !text.isEmpty {
-                    self.segments.append(TranscriptSegment(text: text, confirmed: true, window: window))
+                    // Words are carried through untouched (chunk-relative) for
+                    // word-exact attribution; nothing consumes them yet, so row
+                    // building below is unchanged.
+                    self.segments.append(TranscriptSegment(text: text, confirmed: true, window: window,
+                                                           words: words,
+                                                           alignedChunkDuration: chunkDuration))
                 }
                 // Rebuild rows: splits this chunk by any diarization turns already in.
                 self.rebuildDisplayRows()

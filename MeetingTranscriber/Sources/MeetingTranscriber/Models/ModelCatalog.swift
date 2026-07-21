@@ -77,6 +77,19 @@ enum ModelCatalog {
         hfRepo: "BUT-FIT/DiCoW_v3_3_large"
     )
 
+    /// Qwen3-ForcedAligner 0.6B — forced alignment, not recognition. It takes the
+    /// chunked model's own text plus the same audio and returns the start/end time
+    /// of each word, which is what lets a chunk be split by speaker at the exact
+    /// word instead of by estimated character position. Loads inside the chunked
+    /// ASR sidecar (no separate process).
+    static let wordAligner = ModelInfo(
+        id: "aligner",
+        name: "Qwen3-ForcedAligner 0.6B (bf16)",
+        detail: "Word-level timestamps for the chunked transcript · used for word-exact speaker attribution",
+        badges: ["MLX bf16", "word timestamps", "~0.3 s/chunk", "0.6B"],
+        hfRepo: "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
+    )
+
     /// Engines offered on Settings → Models → Overlap (`overlap.engine`).
     static let overlapEngines: [ModelInfo] = [overlapSeparation, overlapDicow]
 

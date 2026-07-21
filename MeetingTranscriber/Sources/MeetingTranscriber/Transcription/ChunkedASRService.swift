@@ -12,15 +12,36 @@ final class ChunkedASRService: @unchecked Sendable {
         let repoID: String
         let language: String   // "auto" or ISO code
         let modelName: String
+        /// Forced-aligner repo, or nil when word alignment is off. Part of Config
+        /// (which is Equatable) so flipping the setting recreates the sidecar.
+        let alignRepoID: String?
 
         /// Resolve from Settings → Models → Chunked via the model classes.
         static func fromSettings() -> Config {
+            let d = UserDefaults.standard
             let model = ChunkedASRModelFactory.fromSettings()
-            let code = UserDefaults.standard.string(forKey: "chunked.language") ?? "auto"
+            let code = d.string(forKey: "chunked.language") ?? "auto"
+            let aligning = d.object(forKey: "align.enabled") as? Bool ?? false
             return Config(repoID: model.repoID,
                           language: model.languageArgument(for: code) ?? "auto",
-                          modelName: model.info.name)
+                          modelName: model.info.name,
+                          alignRepoID: aligning ? ModelCatalog.wordAligner.hfRepo : nil)
         }
+    }
+
+    /// One word from the forced aligner, as returned with a `final` message.
+    ///
+    /// `start`/`end` are seconds relative to the START OF THE CHUNK BUFFER, not
+    /// the recording. `text` is the aligner's normalized token ("oneminute" for
+    /// "one-minute") — display text comes from `src`, the index into the
+    /// original text's whitespace split. Coverage can be incomplete: items
+    /// force-fitted past the end of the audio are dropped, so trailing source
+    /// words may have no entry at all.
+    struct AlignedWord: Decodable, Equatable, Sendable {
+        let text: String
+        let start: Double
+        let end: Double
+        let src: Int
     }
 
     enum ServiceError: LocalizedError {
@@ -42,8 +63,10 @@ final class ChunkedASRService: @unchecked Sendable {
 
     let config: Config
 
-    /// Called with each chunk's transcript.
-    var onChunkTranscript: ((String) -> Void)?
+    /// Called with each chunk's transcript, plus the aligner's words and the
+    /// sidecar's buffer length in seconds when word alignment is on and
+    /// succeeded (both nil otherwise).
+    var onChunkTranscript: ((String, [AlignedWord]?, Double?) -> Void)?
 
     /// Called when a chunk fails to transcribe (message from the sidecar).
     var onChunkError: ((String) -> Void)?
@@ -96,6 +119,11 @@ final class ChunkedASRService: @unchecked Sendable {
         var arguments = command.arguments + ["--model", config.repoID]
         if config.language != "auto" {
             arguments += ["--language", config.language]
+        }
+        // Omitted entirely when alignment is off — the sidecar then takes its
+        // original, byte-identical path.
+        if let alignRepoID = config.alignRepoID {
+            arguments += ["--align-model", alignRepoID]
         }
         process.arguments = arguments
         process.standardInput = stdinPipe
@@ -217,10 +245,16 @@ final class ChunkedASRService: @unchecked Sendable {
 
     // MARK: - Output
 
-    private struct Message: Decodable {
+    /// Internal rather than private only so the decoding contract (the aligner
+    /// keys must stay optional) can be covered by a unit test.
+    struct Message: Decodable {
         let type: String
         let text: String
         let id: Int?
+        // Additive, alignment-only keys on `final` — absent when alignment is
+        // off or failed, so every pre-alignment payload still decodes.
+        let words: [AlignedWord]?
+        let dur: Double?
     }
 
     private func waitUntilLoaded(timeout: TimeInterval) -> (ready: Bool, errorReason: String?) {
@@ -274,7 +308,7 @@ final class ChunkedASRService: @unchecked Sendable {
                       let message = try? JSONDecoder().decode(Message.self, from: data)
                 else { continue }
                 switch message.type {
-                case "final": self.onChunkTranscript?(message.text)
+                case "final": self.onChunkTranscript?(message.text, message.words, message.dur)
                 case "error": self.onChunkError?(message.text)
                 case "file_result": self.resolveFile(id: message.id, text: message.text, isError: false)
                 case "file_error": self.resolveFile(id: message.id, text: message.text, isError: true)
