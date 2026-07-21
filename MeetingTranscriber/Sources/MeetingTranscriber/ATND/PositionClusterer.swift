@@ -32,7 +32,9 @@ enum PositionMath {
 
 /// Median/hold filter over a trailing time window, to kill the jitter right
 /// after a talker switch. Emits nil until it has ≥3 samples spanning the window;
-/// then emits the component-wise-median direction (renormalized).
+/// then emits the trailing window's ANGULAR MEDOID — the buffered sample whose
+/// summed angular distance to the others is smallest. See `medoid` for why the
+/// obvious component-wise median was wrong.
 struct DirectionSmoother {
     var windowSec: Double = 0.4
 
@@ -90,15 +92,12 @@ struct DirectionSmoother {
             return nil
         }
 
-        let xs = buffer.map { $0.vector.x }.sorted()
-        let ys = buffer.map { $0.vector.y }.sorted()
-        let zs = buffer.map { $0.vector.z }.sorted()
-        let med = SIMD3<Double>(Self.median(xs), Self.median(ys), Self.median(zs))
-        let len = simd_length(med)
-        // Degenerate (opposing vectors cancelling) → fall back to the newest.
-        let unit = len > 1e-9 ? med / len : vector
+        // The emitted direction is one of the buffered samples verbatim — no
+        // averaging, so no renormalization and no degenerate case to fall back
+        // from (the old `len > 1e-9 ? med/len : vector` guard is gone with the
+        // component-wise median that needed it).
         emissionsSinceReset += 1
-        return DirectionSample(t: t, vector: unit)
+        return DirectionSample(t: t, vector: Self.medoid(buffer))
     }
 
     mutating func reset() {
@@ -107,11 +106,56 @@ struct DirectionSmoother {
         emissionsSinceReset = 0
     }
 
-    private static func median(_ sorted: [Double]) -> Double {
-        let n = sorted.count
-        if n == 0 { return 0 }
-        if n % 2 == 1 { return sorted[n / 2] }
-        return (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+    /// The buffered sample minimising the SUM of angular distances to every
+    /// other buffered sample — the angular medoid.
+    ///
+    /// This replaced a component-wise median (sort x, y, z independently, take
+    /// the middle of each), which could FABRICATE a direction nobody was ever
+    /// observed at:
+    ///  - on an EVEN buffer the median averages the two middle values per
+    ///    component, so 2 old + 2 stray samples emitted a vector pointing
+    ///    BETWEEN the two real directions (~45° off both). That matches no
+    ///    existing cluster, so `PositionClusterer.assign` spawned a new one — a
+    ///    2-sample stray minted a phantom speaker (the owner's log: a phantom
+    ///    cluster 16.2° from Speaker 1 against a 15° threshold, while the real
+    ///    seats sat 33–41° apart). Since `atnd.position.tauDeg` is calibrated
+    ///    per room, that artefact was being calibrated against instead of the
+    ///    room's geometry;
+    ///  - even on an ODD buffer, x could come from one sample, y from another
+    ///    and z from a third, which is again a direction nobody sat at (and not
+    ///    generally a unit vector before renormalizing).
+    ///
+    /// The medoid can never do either, at ANY buffer size, because it RETURNS an
+    /// observed sample. It keeps the robustness that made a median the right
+    /// shape here: with 3 old + 2 stray samples each old sample scores `2d`
+    /// (0 to its 2 peers, `d` to each stray) while each stray scores `3d`, so
+    /// the majority wins — median-like by construction.
+    ///
+    /// Buffer size is ~4–5 (0.4 s at 10 Hz), so the O(n²) scan is irrelevant.
+    ///
+    /// TIE-BREAK: the OLDEST sample wins, explicitly (strict improvement by more
+    /// than `tieEpsilon` is required to displace the incumbent) rather than by
+    /// relying on sort stability. A tie is exactly the 2-vs-2 case, and holding
+    /// the previous state there is what a "median/hold filter" is for — it
+    /// resists spurious switching. `tieEpsilon` is in DEGREES-summed and far
+    /// below any real difference, so two theoretically-equal scores that differ
+    /// only by float rounding still resolve to the oldest.
+    private static let tieEpsilon = 1e-9
+
+    private static func medoid(_ samples: [DirectionSample]) -> SIMD3<Double> {
+        var bestIndex = 0
+        var bestScore = Double.greatestFiniteMagnitude
+        for (i, a) in samples.enumerated() {
+            var score = 0.0
+            for b in samples {
+                score += PositionMath.angularDistanceDeg(a.vector, b.vector)
+            }
+            if score < bestScore - tieEpsilon {
+                bestScore = score
+                bestIndex = i
+            }
+        }
+        return samples[bestIndex].vector
     }
 }
 

@@ -188,4 +188,91 @@ final class PositionClustererTests: XCTestCase {
         // A stationary talker past warm-up must emit on essentially every push.
         XCTAssertGreaterThan(Double(emittedAfter2s) / Double(totalAfter2s), 0.95)
     }
+
+    // MARK: - 9. Smoother never fabricates a direction (angular medoid)
+
+    /// Push `rotations` at `spacing` starting at t=0 and return the LAST emission.
+    /// Times are index-derived so they don't drift under the warm-up threshold.
+    private func lastEmission(_ rotations: [Double], spacing: Double,
+                              windowSec: Double = 0.4) -> DirectionSample? {
+        var s = DirectionSmoother(windowSec: windowSec)
+        var out: DirectionSample?
+        for (i, r) in rotations.enumerated() {
+            if let e = s.push(t: Double(i) * spacing, vector: vec(rotate: r, angle: 0)) {
+                out = e
+            }
+        }
+        return out
+    }
+
+    /// The even-buffer defect: a component-wise median of 2 old + 2 stray samples
+    /// averaged the two middle values per component and emitted a vector pointing
+    /// ~45° BETWEEN the two real directions — matching no cluster, so `assign`
+    /// spawned a phantom one. The medoid must emit an OBSERVED direction.
+    func testEvenBufferEmitsARealDirectionNotABlend() {
+        // 0.13s spacing ⇒ the 0.4s trailing window holds exactly 4 samples.
+        let rotations = [0.0, 0, 0, 0, 0, 0, 90, 90]
+        let out = try! XCTUnwrap(lastEmission(rotations, spacing: 0.13))
+
+        // It is one of the two observed directions, not something in between.
+        let toOld = PositionMath.angularDistanceDeg(out.vector, vec(rotate: 0, angle: 0))
+        let toStray = PositionMath.angularDistanceDeg(out.vector, vec(rotate: 90, angle: 0))
+        XCTAssertTrue(toOld < 1e-9 || toStray < 1e-9,
+                      "emitted a direction nobody was observed at: az=\(azimuthDeg(out.vector))")
+        // And specifically NOT the ~45° blend the old median produced.
+        XCTAssertGreaterThan(abs(toOld - toStray), 45,
+                             "emitted vector sits between the two real directions")
+        // Exact 2-vs-2 tie ⇒ the OLDEST sample holds: the 0° group.
+        XCTAssertEqual(toOld, 0, accuracy: 1e-9)
+    }
+
+    /// 3 old + 2 stray: each old sample scores `2d`, each stray `3d`, so the
+    /// majority direction wins — the median-like robustness the medoid keeps.
+    func testMajorityDirectionWinsOnOddBuffer() {
+        // 0.09s spacing ⇒ the 0.4s trailing window holds exactly 5 samples.
+        let rotations = [0.0, 0, 0, 0, 0, 0, 0, 0, 90, 90]
+        let out = try! XCTUnwrap(lastEmission(rotations, spacing: 0.09))
+        XCTAssertEqual(PositionMath.angularDistanceDeg(out.vector, vec(rotate: 0, angle: 0)),
+                       0, accuracy: 1e-9)
+    }
+
+    /// The tie-break is explicit, not sort stability: swap which group is older
+    /// in the same 2-vs-2 shape and the answer follows the OLDEST sample.
+    func testExactTiePrefersTheOldestSample() {
+        let rotations = [90.0, 90, 90, 90, 90, 90, 0, 0]
+        let out = try! XCTUnwrap(lastEmission(rotations, spacing: 0.13))
+        XCTAssertEqual(PositionMath.angularDistanceDeg(out.vector, vec(rotate: 90, angle: 0)),
+                       0, accuracy: 1e-9,
+                       "the older group must hold on an exact tie")
+    }
+
+    /// Property: whatever the stream, every emission is (bit-for-bit, within
+    /// epsilon) one of the directions actually pushed. This is the invariant the
+    /// component-wise median could not hold at ANY buffer size.
+    func testEmissionIsAlwaysAnObservedDirection() {
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        func next() -> Double {   // deterministic LCG, no platform RNG dependency
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Double(seed >> 11) / Double(UInt64(1) << 53)
+        }
+
+        var s = DirectionSmoother(windowSec: 0.4)
+        var pushed: [SIMD3<Double>] = []
+        for i in 0..<500 {
+            // Jumpy stream: mostly one of 4 seats, occasionally a wild stray.
+            let seats = [0.0, 75, 156, 240]
+            let rot = next() < 0.15 ? next() * 360 : seats[Int(next() * 4) % 4]
+            let elev = next() * 60 - 10
+            let v = vec(rotate: rot, angle: elev)
+            pushed.append(v)
+            guard let out = s.push(t: Double(i) * 0.1, vector: v) else { continue }
+            // Component-wise, not angular: `angularDistanceDeg` goes through
+            // acos, whose derivative near dot=1 blows a 1e-16 rounding error up
+            // to ~1e-6°, which would make an EXACT match look inexact.
+            let matched = pushed.contains {
+                simd_length($0 - out.vector) < 1e-12
+            }
+            XCTAssertTrue(matched, "emission at i=\(i) was not an observed direction")
+        }
+    }
 }
