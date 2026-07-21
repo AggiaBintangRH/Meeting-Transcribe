@@ -25,6 +25,17 @@ enum PositionSource: String, CaseIterable {
     case atnd
     /// Pure pyannote — no gap-fill, no position label on the live partial.
     case pyannote
+    /// ATND decides WHEN (its boundary timeline tiles the window, so no holes),
+    /// pyannote decides WHO (each span adopts the id+name of the pyannote turn it
+    /// overlaps most). The two layers stop competing over the same question:
+    /// position knows the direction to the millisecond, voice knows the identity
+    /// that matches a stored profile across meetings.
+    ///
+    /// Useful side effect: because a relabeled row carries a PYANNOTE id wherever
+    /// pyannote had a turn, overlap repair and speaker profiles keep working on
+    /// it — unlike `atnd`, where every row carries a position id and `applyRepair`
+    /// matches nothing. A span no pyannote turn overlaps keeps its position id.
+    case atndTimingPyannoteIdentity = "atndTiming"
 
     static let defaultsKey = "atnd.position.source"
 
@@ -47,15 +58,20 @@ typealias LabeledRange = (start: Double, end: Double, id: Int, name: String)
 /// What one `derivedRows` call should hand to the display path, decided purely
 /// from the selected source and the pyannote ranges for that window.
 ///
-/// Deliberately a plan value rather than inline branching: the deferred fourth
-/// mode ("ATND holds the boundaries, pyannote only renames them") becomes one
-/// more `case` in `plan(for:pyannoteRanges:)` and nothing in `derivedRows` moves.
+/// Deliberately a plan value rather than inline branching — which is exactly how
+/// the fourth mode ("ATND holds the boundaries, pyannote only renames them")
+/// landed: one more `case` in `plan(pyannoteRanges:)` plus one flag, and the only
+/// thing `derivedRows` gained is a single `relabel` step.
 struct PositionCoveragePlan {
     /// pyannote ranges that appear in the rendered rows.
     let displayRanges: [LabeledRange]
     /// Coverage handed to `positionGapFill` — its complement over the window is
     /// what ATND fills. `nil` means "don't gap-fill at all" (no position labels).
     let gapFillCoverage: [LabeledRange]?
+    /// Rename the assembled ranges from pyannote, keeping their ATND boundaries.
+    /// Only `atndTimingPyannoteIdentity` sets it; `derivedRows` applies it as one
+    /// step right after `filled` is built, so no mode needs a special case there.
+    var relabelFromPyannote = false
 }
 
 extension PositionSource {
@@ -66,6 +82,9 @@ extension PositionSource {
     ///   is EMPTY, so its complement is the entire window and the position spans
     ///   tile all of it. pyannote is not consulted for display, only skipped.
     /// - `pyannote`: pyannote shows, no gap-fill runs.
+    /// - `atndTimingPyannoteIdentity`: the SAME coverage as `atnd` — position
+    ///   tiles the whole window — plus the relabel flag, so the spans keep their
+    ///   ATND boundaries but take pyannote's identity.
     func plan(pyannoteRanges: [LabeledRange]) -> PositionCoveragePlan {
         switch self {
         case .both:
@@ -76,6 +95,43 @@ extension PositionSource {
         case .pyannote:
             return PositionCoveragePlan(displayRanges: pyannoteRanges,
                                         gapFillCoverage: nil)
+        case .atndTimingPyannoteIdentity:
+            return PositionCoveragePlan(displayRanges: [], gapFillCoverage: [],
+                                        relabelFromPyannote: true)
+        }
+    }
+}
+
+/// The relabel step of `atndTimingPyannoteIdentity`, factored out of
+/// `derivedRows` so it can be tested without app state.
+enum PositionRelabel {
+    /// Give each range in `ranges` the id and name of the pyannote turn it
+    /// overlaps MOST in time, leaving its start/end alone. Greatest overlap (not
+    /// midpoint, not first hit) because an ATND span can straddle a pyannote
+    /// boundary, and the speaker who held most of the span is the one the words
+    /// in it mostly belong to.
+    ///
+    /// A range no pyannote turn overlaps keeps its own id and name — which for a
+    /// gap-fill span is a POSITION id. That is deliberate: pyannote genuinely has
+    /// no answer there (freshly-committed text, the first 1–2 s it never turns),
+    /// and inventing one would be worse than showing the seat. Those ids stay
+    /// inside `derivedRows`' local `filled` array exactly as in `both`/`atnd`.
+    static func fromPyannote(_ ranges: [LabeledRange],
+                             pyannote: [LabeledRange]) -> [LabeledRange] {
+        guard !pyannote.isEmpty else { return ranges }
+        return ranges.map { r in
+            var bestID = r.id
+            var bestName = r.name
+            var bestOverlap = 0.0
+            for p in pyannote {
+                let o = min(r.end, p.end) - max(r.start, p.start)
+                if o > bestOverlap {
+                    bestOverlap = o
+                    bestID = p.id
+                    bestName = p.name
+                }
+            }
+            return (start: r.start, end: r.end, id: bestID, name: bestName)
         }
     }
 }

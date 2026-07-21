@@ -71,6 +71,8 @@ final class PositionSourceTests: XCTestCase {
     func testUsesPositionFlag() {
         XCTAssertTrue(PositionSource.both.usesPosition)
         XCTAssertTrue(PositionSource.atnd.usesPosition)
+        XCTAssertTrue(PositionSource.atndTimingPyannoteIdentity.usesPosition,
+                      "the boundaries come from ATND, so the position layer must run")
         XCTAssertFalse(PositionSource.pyannote.usesPosition)
     }
 
@@ -106,7 +108,76 @@ final class PositionSourceTests: XCTestCase {
         }
     }
 
-    // MARK: - 4. Defaults reading
+    // MARK: - 4. `atndTiming` — ATND boundaries, pyannote identity
+
+    /// Coverage is the same as `atnd` (position tiles the whole window); the only
+    /// difference is the relabel flag, and only this mode sets it.
+    func testAtndTimingSelectsFullWindowCoveragePlusRelabel() {
+        let plan = PositionSource.atndTimingPyannoteIdentity.plan(pyannoteRanges: pyannote)
+        XCTAssertTrue(plan.displayRanges.isEmpty)
+        XCTAssertTrue(plan.gapFillCoverage?.isEmpty ?? false,
+                      "empty covered set ⇒ ATND tiles the window, as in `atnd`")
+        XCTAssertTrue(plan.relabelFromPyannote)
+        for other in [PositionSource.both, .atnd, .pyannote] {
+            XCTAssertFalse(other.plan(pyannoteRanges: pyannote).relabelFromPyannote,
+                           "\(other.rawValue) must not relabel")
+        }
+    }
+
+    /// A position span sitting inside one pyannote turn adopts that turn's id and
+    /// name — and keeps its OWN start/end, which is the whole point of the mode.
+    func testRelabelAdoptsTheOverlappingTurnKeepingBoundaries() {
+        let spans = [range(1, 2.5, 100_000, "Position 1")]
+        let out = PositionRelabel.fromPyannote(spans, pyannote: pyannote)
+        assertSame(out, [range(1, 2.5, 1, "Speaker 1")],
+                   "must take pyannote's identity at ATND's boundaries")
+    }
+
+    /// Straddling two turns → the one with the GREATER overlap wins (1.0s of
+    /// Speaker 1 vs 2.0s of Speaker 2), not the first or the earlier one.
+    func testRelabelPicksTheGreaterOverlap() {
+        let spans = [range(2, 7, 100_001, "Position 2")]
+        let out = PositionRelabel.fromPyannote(spans, pyannote: pyannote)
+        XCTAssertEqual(out.first?.id, 2)
+        XCTAssertEqual(out.first?.name, "Speaker 2")
+        // Flip the balance and the answer flips with it.
+        let flipped = PositionRelabel.fromPyannote([range(0.5, 5.5, 100_001, "Position 2")],
+                                                   pyannote: pyannote)
+        XCTAssertEqual(flipped.first?.id, 1)
+    }
+
+    /// The hole between the two pyannote turns: nothing overlaps, so the span
+    /// keeps its POSITION id and name. Honest — pyannote has no answer there.
+    func testRelabelKeepsThePositionIDWhereNoTurnOverlaps() {
+        let spans = [range(3.2, 4.8, 100_002, "Position 3")]
+        let out = PositionRelabel.fromPyannote(spans, pyannote: pyannote)
+        assertSame(out, spans, "an uncovered span must keep its own label")
+        XCTAssertGreaterThanOrEqual(out[0].id, PositionDiarizer.positionIDBase)
+    }
+
+    /// No pyannote at all (nothing diarized yet) → every span is untouched, so
+    /// the mode degrades exactly to `atnd` rather than blanking the labels.
+    func testRelabelWithNoPyannoteIsIdentity() {
+        let spans = [range(0, 3, 100_000, "Position 1"), range(3, 6, 100_001, "Position 2")]
+        assertSame(PositionRelabel.fromPyannote(spans, pyannote: []), spans,
+                   "no pyannote turns ⇒ nothing to adopt")
+    }
+
+    /// The id invariant: relabeling can only ever move an id pyannote → display.
+    /// Every id in the result is either one of pyannote's own or the span's
+    /// original — the reverse direction (a position id reaching pyannote's world)
+    /// is structurally impossible because `pyannote` is only ever read here.
+    func testRelabelNeverInventsAnID() {
+        let spans = [range(0, 2, 100_000, "Position 1"),
+                     range(2, 4, 100_001, "Position 2"),
+                     range(4, 9, 100_002, "Position 3")]
+        let allowed = Set(pyannote.map(\.id) + spans.map(\.id))
+        for r in PositionRelabel.fromPyannote(spans, pyannote: pyannote) {
+            XCTAssertTrue(allowed.contains(r.id), "invented id \(r.id)")
+        }
+    }
+
+    // MARK: - 5. Defaults reading
 
     /// A missing key is every existing install — it must land on `both`, and an
     /// unrecognised value must not silently change the policy either.
@@ -119,5 +190,7 @@ final class PositionSourceTests: XCTestCase {
         XCTAssertEqual(PositionSource.current(d), .atnd)
         d.set("pyannote", forKey: PositionSource.defaultsKey)
         XCTAssertEqual(PositionSource.current(d), .pyannote)
+        d.set("atndTiming", forKey: PositionSource.defaultsKey)
+        XCTAssertEqual(PositionSource.current(d), .atndTimingPyannoteIdentity)
     }
 }

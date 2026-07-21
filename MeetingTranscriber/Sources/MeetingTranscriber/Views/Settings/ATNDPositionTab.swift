@@ -51,15 +51,17 @@ struct ATNDPositionTab: View {
                     Text("Both").tag(PositionSource.both.rawValue)
                     Text("Position only").tag(PositionSource.atnd.rawValue)
                     Text("Voice only").tag(PositionSource.pyannote.rawValue)
+                    Text("Position timing").tag(PositionSource.atndTimingPyannoteIdentity.rawValue)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(maxWidth: 360, alignment: .leading)
+                .frame(maxWidth: 480, alignment: .leading)
                 .disabled(!enabled)
                 VStack(alignment: .leading, spacing: 6) {
                     sourceRow("Both", "Voice labels win wherever pyannote has a turn; talker direction fills only the stretches it left uncovered.")
                     sourceRow("Position only", "Every row is labeled by talker direction. Voice diarization still runs underneath — its labels just aren't shown.")
                     sourceRow("Voice only", "Pure voice labels, no direction at all. Effectively the same as turning this feature off; it's here so you can A/B the two layers on one recording.")
+                    sourceRow("Position timing", "Direction decides where each row starts and ends; voice decides the name. Rows keep voice speaker numbers wherever voice had a turn, so overlap repair and saved speaker profiles still apply to them — unlike \"Position only\".")
                 }
                 Text("With \"Both\", if voice diarization decides two seats are the same person it will merge them into one speaker — voice wins, so the direction split disappears. That is expected, not a bug: switch to \"Position only\" to see the seats.")
                     .font(.system(size: 11))

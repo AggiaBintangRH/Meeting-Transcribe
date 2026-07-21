@@ -951,16 +951,23 @@ final class AudioRecorder: ObservableObject {
         }
         let ranges = speakerRanges(in: window)
         // The one switch on the display source (see `PositionSource.plan`):
-        //   both     → pyannote shows, ATND fills pyannote's own complement
-        //   atnd     → nothing pyannote shows, empty coverage ⇒ ATND tiles it all
-        //   pyannote → pyannote shows, no gap-fill runs at all
+        //   both       → pyannote shows, ATND fills pyannote's own complement
+        //   atnd       → nothing pyannote shows, empty coverage ⇒ ATND tiles it all
+        //   pyannote   → pyannote shows, no gap-fill runs at all
+        //   atndTiming → ATND tiles it all, then each span takes the identity of
+        //                the pyannote turn it overlaps most (`relabelFromPyannote`)
         // `ranges` itself is untouched in every mode, and the position ids the
         // fills carry never leave `filled` — liveTurns/overlapRegions/
         // speakerCount/SpeakerProfileStore stay pure pyannote throughout.
         let plan = positionSource.plan(pyannoteRanges: ranges)
         // Off/silent ATND → fills is [] regardless of the source.
         let fills = plan.gapFillCoverage.map { positionGapFill(window: window, covered: $0) } ?? []
-        let filled = (plan.displayRanges + fills).sorted { $0.start < $1.start }
+        var filled = (plan.displayRanges + fills).sorted { $0.start < $1.start }
+        // Timing from ATND, identity from pyannote: rename in place, boundaries
+        // untouched. Only ids move here, and only pyannote → display, never back.
+        if plan.relabelFromPyannote {
+            filled = PositionRelabel.fromPyannote(filled, pyannote: ranges)
+        }
 
         // Unconfirmed (realtime) segments stay a single provisional row — the text
         // isn't final, so it isn't sentence-split — but it must still carry the
