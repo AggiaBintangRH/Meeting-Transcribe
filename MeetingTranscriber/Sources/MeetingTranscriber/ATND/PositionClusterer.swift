@@ -305,6 +305,15 @@ struct ClusterChangeDetector {
     private var candidateFirstT: Double?
     private var lastFired: Double?
 
+    /// Whether a stable cluster has been established since the last reset.
+    /// Lets a caller distinguish "this sample established the FIRST stable
+    /// cluster" from "nothing happened" — both return nil, by design, because
+    /// there is no previous row to split from. The timeline still needs a
+    /// boundary in the first case (the first speaker's span has to start
+    /// somewhere), and reading this before/after the call gets it without
+    /// changing what `push`/`forceChange` fire on.
+    var hasStableCluster: Bool { stableCluster != nil }
+
     /// Returns the BOUNDARY TIME (nil = no boundary) rather than a Bool: the
     /// caller needs to stamp the new span with when the switch really happened,
     /// and only the detector knows the candidate's first sample time. A plain
@@ -464,8 +473,35 @@ enum BoundaryBackdating {
     /// Roughly one word of speech rides on this correction, which is exactly the
     /// word that decides whether a turn's first word lands in the right row.
     ///
-    /// `previousBoundaryT` clamps the result so the timeline stays ordered: a
-    /// correction may never move a boundary before the one it follows.
+    /// A boundary may never be moved back by more than this fraction of the gap
+    /// to the boundary before it. See `correctedBoundary` for why a plain clamp
+    /// at the previous boundary is not enough. One HALF is the natural choice:
+    /// the correction being applied is itself `windowSec / 2`, and half leaves the
+    /// preceding span at least half of the duration it was actually observed to
+    /// have — short enough to still buy most of the correction on a normal-length
+    /// turn, generous enough that a legitimately ~1 s turn keeps a usable span.
+    static let maxBackdateFraction = 0.5
+
+    /// `previousBoundaryT` bounds the result so the timeline stays ordered AND so
+    /// the preceding span survives.
+    ///
+    /// Clamping to `max(previous, corrected)` — the obvious rule — is a bug, and
+    /// it is the exact bug this redesign exists to kill: a boundary at 5.0
+    /// followed by one back-dated to 4.9 clamps the second to 5.0, the first
+    /// span becomes `[5.0, 5.0]`, `spans(in:)` drops it, and that speaker
+    /// DISAPPEARS from the transcript. Back-dating must never be able to erase
+    /// the turn it is dating away from.
+    ///
+    /// So the correction is made proportional to the distance from the previous
+    /// boundary instead: at most `maxBackdateFraction` of that gap may be given
+    /// back. The result then always lands STRICTLY after the previous boundary
+    /// whenever the raw report does, so the preceding span keeps a non-zero
+    /// duration no matter how aggressive the correction is.
+    ///
+    /// The one case that still collapses is a report at or before the previous
+    /// boundary (possible when the rate limit delays a fire past a later
+    /// boundary): there is no time to distribute, so it degrades to the previous
+    /// boundary — two events genuinely at the same instant, later one wins.
     static func correctedBoundary(reportedT: Double,
                                   windowSec: Double,
                                   isFirstEmissionAfterReset: Bool,
@@ -478,6 +514,74 @@ enum BoundaryBackdating {
             corrected = reportedT - windowSec / 2
         }
         guard let previous = previousBoundaryT else { return corrected }
-        return max(previous, corrected)
+        let gap = reportedT - previous
+        guard gap > 0 else { return previous }
+        let floorT = reportedT - gap * maxBackdateFraction
+        return max(floorT, corrected)
+    }
+}
+
+/// The per-sample boundary decision that drives `PositionTimeline` — factored out
+/// of `PositionDiarizer.ingest` so it can be exercised without a `@MainActor`
+/// object subscribed to the `ATNDBeamService` singleton. Pure: everything it
+/// touches arrives as a parameter.
+enum PositionBoundaryRule {
+    /// Advance `detector`/`timeline` for one smoothed sample, returning whether
+    /// the caller should fire its real-time row split (`onClusterChange`).
+    ///
+    /// Three boundary sources, matching the owner's spec that EVERY direction
+    /// change starts a new row:
+    ///  - the FIRST stable cluster of the session — it fires nothing (there is no
+    ///    previous row to split from) but must still be recorded, otherwise the
+    ///    first speaker has no span at all;
+    ///  - `forceChange` — a direction outside every stored speaker's range, taken
+    ///    immediately;
+    ///  - `push` — a return to an already-stored speaker, confirmed and
+    ///    rate-limited.
+    ///
+    /// The two firing paths report DIFFERENT times (`forceChange` reports the
+    /// sample's own `t`, `push` the candidate's first sample time), but the same
+    /// back-dating applies to both: each of those times is itself a smoother
+    /// emission, and every emission is late by the same amount. The first-emission
+    /// -after-reset special case can only ever coincide with `forceChange`, since
+    /// a `push` fire needs `consecutiveRequired` emissions behind it — so reading
+    /// the smoother's CURRENT reset state is correct for both.
+    @discardableResult
+    static func apply(sample: DirectionSample,
+                      clusterID: Int,
+                      isNewCluster: Bool,
+                      smoother: DirectionSmoother,
+                      detector: inout ClusterChangeDetector,
+                      timeline: inout PositionTimeline) -> Bool {
+        let hadStable = detector.hasStableCluster
+
+        let fired = isNewCluster
+            ? detector.forceChange(to: clusterID, at: sample.t)
+            : detector.push(t: sample.t, clusterID: clusterID)
+
+        if let boundary = fired {
+            record(reportedT: boundary, clusterID: clusterID,
+                   smoother: smoother, timeline: &timeline)
+            return true
+        }
+        if !hadStable, detector.hasStableCluster {
+            // Speech just started: open the first speaker's span here.
+            record(reportedT: sample.t, clusterID: clusterID,
+                   smoother: smoother, timeline: &timeline)
+        }
+        return false
+    }
+
+    private static func record(reportedT: Double,
+                               clusterID: Int,
+                               smoother: DirectionSmoother,
+                               timeline: inout PositionTimeline) {
+        let t = BoundaryBackdating.correctedBoundary(
+            reportedT: reportedT,
+            windowSec: smoother.windowSec,
+            isFirstEmissionAfterReset: smoother.lastEmissionWasFirstSinceReset,
+            windowStart: smoother.windowStart,
+            previousBoundaryT: timeline.boundaries.last?.t)
+        timeline.append(t: t, clusterID: clusterID)
     }
 }

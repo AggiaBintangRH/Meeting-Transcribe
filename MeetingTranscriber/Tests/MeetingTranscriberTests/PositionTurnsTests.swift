@@ -327,29 +327,92 @@ final class PositionTurnsTests: XCTestCase {
         XCTAssertEqual(fallback, 9.8, accuracy: 1e-9)
     }
 
-    func testBackdatingClampsAtPreviousBoundary() {
-        // Normal case clamped.
+    /// The correction is bounded by a FRACTION of the gap to the previous
+    /// boundary, never by the previous boundary itself — see the next test for
+    /// why that difference matters.
+    func testBackdatingIsBoundedByAFractionOfTheGap() {
+        // Normal case: gap 0.1 → at most 0.05 may be given back, so the raw
+        // -0.2 correction is bounded at 9.95 (NOT at the previous boundary 9.9).
         let a = BoundaryBackdating.correctedBoundary(reportedT: 10.0,
                                                      windowSec: 0.4,
                                                      isFirstEmissionAfterReset: false,
                                                      windowStart: nil,
                                                      previousBoundaryT: 9.9)
-        XCTAssertEqual(a, 9.9, accuracy: 1e-9)
+        XCTAssertEqual(a, 9.95, accuracy: 1e-9)
 
-        // Post-reset case clamped.
+        // Post-reset case: gap 2.0 → bounded at 9.0, not at windowStart 2.0.
         let b = BoundaryBackdating.correctedBoundary(reportedT: 10.0,
                                                      windowSec: 0.4,
                                                      isFirstEmissionAfterReset: true,
                                                      windowStart: 2.0,
                                                      previousBoundaryT: 8.0)
-        XCTAssertEqual(b, 8.0, accuracy: 1e-9)
+        XCTAssertEqual(b, 9.0, accuracy: 1e-9)
 
-        // And the corrected value never reorders a real timeline.
+        // A wide gap leaves the full correction untouched — the bound only bites
+        // when the previous boundary is close.
+        let c = BoundaryBackdating.correctedBoundary(reportedT: 10.0,
+                                                     windowSec: 0.4,
+                                                     isFirstEmissionAfterReset: false,
+                                                     windowStart: nil,
+                                                     previousBoundaryT: 5.0)
+        XCTAssertEqual(c, 9.8, accuracy: 1e-9)
+
+        // A report at/before its predecessor has no time to distribute: it
+        // degrades to the previous boundary rather than reordering.
+        let d = BoundaryBackdating.correctedBoundary(reportedT: 7.0,
+                                                     windowSec: 0.4,
+                                                     isFirstEmissionAfterReset: false,
+                                                     windowStart: nil,
+                                                     previousBoundaryT: 9.0)
+        XCTAssertEqual(d, 9.0, accuracy: 1e-9)
+
+        // And the corrected values never reorder a real timeline.
         var timeline = PositionTimeline()
         timeline.append(t: 9.9, clusterID: 0)
         timeline.append(t: a, clusterID: 1)
-        timeline.append(t: b, clusterID: 2)
-        XCTAssertEqual(timeline.boundaries.map { $0.t }, [9.9, 9.9, 9.9])
+        XCTAssertEqual(timeline.boundaries.map { $0.t }, [9.9, 9.95])
+    }
+
+    /// MANDATORY: back-dating must never erase the span it dates away from.
+    /// Clamping at `max(previous, corrected)` would collapse cluster 0 to
+    /// `[5.0, 5.0]`, `spans(in:)` would drop it, and that speaker would VANISH —
+    /// the exact failure this redesign exists to eliminate.
+    func testBackdatingCannotEraseAShortSpan() {
+        var timeline = PositionTimeline()
+        timeline.append(t: 5.0, clusterID: 0)
+
+        // Absurdly aggressive: a 0.1 s turn whose correction (0.2 s, plus a
+        // windowStart way back at 0.0) is larger than the turn itself.
+        for (reportedT, first, start) in [(5.1, false, nil as Double?),
+                                          (5.1, true, 0.0 as Double?),
+                                          (5.001, true, 0.0 as Double?)] {
+            var t = timeline
+            let corrected = BoundaryBackdating.correctedBoundary(
+                reportedT: reportedT,
+                windowSec: 0.4,
+                isFirstEmissionAfterReset: first,
+                windowStart: start,
+                previousBoundaryT: t.boundaries.last?.t)
+            XCTAssertGreaterThan(corrected, 5.0,
+                                 "boundary must land strictly after its predecessor (\(reportedT), \(first))")
+            t.append(t: corrected, clusterID: 1)
+
+            let spans = t.spans(in: 0.0...10.0)
+            XCTAssertEqual(spans.count, 2, "cluster 0's span was erased (\(reportedT), \(first))")
+            XCTAssertEqual(spans[0].clusterID, 0)
+            XCTAssertGreaterThan(spans[0].end - spans[0].start, 0,
+                                 "cluster 0 kept no duration (\(reportedT), \(first))")
+        }
+
+        // A legitimately short (~1 s) turn still keeps a USABLE span, not a sliver:
+        // at most half the gap is ever given back.
+        let corrected = BoundaryBackdating.correctedBoundary(
+            reportedT: 6.0,
+            windowSec: 0.4,
+            isFirstEmissionAfterReset: true,
+            windowStart: 0.0,
+            previousBoundaryT: 5.0)
+        XCTAssertEqual(corrected, 5.5, accuracy: 1e-9)
     }
 
     // MARK: - 9. Detector reports the candidate's FIRST sample time
@@ -426,5 +489,156 @@ final class PositionTurnsTests: XCTestCase {
         s.reset()
         XCTAssertNil(s.windowStart)
         XCTAssertFalse(s.lastEmissionWasFirstSinceReset)
+    }
+
+    // MARK: - 11. PositionBoundaryRule — the live timeline, end to end
+
+    /// The whole `PositionDiarizer.ingest` pipeline minus the `@MainActor` object
+    /// and its singleton subscription: smoother → clusterer → boundary rule.
+    /// Same code path the app runs, so these are not a re-implementation.
+    private struct Pipeline {
+        var smoother = DirectionSmoother(windowSec: 0.4)
+        var clusterer = PositionClusterer(tauDeg: 15)
+        var detector = ClusterChangeDetector()
+        var timeline = PositionTimeline()
+        /// Sample times at which `onClusterChange` would have fired.
+        var fireTimes: [Double] = []
+
+        mutating func push(t: Double, rotate: Double) {
+            guard let sample = smoother.push(t: t, vector: PositionMath.unitVector(rotateDeg: rotate,
+                                                                                   angleDeg: 0)) else { return }
+            let result = clusterer.assign(sample)
+            if PositionBoundaryRule.apply(sample: sample,
+                                          clusterID: result.clusterID,
+                                          isNewCluster: result.isNew,
+                                          smoother: smoother,
+                                          detector: &detector,
+                                          timeline: &timeline) {
+                fireTimes.append(sample.t)
+            }
+        }
+
+        /// 10 Hz over `[start, end)`, times derived from the index so they don't
+        /// drift under the smoother's warm-up threshold (see the smoother's
+        /// `windowStart` comment).
+        mutating func feed(rotate: Double, start: Double, end: Double) {
+            let n = Int(((end - start) / 0.1).rounded())
+            for i in 0..<n { push(t: start + Double(i) * 0.1, rotate: rotate) }
+        }
+    }
+
+    /// THE BUG CASE. Speaker 1 → a ~1 s Speaker 2 → Speaker 3. The old
+    /// `turns(in:)` path drops speaker 2 (too short for the density gate) and
+    /// leaves that stretch uncovered → a `SPEAKER UNKNOWN` row. The timeline
+    /// yields THREE spans that tile the window with no gaps.
+    func testShortMiddleTurnYieldsThreeTilingSpans() {
+        /// S1 for 5 s → S2 for `middle` s → S3 for 5 s, and the spans over the
+        /// whole window.
+        func run(middle: Double) -> (spans: [(start: Double, end: Double, clusterID: Int)],
+                                     legacy: [(start: Double, end: Double, clusterID: Int)]) {
+            var p = Pipeline()
+            p.feed(rotate: 0, start: 0.0, end: 5.0)                    // Speaker 1
+            p.feed(rotate: 90, start: 5.0, end: 5.0 + middle)          // Speaker 2
+            p.feed(rotate: 180, start: 5.0 + middle, end: 10.0 + middle)  // Speaker 3
+            let window = 0.0...(10.0 + middle)
+            return (p.timeline.spans(in: window), p.clusterer.turns(in: window))
+        }
+
+        for middle in [1.0, 0.5] {
+            let (spans, _) = run(middle: middle)
+            XCTAssertEqual(spans.map { $0.clusterID }, [0, 1, 2],
+                           "middle=\(middle) spans=\(spans)")
+
+            // No holes and no overlaps across the whole covered window.
+            XCTAssertEqual(spans[0].start, 0.0, accuracy: 1e-9)
+            XCTAssertEqual(spans[1].start, spans[0].end, accuracy: 1e-9)
+            XCTAssertEqual(spans[2].start, spans[1].end, accuracy: 1e-9)
+            XCTAssertEqual(spans[2].end, 10.0 + middle, accuracy: 1e-9)
+            for s in spans {
+                XCTAssertGreaterThan(s.end - s.start, 0, "empty span — middle=\(middle) \(spans)")
+            }
+
+            // The middle speaker keeps a span near their real turn.
+            XCTAssertEqual(spans[1].start, 5.0, accuracy: 0.35)
+            XCTAssertGreaterThan(spans[1].end - spans[1].start, middle / 2)
+        }
+
+        // And the legacy path really does lose the short one: at 0.5 s the
+        // density gate drops it and 5.x..6.x is left uncovered — the stretch that
+        // renders as SPEAKER UNKNOWN today.
+        XCTAssertEqual(run(middle: 0.5).legacy.count, 2,
+                       "turns(in:) is expected to drop the 0.5 s turn — got \(run(middle: 0.5).legacy)")
+    }
+
+    /// The first stable cluster of a session opens the timeline but must NOT fire
+    /// a row split — there is no previous row to split from.
+    func testFirstStableClusterRecordsABoundaryButFiresNothing() {
+        var p = Pipeline()
+        p.feed(rotate: 0, start: 2.0, end: 5.0)
+
+        XCTAssertTrue(p.fireTimes.isEmpty, "first speaker must not fire onClusterChange")
+        XCTAssertEqual(p.timeline.boundaries.count, 1)
+        XCTAssertEqual(p.timeline.boundaries[0].clusterID, 0)
+        // Back-dated to the raw stream's own start, not to the first emission
+        // (which is a full smoothing window late).
+        XCTAssertEqual(p.timeline.boundaries[0].t, 2.0, accuracy: 1e-9)
+        // And speech before the first boundary stays uncovered.
+        XCTAssertTrue(p.timeline.spans(in: 0.0...1.9).isEmpty)
+    }
+
+    /// A return to an ALREADY-STORED speaker starts a NEW span, not a
+    /// continuation of their earlier one — every direction change is a new row.
+    func testReturnToKnownSpeakerStartsANewSpan() {
+        var p = Pipeline()
+        p.feed(rotate: 0, start: 0.0, end: 4.0)     // S1
+        p.feed(rotate: 90, start: 4.0, end: 8.0)    // S2 (new direction)
+        p.feed(rotate: 0, start: 8.0, end: 12.0)    // back to S1 — known cluster
+
+        XCTAssertEqual(p.clusterer.clusters.count, 2, "the return must reuse cluster 0")
+        let spans = p.timeline.spans(in: 0.0...12.0)
+        XCTAssertEqual(spans.map { $0.clusterID }, [0, 1, 0], "spans=\(spans)")
+        XCTAssertEqual(spans[2].start, 8.0, accuracy: 0.4)
+        // Three separate spans, not two merged ones.
+        XCTAssertEqual(p.fireTimes.count, 2)
+    }
+
+    /// Boundary times come from the ATND sample's own audio clock. Two identical
+    /// direction sequences differing only by a clock offset produce boundaries
+    /// offset by exactly that much — nothing depends on call order or wall time.
+    func testBoundaryTimesTrackTheSampleClock() {
+        func boundaries(offsetBy offset: Double) -> [Double] {
+            var p = Pipeline()
+            p.feed(rotate: 0, start: offset + 0.0, end: offset + 4.0)
+            p.feed(rotate: 90, start: offset + 4.0, end: offset + 8.0)
+            return p.timeline.boundaries.map { $0.t }
+        }
+
+        let base = boundaries(offsetBy: 0)
+        let shifted = boundaries(offsetBy: 137.5)
+        XCTAssertEqual(base.count, 2)
+        XCTAssertEqual(shifted.count, base.count)
+        for (b, s) in zip(base, shifted) {
+            XCTAssertEqual(s - b, 137.5, accuracy: 1e-6, "base=\(base) shifted=\(shifted)")
+        }
+
+        // And a rate-limited `push` fire is stamped with the CANDIDATE's first
+        // sample time, not with the (later) time it was allowed to fire.
+        var detector = ClusterChangeDetector()
+        var timeline = PositionTimeline()
+        var smoother = DirectionSmoother(windowSec: 0.4)
+        for i in 0..<8 { _ = smoother.push(t: Double(i) * 0.1, vector: vec(rotate: 0)) }
+        _ = detector.forceChange(to: 0, at: 0.0)          // establish a stable cluster
+        for t in [20.0, 20.1] {
+            PositionBoundaryRule.apply(sample: DirectionSample(t: t, vector: vec(rotate: 90)),
+                                       clusterID: 1, isNewCluster: false,
+                                       smoother: smoother, detector: &detector, timeline: &timeline)
+        }
+        XCTAssertTrue(timeline.boundaries.isEmpty, "not yet confirmed")
+        PositionBoundaryRule.apply(sample: DirectionSample(t: 20.2, vector: vec(rotate: 90)),
+                                   clusterID: 1, isNewCluster: false,
+                                   smoother: smoother, detector: &detector, timeline: &timeline)
+        XCTAssertEqual(timeline.boundaries.count, 1)
+        // 20.0 (candidate's first sample) − 0.2 (half window), not 20.2.
+        XCTAssertEqual(timeline.boundaries[0].t, 19.8, accuracy: 1e-9)
     }
 }

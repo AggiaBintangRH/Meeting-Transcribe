@@ -43,6 +43,16 @@ final class PositionDiarizer: ObservableObject {
     /// new row in real time. Reset each session in `start(...)`.
     private var changeDetector = ClusterChangeDetector()
 
+    /// Event-driven boundary timeline — every confirmed direction change, stamped
+    /// with the ATND sample's own audio-clock time (never with when the app
+    /// noticed, and never with when text arrived: text is late by seconds, so
+    /// finalizing a row at processing time would make boundaries drift with
+    /// machine load).
+    ///
+    /// Built ALONGSIDE the `turns(in:)` path for now — nothing renders from it
+    /// yet, so it can be verified against real recordings before it takes over.
+    private var timeline = PositionTimeline()
+
     /// Called (on the MainActor, from `ingest`) when `changeDetector` confirms a
     /// talker switch. Installed by `AudioRecorder`; nil = no real-time splitting.
     var onClusterChange: (() -> Void)?
@@ -70,6 +80,7 @@ final class PositionDiarizer: ObservableObject {
         self.smoother = DirectionSmoother(windowSec: smoothingSec)
         self.clusterer = PositionClusterer(tauDeg: tauDeg)
         self.changeDetector = ClusterChangeDetector()
+        self.timeline = PositionTimeline()
         self.names = [:]
         self.lastNoticeElapsed = nil
         self.pendingEnrollment = nil
@@ -111,19 +122,20 @@ final class PositionDiarizer: ObservableObject {
             let result = clusterer.assign(sample)
             if result.isNew {
                 assignName(clusterID: result.clusterID)
-                // A direction outside every stored speaker's range is a new
-                // speaker — switch the row immediately, no debounce, so a short
-                // (~1 s) turn to a new direction isn't swallowed by the rate limit.
-                // (The returned boundary time is unused until Phase 2 wires the
-                // event-driven timeline; non-nil still means "fire", as before.)
-                if changeDetector.forceChange(to: result.clusterID, at: sample.t) != nil {
-                    onClusterChange?()
-                }
-            } else if changeDetector.push(t: sample.t, clusterID: result.clusterID) != nil {
-                // Switch back to a KNOWN speaker: confirmed + rate-limited, so
-                // jitter between two nearby stored speakers can't thrash the rows.
-                onClusterChange?()
             }
+            // One rule for both paths (see `PositionBoundaryRule`): a brand-new
+            // direction switches immediately (no debounce, so a short ~1 s turn
+            // isn't swallowed by the rate limit), a return to a KNOWN speaker is
+            // confirmed + rate-limited so jitter between two nearby stored
+            // speakers can't thrash the rows. It also records the boundary on the
+            // timeline, including the first speaker's — which fires nothing.
+            let didChange = PositionBoundaryRule.apply(sample: sample,
+                                                       clusterID: result.clusterID,
+                                                       isNewCluster: result.isNew,
+                                                       smoother: smoother,
+                                                       detector: &changeDetector,
+                                                       timeline: &timeline)
+            if didChange { onClusterChange?() }
         }
     }
 
@@ -220,6 +232,23 @@ final class PositionDiarizer: ObservableObject {
              end: turn.end,
              id: Self.positionIDBase + turn.clusterID,
              name: names[turn.clusterID] ?? "Speaker \(turn.clusterID + 1)")
+        }
+    }
+
+    /// Timeline spans over `range`, labelled the same way as `labeledTurns` —
+    /// `(positionIDBase + clusterID, name)` — and likewise valid after `stop()`,
+    /// since the final diarization pass queries it.
+    ///
+    /// Unlike `labeledTurns` these TILE `range` from the first boundary on: no
+    /// minimum duration, no density gate, nothing dropped. Not wired to the
+    /// rendered transcript yet — Phase 3 swaps the gap-fill over to it.
+    func labeledSpans(in range: ClosedRange<Double>)
+        -> [(start: Double, end: Double, id: Int, name: String)] {
+        timeline.spans(in: range).map { span in
+            (start: span.start,
+             end: span.end,
+             id: Self.positionIDBase + span.clusterID,
+             name: names[span.clusterID] ?? "Speaker \(span.clusterID + 1)")
         }
     }
 
