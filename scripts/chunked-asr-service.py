@@ -9,6 +9,9 @@ VAD silence). Higher-accuracy pass than the realtime Nemotron captions.
 Protocol:
   stdout: JSON lines {"type":"status"|"final"|"error","text":...}
           status LOADED after model init
+          final may additionally carry "words" (per-word timestamps) and
+          "dur" (chunk length in seconds) when --align-model is given and
+          alignment succeeded; both keys are simply absent otherwise.
   stdin:  length-prefixed frames:
           [int32 n]
             n  > 0 : n float32 mono 16 kHz samples follow (n*4 bytes)
@@ -19,9 +22,14 @@ Protocol:
                      file with the loaded model, emit file_result/file_error.
                      Fully additive — never touches the live streaming buffer.
 
-Args: --model <hf-repo> [--language <code>]
+Args: --model <hf-repo> [--language <code>] [--align-model <hf-repo>]
 Audio is passed to the model as a temp WAV for maximum compatibility
 across Qwen3 / Whisper / Voxtral mlx-audio implementations.
+
+--align-model enables optional forced alignment (Qwen3-ForcedAligner) over
+the flushed chunk, so each final can carry per-word start/end times. Absent
+⇒ alignment is fully disabled and the output is byte-identical to before.
+Alignment never affects the transcript: any failure just drops "words".
 """
 import argparse
 import json
@@ -40,6 +48,14 @@ SR = 16_000
 MIN_CHUNK_SEC = 0.25   # ignore blips shorter than this
 MAX_BUFFER_SEC = 300   # safety cap
 
+# Forced alignment force-fits whatever text it is handed onto the audio, so
+# hallucinated tail text (seen from Whisper) gets stamped past the end of the
+# chunk. Anything ending later than this is not a real word time.
+ALIGN_END_TOLERANCE_SEC = 0.5
+# If more than this fraction of items land past the end, the whole alignment
+# is untrustworthy — emit no times at all rather than a truncated guess.
+ALIGN_MAX_PAST_END_FRACTION = 0.10
+
 
 def emit(kind: str, text: str) -> None:
     try:
@@ -47,6 +63,24 @@ def emit(kind: str, text: str) -> None:
         sys.stdout.flush()
     except BrokenPipeError:
         sys.exit(0)  # app closed the pipe (quit/restart) — exit quietly
+
+
+def emit_final(text: str, words=None, dur: float = None) -> None:
+    """Emit a chunk final, optionally carrying per-word timestamps.
+
+    Kept separate from emit() so the existing (kind, text) contract — and the
+    Swift decoder that reads "text" — stays untouched. "words"/"dur" are only
+    present when alignment ran AND passed every gate.
+    """
+    payload = {"type": "final", "text": text}
+    if words is not None:
+        payload["words"] = words
+        payload["dur"] = dur
+    try:
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        sys.exit(0)
 
 
 def emit_file(kind: str, req_id, text: str) -> None:
@@ -79,6 +113,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--language", default="auto")
+    parser.add_argument("--align-model", default=None,
+                        help="Qwen3-ForcedAligner repo; omit to disable alignment")
     args = parser.parse_args()
 
     try:
@@ -159,6 +195,113 @@ def main() -> None:
         finally:
             os.unlink(path)
 
+    # ---- optional forced aligner -------------------------------------------
+    # Loaded here, BEFORE status LOADED, so a broken/missing aligner surfaces in
+    # the app's loading overlay through fail() instead of mid-recording.
+    aligner = None
+    align_proc = None
+    if args.align_model:
+        log(f"aligner: {args.align_model}")
+        try:
+            import time as _t
+            from mlx_audio.stt import load as load_align
+            _t0 = _t.time()
+            aligner = load_align(args.align_model)
+            # The model carries the very tokenizer used to build the item list;
+            # reusing it means our pairing can never drift from the model's.
+            align_proc = getattr(aligner, "aligner_processor", None)
+            if align_proc is None:
+                from mlx_audio.stt.models.qwen3_asr.qwen3_forced_aligner import (
+                    ForceAlignProcessor,
+                )
+                align_proc = ForceAlignProcessor()
+            log(f"aligner loaded in {_t.time() - _t0:.1f}s")
+        except Exception:  # noqa: BLE001
+            fail(f"Aligner load failed ({args.align_model}): {brief_traceback()}")
+
+    def pair_source_indices(text: str, items):
+        """Map every aligned item back to its index in text.split(), or None.
+
+        The aligner's tokenizer DROPS punctuation-only tokens ("a — b" yields 2
+        items, not 3), so a naive item↔word index would silently shift every
+        later word into the wrong speaker row. This replays the model's own
+        tokenize_space_lang() per source word and cross-checks the result
+        against encode_timestamp()'s word_list (the ground truth for what the
+        items will be). Any inconsistency ⇒ None ⇒ no timestamps at all; a
+        wrong index is worse than no alignment.
+        """
+        expected = []  # [(token, source word index)]
+        for src_index, word in enumerate(text.split()):
+            cleaned = align_proc.clean_token(word)
+            if not cleaned:
+                continue  # pure punctuation — consumes no item
+            for token in align_proc.split_segment_with_chinese(cleaned):
+                expected.append((token, src_index))
+
+        word_list, _ = align_proc.encode_timestamp(text, "English")
+        if [tok for tok, _ in expected] != list(word_list):
+            log(f"align: pairing mismatch vs tokenizer "
+                f"({len(expected)} paired vs {len(word_list)} tokens)")
+            return None
+        if len(expected) != len(items):
+            log(f"align: item count {len(items)} != token count {len(expected)}")
+            return None
+        for (token, _), item in zip(expected, items):
+            if item.text != token:
+                log(f"align: token drift ({item.text!r} != {token!r})")
+                return None
+        return [src_index for _, src_index in expected]
+
+    def align_chunk(audio: "np.ndarray", text: str):
+        """Return a list of {"text","start","end","src"} for this chunk, or None.
+
+        Never raises: the transcript is the product, timestamps are a bonus.
+        """
+        if aligner is None or not text:
+            return None
+        import time
+        started = time.time()
+        try:
+            dur = audio.size / SR
+            result = aligner.generate(audio, text, language="English")
+            items = list(result)
+            if not items:
+                log("align: no items returned")
+                return None
+
+            src_indices = pair_source_indices(text, items)
+            if src_indices is None:
+                return None  # pair_source_indices already logged why
+
+            # Reject force-fitted tail text (hallucinated words stamped past
+            # the end of the audio) — and bail entirely if there are many.
+            limit = dur + ALIGN_END_TOLERANCE_SEC
+            past_end = sum(1 for it in items if it.end_time > limit)
+            if past_end > max(1, int(len(items) * ALIGN_MAX_PAST_END_FRACTION)):
+                log(f"align: REJECTED — {past_end}/{len(items)} items end past "
+                    f"{dur:.1f}s chunk")
+                return None
+            if past_end:
+                log(f"align: dropped {past_end} item(s) ending past {dur:.1f}s")
+
+            words = [
+                {"text": it.text,
+                 "start": round(float(it.start_time), 3),
+                 "end": round(float(it.end_time), 3),
+                 "src": src_indices[i]}
+                for i, it in enumerate(items)
+                if it.end_time <= limit
+            ]
+            if not words:
+                log("align: everything past the end — no words emitted")
+                return None
+            log(f"align: {len(words)} words in {time.time() - started:.2f}s "
+                f"({dur / max(time.time() - started, 1e-6):.0f}x realtime)")
+            return words
+        except Exception:  # noqa: BLE001
+            log(f"align FAILED (transcript unaffected): {brief_traceback()}")
+            return None
+
     emit("status", "LOADED")
 
     buffer = np.zeros(0, dtype=np.float32)
@@ -205,7 +348,8 @@ def main() -> None:
                 try:
                     text = transcribe(buffer)
                     log(f"chunk done in {time.time() - started:.1f}s ({len(text)} chars)")
-                    emit("final", text)
+                    words = align_chunk(buffer, text) if text else None
+                    emit_final(text, words, secs if words is not None else None)
                 except Exception:  # noqa: BLE001
                     log("chunk FAILED")
                     emit("error", f"Chunk transcription failed: {brief_traceback()}")
