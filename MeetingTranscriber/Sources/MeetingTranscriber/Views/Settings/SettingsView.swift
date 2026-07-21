@@ -31,6 +31,7 @@ struct SettingsView: View {
     enum ModelTab: String, CaseIterable, SettingsSubTab {
         case realtime = "Realtime"
         case chunked = "Chunked"
+        case aligner = "Aligner"
         case vad = "VAD"
         case diarization = "Diarization"
         case overlap = "Overlap"
@@ -41,6 +42,7 @@ struct SettingsView: View {
             switch self {
             case .realtime: return "bolt.fill"
             case .chunked: return "doc.text.fill"
+            case .aligner: return "timeline.selection"
             case .vad: return "waveform.and.mic"
             case .diarization: return "person.2.fill"
             case .overlap: return "person.wave.2.fill"
@@ -51,6 +53,7 @@ struct SettingsView: View {
             switch self {
             case .realtime: return "Live captions while recording"
             case .chunked: return "Accurate final transcript"
+            case .aligner: return "Word timestamps — word-exact speaker attribution"
             case .vad: return "Voice activity detection"
             case .diarization: return "Speaker identification — who spoke when"
             case .overlap: return "Overlap recovery — separate simultaneous speech"
@@ -192,6 +195,7 @@ struct SettingsView: View {
                         switch modelTab {
                         case .realtime:    RealtimeModelTab()
                         case .chunked:     ChunkedModelTab()
+                        case .aligner:     AlignerTab()
                         case .vad:         VADTab()
                         case .diarization: DiarizationTab()
                         case .overlap:     OverlapTab()

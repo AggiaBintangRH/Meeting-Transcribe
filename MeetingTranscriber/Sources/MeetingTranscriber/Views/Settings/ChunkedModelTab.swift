@@ -5,7 +5,6 @@ struct ChunkedModelTab: View {
     @AppStorage("chunked.model")       private var model = "qwen3"
     @AppStorage("chunked.language")    private var language = "auto"
     @AppStorage("chunked.intervalSec") private var intervalSec = 30
-    @AppStorage("align.enabled")       private var alignEnabled = false
 
     var body: some View {
         Group {
@@ -42,22 +41,6 @@ struct ChunkedModelTab: View {
 
             SettingBlock(title: "Language") {
                 LanguagePicker(selection: $language)
-            }
-
-            SettingBlock(title: "Word timestamps") {
-                SettingToggle(label: "Align each chunk word-by-word", isOn: $alignEnabled)
-
-                Text("Runs Qwen3-ForcedAligner over each chunk to get the start and end time of every word. Without it, a chunk is split between speakers by estimated character position, so a switch mid-sentence lands a few words on the wrong side; with it the split can fall on the exact word. Costs about 0.3 s per chunk on top of transcription.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if !ModelCatalog.isInstalled(ModelCatalog.wordAligner) {
-                    Text("\(ModelCatalog.wordAligner.name) is not downloaded — run download-best-models.sh before turning this on, or the session will fail to start.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
         }
     }
