@@ -130,6 +130,25 @@ final class ATNDControlService: ObservableObject {
         open(host: host, port: port)
     }
 
+    /// Open the link at launch when the settings already describe a valid array,
+    /// so the owner does not have to press Connect every session. Auto-reconnect
+    /// then keeps it up, exactly as it does after a manual connect.
+    ///
+    /// Deliberately SILENT when ATND is off or the address has not been filled in
+    /// yet: `connect` reports those as `.failed`, which is right when a person
+    /// just pressed the button, but on a first launch — where nothing is
+    /// configured and nothing was asked for — it would greet them with a
+    /// connection error for a feature they have not turned on.
+    func autoConnectIfConfigured() {
+        let d = UserDefaults.standard
+        guard d.bool(forKey: "atnd.enabled"), !wantsConnection else { return }
+        let host = (d.string(forKey: "atnd.deviceIP") ?? "")
+            .trimmingCharacters(in: .whitespaces)
+        let port = d.object(forKey: "atnd.controlPort") as? Int ?? 17300
+        guard !host.isEmpty, UInt16(exactly: port) != nil, port > 0 else { return }
+        connect(host: host, port: port)
+    }
+
     func disconnect() {
         stopWanting()
         teardown()

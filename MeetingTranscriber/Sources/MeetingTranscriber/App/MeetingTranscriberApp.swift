@@ -20,7 +20,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Start the ATND1061 beam listener if it is enabled. It runs for the
         // whole app lifetime — independent of recording and of the TCP control
         // link — and re-syncs itself on later settings changes.
-        Task { @MainActor in ATNDBeamService.shared.syncWithSettings() }
+        // Bring the TCP control link up first when it is already configured: the
+        // beam listener is gated on it, so auto-connecting here is what makes the
+        // multicast stream arrive without anyone pressing Connect.
+        Task { @MainActor in
+            ATNDControlService.shared.autoConnectIfConfigured()
+            ATNDBeamService.shared.syncWithSettings()
+        }
         // Bring window to front when launched via `swift run`
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
