@@ -2,8 +2,16 @@ import XCTest
 import simd
 @testable import MeetingTranscriber
 
-/// Unit tests for `PositionClusterer.turns(in:)` and `ClusterChangeDetector`
-/// (real-time speaker-split building blocks). Pure value types — no app state.
+/// Unit tests for the position-diarization boundary timeline (`PositionTimeline`,
+/// `ClusterChangeDetector`, `BoundaryBackdating`, `PositionBoundaryRule`) — the
+/// real-time speaker-split building blocks. Pure value types — no app state.
+///
+/// Sections 1–4 and 6 were ported from the removed `PositionClusterer.turns(in:)`,
+/// which reconstructed turns after the fact and DROPPED short/sparse runs as
+/// flicker. Dropping a run drops a stretch of TIME, and uncovered time is what
+/// leaves words with no row (`SPEAKER UNKNOWN`). Two of those tests therefore
+/// assert the OPPOSITE of what they used to — see their comments; the inversions
+/// are the fix, not a weakening.
 final class PositionTurnsTests: XCTestCase {
 
     // MARK: - Helpers
@@ -12,79 +20,160 @@ final class PositionTurnsTests: XCTestCase {
         PositionMath.unitVector(rotateDeg: rotate, angleDeg: angle)
     }
 
-    /// Feed one direction per 0.1s (10 Hz) over `[start, end)` into the clusterer.
-    private func feed(_ c: inout PositionClusterer, rotate: Double,
-                      start: Double, end: Double) {
-        var t = start
-        while t < end - 1e-9 {
-            _ = c.assign(DirectionSample(t: t, vector: vec(rotate: rotate)))
-            t += 0.1
-        }
-    }
-
     // MARK: - 1. Two clusters split at the boundary
 
+    /// Ported from the `turns(in:)` era, same intent: two directions still yield
+    /// two spans split at the real switch — now via the live boundary path.
     func testTwoClustersSplitAtBoundary() {
-        var c = PositionClusterer(tauDeg: 15)
-        feed(&c, rotate: 0, start: 0.0, end: 3.0)    // cluster A (id 0)
-        feed(&c, rotate: 90, start: 3.0, end: 6.0)   // cluster B (id 1)
+        var p = Pipeline()
+        p.feed(rotate: 0, start: 0.0, end: 3.0)      // cluster A (id 0)
+        p.feed(rotate: 90, start: 3.0, end: 6.0)     // cluster B (id 1)
 
-        let turns = c.turns(in: 0.0...6.0)
-        XCTAssertEqual(turns.count, 2)
-        XCTAssertEqual(turns[0].clusterID, 0)
-        XCTAssertEqual(turns[1].clusterID, 1)
-        // Split lands at ~3s: A ends just before 3.0, B starts at 3.0.
-        XCTAssertEqual(turns[0].end, 2.9, accuracy: 0.05)
-        XCTAssertEqual(turns[1].start, 3.0, accuracy: 0.05)
+        let spans = p.timeline.spans(in: 0.0...6.0)
+        XCTAssertEqual(spans.map { $0.clusterID }, [0, 1], "spans=\(spans)")
+        XCTAssertEqual(spans[0].start, 0.0, accuracy: 1e-9)
+        XCTAssertEqual(spans[0].end, 3.0, accuracy: 0.1)   // split lands at ~3s
+        // Contiguous by construction — B starts exactly where A ends, so the
+        // switch itself can never be a hole.
+        XCTAssertEqual(spans[1].start, spans[0].end, accuracy: 1e-9)
+        XCTAssertEqual(spans[1].end, 6.0, accuracy: 1e-9)
     }
 
-    // MARK: - 2. Flicker inside a stable turn is dropped and flanks merge
+    // MARK: - 2. Flicker never becomes a boundary in the first place
 
-    func testFlickerIsAbsorbedIntoOneTurn() {
-        var c = PositionClusterer(tauDeg: 15)
+    /// The old test asserted "a stray is DROPPED and its flanks merge". Absorption
+    /// is now `ClusterChangeDetector`'s job — a stray of an already-known cluster
+    /// never reaches the 3-sample confirmation, so no boundary is created in the
+    /// first place and there is nothing to drop later. Asserted where the decision
+    /// now lives.
+    func testFlickerNeverConfirmsABoundary() {
+        var d = ClusterChangeDetector()
+        XCTAssertNil(d.push(t: 0.0, clusterID: 0))   // stable = 0
+        XCTAssertNil(d.push(t: 2.0, clusterID: 1))   // stray, sample 1 of 3
+        XCTAssertNil(d.push(t: 2.1, clusterID: 1))   // stray, sample 2 of 3
+        XCTAssertNil(d.push(t: 2.2, clusterID: 0))   // stray ends → candidate cleared
+        XCTAssertNil(d.push(t: 2.3, clusterID: 0))
+        // A LATER 2-sample stray still cannot fire — the earlier one left no
+        // partial credit behind.
+        XCTAssertNil(d.push(t: 2.4, clusterID: 1))
+        XCTAssertNil(d.push(t: 2.5, clusterID: 1))
+    }
+
+    /// The complementary half, and the property that actually protects the
+    /// transcript: even when a stray DOES become a boundary — a stray landing on a
+    /// brand-new direction takes the `forceChange` path deliberately, since an
+    /// unrecognised direction is treated as an unambiguous new speaker — it costs
+    /// no TIME. It gets its own short span and both flanks keep theirs, so the
+    /// window is still tiled end to end. Under the old `turns(in:)` gate the same
+    /// stray was deleted along with the stretch of time it sat in.
+    func testFlickerCostsNoTimeEvenIfItBecomesABoundary() {
+        var p = Pipeline()
         // A from 0..3s, but two stray B samples at 2.0 and 2.1.
-        var t = 0.0
-        while t < 3.0 - 1e-9 {
-            let isStray = (abs(t - 2.0) < 1e-9 || abs(t - 2.1) < 1e-9)
-            _ = c.assign(DirectionSample(t: t, vector: vec(rotate: isStray ? 90 : 0)))
-            t += 0.1
+        for i in 0..<30 {
+            p.push(t: Double(i) * 0.1, rotate: (i == 20 || i == 21) ? 90 : 0)
         }
 
-        let turns = c.turns(in: 0.0...3.0)
-        XCTAssertEqual(turns.count, 1)
-        XCTAssertEqual(turns[0].clusterID, 0)
-        XCTAssertEqual(turns[0].start, 0.0, accuracy: 0.05)
-        XCTAssertEqual(turns[0].end, 2.9, accuracy: 0.05)
+        let spans = p.timeline.spans(in: 0.0...3.0)
+        XCTAssertEqual(spans.reduce(0.0) { $0 + ($1.end - $1.start) }, 3.0, accuracy: 1e-9,
+                       "the window must stay fully tiled — spans=\(spans)")
+        XCTAssertEqual(spans.first?.clusterID, 0, "spans=\(spans)")
+        XCTAssertEqual(spans.last?.clusterID, 0, "the flanks are still speaker A — spans=\(spans)")
+        for i in 1..<spans.count {
+            XCTAssertEqual(spans[i].start, spans[i - 1].end, accuracy: 1e-9, "spans=\(spans)")
+        }
     }
 
-    // MARK: - 3. A silence hole larger than maxGap is never bridged
+    // MARK: - 3. Mid-recording silence does NOT break the span
 
-    func testGapBreaksIntoTwoTurns() {
-        var c = PositionClusterer(tauDeg: 15)
-        feed(&c, rotate: 0, start: 0.0, end: 2.0)    // A
-        // nothing 2..4s (ATND silence)
-        feed(&c, rotate: 0, start: 4.0, end: 6.0)    // A again, same direction
+    /// DELIBERATE INVERSION of the old `testGapBreaksIntoTwoTurns`, which asserted
+    /// that an ATND-silence hole split a turn and left the hole UNCOVERED. That
+    /// assertion described the bug: silence carries no text of its own, so leaving
+    /// it uncovered buys nothing, while any word whose timestamp lands in it (ASR
+    /// windows do not align with beam silence) is stranded as SPEAKER UNKNOWN.
+    /// Complete tiling is the point of the timeline — the talker who was speaking
+    /// keeps the floor until the beam says someone else has it. Do NOT "restore"
+    /// the old assertion.
+    func testSpanContinuesThroughMidRecordingSilence() {
+        var p = Pipeline()
+        p.feed(rotate: 0, start: 0.0, end: 2.0)      // A
+        // nothing 2..4s — ATND silence, which also resets the smoother
+        p.feed(rotate: 0, start: 4.0, end: 6.0)      // A again, same direction
 
-        let turns = c.turns(in: 0.0...6.0)
-        XCTAssertEqual(turns.count, 2)               // same cluster, but the hole splits it
-        XCTAssertEqual(turns[0].clusterID, 0)
-        XCTAssertEqual(turns[1].clusterID, 0)
-        XCTAssertLessThan(turns[0].end, 2.0)
-        XCTAssertGreaterThanOrEqual(turns[1].start, 4.0)
+        let spans = p.timeline.spans(in: 0.0...6.0)
+        XCTAssertEqual(spans.map { $0.clusterID }, [0], "spans=\(spans)")
+        XCTAssertEqual(spans[0].start, 0.0, accuracy: 1e-9)
+        XCTAssertEqual(spans[0].end, 6.0, accuracy: 1e-9)
     }
 
-    // MARK: - 4. Sub-min run at a genuine boundary is unlabeled slop
+    // MARK: - 4. A short run between two clusters KEEPS its own span
 
-    func testSubMinRunBetweenClustersIsDropped() {
-        var c = PositionClusterer(tauDeg: 15)
-        feed(&c, rotate: 0, start: 0.0, end: 3.0)    // A (3s)
-        feed(&c, rotate: 90, start: 3.0, end: 3.3)   // B (0.3s < minDuration)
-        feed(&c, rotate: 180, start: 3.3, end: 6.3)  // C (3s)
+    /// DELIBERATE INVERSION of the old `testSubMinRunBetweenClustersIsDropped`,
+    /// which asserted that a run under `minDurationSec: 0.6` between two clusters
+    /// was discarded as unlabeled slop. Discarding it discarded the TIME it
+    /// occupied, which then had no row — the exact `SPEAKER UNKNOWN` the owner saw
+    /// while moving between seats. A short turn is still a turn; debounce upstream
+    /// decides WHETHER the boundary exists, and once it does the span is kept at
+    /// full length. Do NOT "restore" the old assertion.
+    func testShortRunBetweenClustersKeepsItsOwnSpan() {
+        var p = Pipeline()
+        p.feed(rotate: 0, start: 0.0, end: 3.0)      // A (3s)
+        p.feed(rotate: 90, start: 3.0, end: 3.5)     // B (0.5s — under the old gate)
+        p.feed(rotate: 180, start: 3.5, end: 6.5)    // C (3s)
 
-        let turns = c.turns(in: 0.0...6.3)
-        XCTAssertEqual(turns.count, 2)               // B dropped, A and C differ → no merge
-        XCTAssertEqual(turns[0].clusterID, 0)        // A
-        XCTAssertEqual(turns[1].clusterID, 2)        // C
+        let spans = p.timeline.spans(in: 0.0...6.5)
+        XCTAssertEqual(spans.map { $0.clusterID }, [0, 1, 2], "spans=\(spans)")
+        // B's span is non-empty and sits where B actually spoke.
+        XCTAssertGreaterThan(spans[1].end - spans[1].start, 0)
+        XCTAssertEqual(spans[1].start, 3.0, accuracy: 0.4)
+        // Fully tiled: no hole anywhere between 0 and 6.5.
+        XCTAssertEqual(spans.reduce(0.0) { $0 + ($1.end - $1.start) }, 6.5, accuracy: 1e-9)
+    }
+
+    // MARK: - 4b. Regression: the owner's three-seat log case
+
+    /// REGRESSION for the 2026-07-21 `logs/position-diarization.log`, one voice
+    /// moving between three seats:
+    ///
+    ///     FILL gap=[0.000..4.700] -> Speaker 1 [0.000..3.600]
+    ///     HOLE [3.600..4.700] heard: Speaker 2 x4, Speaker 1 x1
+    ///     FILL gap=[4.700..6.700] -> Speaker 2 [4.700..6.700]
+    ///
+    /// The 1.1 s HOLE was a 4-sample (~0.4 s) run dropped by `minDurationSec: 0.6`
+    /// / `minSamples: 3`; those 1.1 s rendered as SPEAKER UNKNOWN. Driving the
+    /// boundary rule with the same post-smoother sample stream must now yield
+    /// THREE spans that tile the window with no gap at all.
+    func testShortMiddleRunFromTheOwnersLogYieldsThreeTilingSpans() {
+        var clusterer = PositionClusterer(tauDeg: 15)
+        var detector = ClusterChangeDetector()
+        var timeline = PositionTimeline()
+        // Samples are fed post-smoother (as the clusterer sees them), so the
+        // 4-sample run survives to the clusterer exactly as it did in the log.
+        let smoother = DirectionSmoother(windowSec: 0.4)
+
+        func push(t: Double, rotate: Double) {
+            let sample = DirectionSample(t: t, vector: vec(rotate: rotate))
+            let r = clusterer.assign(sample)
+            PositionBoundaryRule.apply(sample: sample, clusterID: r.clusterID,
+                                       isNewCluster: r.isNew, smoother: smoother,
+                                       detector: &detector, timeline: &timeline)
+        }
+
+        for i in 0..<36 { push(t: Double(i) * 0.1, rotate: 0) }          // seat 1
+        for i in 0..<4 { push(t: 3.6 + Double(i) * 0.1, rotate: 90) }    // seat 2: 4 samples
+        for i in 0..<20 { push(t: 4.7 + Double(i) * 0.1, rotate: 180) }  // seat 3
+
+        let window = 0.0...6.7
+        let spans = timeline.spans(in: window)
+        XCTAssertEqual(spans.map { $0.clusterID }, [0, 1, 2], "spans=\(spans)")
+        // No hole: the durations sum to the whole window.
+        XCTAssertEqual(spans.reduce(0.0) { $0 + ($1.end - $1.start) }, 6.7, accuracy: 1e-9)
+        for i in 1..<spans.count {
+            XCTAssertEqual(spans[i].start, spans[i - 1].end, accuracy: 1e-9,
+                           "spans must be contiguous — spans=\(spans)")
+        }
+        // The stretch that used to be the HOLE is covered, and by seat 2.
+        XCTAssertLessThanOrEqual(spans[1].start, 3.6)
+        XCTAssertGreaterThan(spans[1].end, 3.6)
     }
 
     // MARK: - 5. ClusterChangeDetector confirmation, rate-limit, first-cluster
@@ -135,17 +224,26 @@ final class PositionTurnsTests: XCTestCase {
         XCTAssertNil(d.push(t: 1.1, clusterID: 7))
     }
 
-    // MARK: - 6. Assignments outside the range are ignored
+    // MARK: - 6. Nothing outside the queried range leaks out of it
 
+    /// Ported from the `turns(in:)` era, same intent (the gap-fill queries one
+    /// gap at a time and must get back ranges that stay inside it), but with the
+    /// stronger guarantee the timeline gives: A's span is CLIPPED to the query
+    /// window rather than excluded from it, so the window is still fully tiled.
     func testRangeClipping() {
-        var c = PositionClusterer(tauDeg: 15)
-        feed(&c, rotate: 0, start: 0.0, end: 2.0)    // A, before the queried range
-        feed(&c, rotate: 90, start: 2.0, end: 5.0)   // B, inside
+        var p = Pipeline()
+        p.feed(rotate: 0, start: 0.0, end: 2.0)      // A, starts before the query
+        p.feed(rotate: 90, start: 2.0, end: 5.0)     // B, inside
 
-        let turns = c.turns(in: 2.0...5.0)
-        XCTAssertEqual(turns.count, 1)               // only B is in range
-        XCTAssertEqual(turns[0].clusterID, 1)
-        XCTAssertGreaterThanOrEqual(turns[0].start, 2.0)
+        let spans = p.timeline.spans(in: 2.0...5.0)
+        XCTAssertFalse(spans.isEmpty)
+        for s in spans {
+            XCTAssertGreaterThanOrEqual(s.start, 2.0, "spans=\(spans)")
+            XCTAssertLessThanOrEqual(s.end, 5.0, "spans=\(spans)")
+        }
+        XCTAssertEqual(spans.first?.start ?? .nan, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(spans.last?.end ?? .nan, 5.0, accuracy: 1e-9)
+        XCTAssertEqual(spans.last?.clusterID, 1)     // B owns the tail
     }
 
     // MARK: - 7. PositionTimeline — spans always tile the queried window
@@ -527,25 +625,23 @@ final class PositionTurnsTests: XCTestCase {
         }
     }
 
-    /// THE BUG CASE. Speaker 1 → a ~1 s Speaker 2 → Speaker 3. The old
-    /// `turns(in:)` path drops speaker 2 (too short for the density gate) and
-    /// leaves that stretch uncovered → a `SPEAKER UNKNOWN` row. The timeline
+    /// THE BUG CASE. Speaker 1 → a ~1 s Speaker 2 → Speaker 3. The removed
+    /// `turns(in:)` path dropped speaker 2 (too short for its density gate) and
+    /// left that stretch uncovered → a `SPEAKER UNKNOWN` row. The timeline
     /// yields THREE spans that tile the window with no gaps.
     func testShortMiddleTurnYieldsThreeTilingSpans() {
         /// S1 for 5 s → S2 for `middle` s → S3 for 5 s, and the spans over the
         /// whole window.
-        func run(middle: Double) -> (spans: [(start: Double, end: Double, clusterID: Int)],
-                                     legacy: [(start: Double, end: Double, clusterID: Int)]) {
+        func run(middle: Double) -> [(start: Double, end: Double, clusterID: Int)] {
             var p = Pipeline()
             p.feed(rotate: 0, start: 0.0, end: 5.0)                    // Speaker 1
             p.feed(rotate: 90, start: 5.0, end: 5.0 + middle)          // Speaker 2
             p.feed(rotate: 180, start: 5.0 + middle, end: 10.0 + middle)  // Speaker 3
-            let window = 0.0...(10.0 + middle)
-            return (p.timeline.spans(in: window), p.clusterer.turns(in: window))
+            return p.timeline.spans(in: 0.0...(10.0 + middle))
         }
 
         for middle in [1.0, 0.5] {
-            let (spans, _) = run(middle: middle)
+            let spans = run(middle: middle)
             XCTAssertEqual(spans.map { $0.clusterID }, [0, 1, 2],
                            "middle=\(middle) spans=\(spans)")
 
@@ -562,12 +658,6 @@ final class PositionTurnsTests: XCTestCase {
             XCTAssertEqual(spans[1].start, 5.0, accuracy: 0.35)
             XCTAssertGreaterThan(spans[1].end - spans[1].start, middle / 2)
         }
-
-        // And the legacy path really does lose the short one: at 0.5 s the
-        // density gate drops it and 5.x..6.x is left uncovered — the stretch that
-        // renders as SPEAKER UNKNOWN today.
-        XCTAssertEqual(run(middle: 0.5).legacy.count, 2,
-                       "turns(in:) is expected to drop the 0.5 s turn — got \(run(middle: 0.5).legacy)")
     }
 
     /// The first stable cluster of a session opens the timeline but must NOT fire

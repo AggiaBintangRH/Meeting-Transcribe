@@ -123,6 +123,9 @@ final class AudioRecorder: ObservableObject {
     // Recorder-owned, one per session; nil means the feature is off, so
     // positionGapFill returns [] and the display path is pure pyannote.
     @Published private(set) var positionDiarizer: PositionDiarizer?
+    /// Last SEPARATION line written to the position log, so the per-room tau
+    /// calibration diagnostic is emitted on change instead of on every rebuild.
+    private var lastLoggedSeparation: String?
     private var diarElapsed: Double = 0                        // seconds since the last diar chunk
     private var lastDiarBoundary: Double = 0                   // recording-time where this diar chunk began
 
@@ -679,6 +682,7 @@ final class AudioRecorder: ObservableObject {
     /// path is pure pyannote, byte-identical to before this feature existed.
     private func configurePositionDiarization() {
         positionDiarizer = nil
+        lastLoggedSeparation = nil
         let d = UserDefaults.standard
         guard d.bool(forKey: "atnd.position.enabled"),
               ATNDBeamService.shared.state == .listening else { return }
@@ -721,70 +725,47 @@ final class AudioRecorder: ObservableObject {
                 positionLog("SKIP gap<0.75s [\(fmt3(a))..\(fmt3(b))]")
                 continue
             }
-            // One fill PER TURN — a beam change mid-gap splits into multiple rows.
-            // The per-turn minSamples/minDuration inside `turns(...)` is the density
-            // gate: a gap where ATND heard nothing (or only flicker) yields no turns
-            // and STAYS unknown. (Replaces the old whole-gap `need` sample gate.)
-            var turns = pos.labeledTurns(in: a...b)
-            if turns.isEmpty {
-                // No run cleared the per-turn gate — typically a brief speaker
-                // switch whose samples fragment across two clusters, each run too
-                // short/sparse to survive on its own. Rather than leave the whole
-                // window UNKNOWN despite real ATND data, fall back to one dominant
-                // label for the gap. Only a gap with too few samples (real silence)
-                // stays UNKNOWN.
-                let count = pos.sampleCount(in: a...b)
-                if let (pid, pname) = pos.label(for: a...b, minSamples: 3) {
-                    positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(pid):\(pname) (dominant, no clear turns) samples=\(count)")
-                    fills.append((a, b, pid, pname))
-                } else {
-                    positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(count) no-turns")
-                }
+            // One fill PER SPAN — a beam change mid-gap splits into multiple rows.
+            // The boundary timeline TILES the gap from its first boundary onward:
+            // every stretch of elapsed time belongs to whoever the beam had last
+            // settled on, so a fill can no longer leave a hole in the middle of a
+            // gap. That is the whole point of the switch away from reconstructed
+            // turns — the old density gate (minDurationSec/minSamples) DISCARDED a
+            // short run, and discarding a run discarded a stretch of TIME, whose
+            // words then had no range to land in and rendered as SPEAKER UNKNOWN.
+            // Debounce still decides WHETHER a boundary exists, upstream in
+            // `ClusterChangeDetector`; it can no longer delete elapsed time.
+            //
+            // `labeledSpans` already clips to the queried range, so no snapping,
+            // hole-closing or dominant-label fallback is needed here any more.
+            let spans = pos.labeledSpans(in: a...b)
+            if spans.isEmpty {
+                // The only way a gap yields nothing now: it lies entirely BEFORE
+                // the first beam boundary of the session (pre-speech silence, or
+                // ATND not streaming yet). Leaving it UNKNOWN is correct — there is
+                // no talker to attribute it to.
+                positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(pos.sampleCount(in: a...b)) no-spans")
                 continue
             }
-            // Boundary snapping — the 0.4s smoother swallows ~0.4s warm-up per
-            // utterance, so turns start/end a beat inside the real gap.
-            // Extend the first/last turn out to the gap edges when the reach is
-            // small; close small inter-turn holes at their midpoint. A hole larger
-            // than 1.0s is real ATND silence → leave it (stays UNKNOWN).
-            if turns[0].start - a <= 1.0 { turns[0].start = a }
-            let last = turns.count - 1
-            if b - turns[last].end <= 1.0 { turns[last].end = b }
-            for i in 0..<(turns.count - 1) {
-                let hole = turns[i + 1].start - turns[i].end
-                if hole > 0, hole <= 1.0 {
-                    let mid = (turns[i].end + turns[i + 1].start) / 2
-                    turns[i].end = mid
-                    turns[i + 1].start = mid
-                }
-            }
-            for t in turns {
-                positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(t.id):\(t.name) [\(fmt3(t.start))..\(fmt3(t.end))]")
-                fills.append((t.start, t.end, t.id, t.name))
-            }
-            // Stretches the turns left uncovered AFTER snapping. These are what
-            // become UNKNOWN (or get swept into a neighbour by word attribution),
-            // and until now they were invisible in the log — only the turns that
-            // survived were ever printed. The histogram says who ATND actually
-            // heard there: their own cluster with samples means the turn filter
-            // dropped a short turn; a neighbour's cluster means the directions
-            // merged and the threshold is too wide.
-            var probe = a
-            for t in turns.sorted(by: { $0.start < $1.start }) {
-                if t.start - probe > 0.05 {
-                    positionLog("HOLE [\(fmt3(probe))..\(fmt3(t.start))] heard: "
-                                + pos.histogramDescription(in: probe...t.start))
-                }
-                probe = max(probe, t.end)
-            }
-            if b - probe > 0.05 {
-                positionLog("HOLE [\(fmt3(probe))..\(fmt3(b))] heard: "
-                            + pos.histogramDescription(in: probe...b))
+            for s in spans {
+                positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(s.id):\(s.name) [\(fmt3(s.start))..\(fmt3(s.end))]")
+                fills.append((s.start, s.end, s.id, s.name))
             }
         }
+        // Calibration instrument, not noise: the owner tunes `atnd.position.tauDeg`
+        // per room ("the tables differ in every room"), and this is the only line
+        // that shows how far apart the seats actually landed — e.g. a phantom
+        // cluster 16.2° from Speaker 1 against a 15° threshold while the real seats
+        // sit 33–41° apart. Logged only when it CHANGES: `positionGapFill` runs once
+        // per segment per rebuild, so logging it unconditionally repeated the same
+        // line after every FILL.
         if !fills.isEmpty {
             let tau = UserDefaults.standard.object(forKey: "atnd.position.tauDeg") as? Double ?? 15
-            positionLog("SEPARATION \(pos.separationDescription()) (threshold \(Int(tau))°)")
+            let line = "SEPARATION \(pos.separationDescription()) (threshold \(Int(tau))°)"
+            if line != lastLoggedSeparation {
+                lastLoggedSeparation = line
+                positionLog(line)
+            }
         }
         return fills
     }

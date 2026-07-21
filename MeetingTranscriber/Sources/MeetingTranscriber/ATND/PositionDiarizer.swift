@@ -49,8 +49,10 @@ final class PositionDiarizer: ObservableObject {
     /// finalizing a row at processing time would make boundaries drift with
     /// machine load).
     ///
-    /// Built ALONGSIDE the `turns(in:)` path for now — nothing renders from it
-    /// yet, so it can be verified against real recordings before it takes over.
+    /// This is the ONLY source of position spans for the transcript — the earlier
+    /// after-the-fact turn reconstruction is gone. It could drop a short run as
+    /// flicker, and dropping a run dropped a stretch of TIME, which is what left
+    /// words with no row (`SPEAKER UNKNOWN`) while a talker moved between seats.
     private var timeline = PositionTimeline()
 
     /// Called (on the MainActor, from `ingest`) when `changeDetector` confirms a
@@ -197,17 +199,6 @@ final class PositionDiarizer: ObservableObject {
         clusterer.sampleCount(in: range)
     }
 
-    /// "Speaker 2 x18, Speaker 1 x3" for `range` — diagnostic only. Shows which
-    /// speakers ATND actually heard inside a stretch the turn filter left
-    /// uncovered, so a dropped short turn is distinguishable from two speakers
-    /// having merged into one cluster.
-    func histogramDescription(in range: ClosedRange<Double>) -> String {
-        let hist = clusterer.clusterHistogram(in: range)
-        guard !hist.isEmpty else { return "none" }
-        return hist.map { "\(names[$0.clusterID] ?? "cluster \($0.clusterID)") x\($0.count)" }
-            .joined(separator: ", ")
-    }
-
     /// "S1/S2 12.4°, S1/S3 47.1°" — the angular gap between each pair of stored
     /// speakers. Any pair below the configured threshold cannot be separated.
     func separationDescription() -> String {
@@ -220,28 +211,14 @@ final class PositionDiarizer: ObservableObject {
         }.joined(separator: ", ")
     }
 
-    /// Per-turn position labels over `range` — one entry per contiguous talker
-    /// span (so a beam change inside the range yields multiple rows). Each maps to
-    /// `(positionIDBase + clusterID, name)`. Valid after `stop()` (data kept), same
-    /// as `label(for:)`.
-    func labeledTurns(in range: ClosedRange<Double>,
-                      minDurationSec: Double = 0.6)
-        -> [(start: Double, end: Double, id: Int, name: String)] {
-        clusterer.turns(in: range, minDurationSec: minDurationSec).map { turn in
-            (start: turn.start,
-             end: turn.end,
-             id: Self.positionIDBase + turn.clusterID,
-             name: names[turn.clusterID] ?? "Speaker \(turn.clusterID + 1)")
-        }
-    }
-
-    /// Timeline spans over `range`, labelled the same way as `labeledTurns` —
-    /// `(positionIDBase + clusterID, name)` — and likewise valid after `stop()`,
-    /// since the final diarization pass queries it.
+    /// Timeline spans over `range` as `(positionIDBase + clusterID, name)` — the
+    /// payload the gap-fill fills pyannote's uncovered stretches with. Valid after
+    /// `stop()` (data kept), same as `label(for:)`, since the final diarization
+    /// pass queries it.
     ///
-    /// Unlike `labeledTurns` these TILE `range` from the first boundary on: no
-    /// minimum duration, no density gate, nothing dropped. Not wired to the
-    /// rendered transcript yet — Phase 3 swaps the gap-fill over to it.
+    /// These TILE `range` from the first boundary on: no minimum duration, no
+    /// density gate, nothing dropped, and already clipped to `range` — so a caller
+    /// never has to close holes between them.
     func labeledSpans(in range: ClosedRange<Double>)
         -> [(start: Double, end: Double, id: Int, name: String)] {
         timeline.spans(in: range).map { span in
