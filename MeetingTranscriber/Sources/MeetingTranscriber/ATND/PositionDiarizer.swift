@@ -183,6 +183,29 @@ final class PositionDiarizer: ObservableObject {
         clusterer.sampleCount(in: range)
     }
 
+    /// "Speaker 2 x18, Speaker 1 x3" for `range` — diagnostic only. Shows which
+    /// speakers ATND actually heard inside a stretch the turn filter left
+    /// uncovered, so a dropped short turn is distinguishable from two speakers
+    /// having merged into one cluster.
+    func histogramDescription(in range: ClosedRange<Double>) -> String {
+        let hist = clusterer.clusterHistogram(in: range)
+        guard !hist.isEmpty else { return "none" }
+        return hist.map { "\(names[$0.clusterID] ?? "cluster \($0.clusterID)") x\($0.count)" }
+            .joined(separator: ", ")
+    }
+
+    /// "S1/S2 12.4°, S1/S3 47.1°" — the angular gap between each pair of stored
+    /// speakers. Any pair below the configured threshold cannot be separated.
+    func separationDescription() -> String {
+        let pairs = clusterer.centroidSeparations()
+        guard !pairs.isEmpty else { return "single cluster" }
+        return pairs.map {
+            let a = names[$0.a] ?? "cluster \($0.a)"
+            let b = names[$0.b] ?? "cluster \($0.b)"
+            return "\(a)/\(b) \(String(format: "%.1f", $0.deg))°"
+        }.joined(separator: ", ")
+    }
+
     /// Per-turn position labels over `range` — one entry per contiguous talker
     /// span (so a beam change inside the range yields multiple rows). Each maps to
     /// `(positionIDBase + clusterID, name)`. Valid after `stop()` (data kept), same

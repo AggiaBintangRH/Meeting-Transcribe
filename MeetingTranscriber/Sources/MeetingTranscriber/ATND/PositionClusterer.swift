@@ -174,6 +174,36 @@ struct PositionClusterer {
         assignments.reduce(0) { $0 + (range.contains($1.t) ? 1 : 0) }
     }
 
+    /// Per-cluster sample counts over `range`, densest first — diagnostic only.
+    /// Distinguishes "this speaker's run was too short to survive the turn
+    /// filter" (their cluster IS here, with samples) from "their direction
+    /// merged into a neighbour's cluster because tauDeg is too wide" (their
+    /// cluster is absent entirely). Those need opposite fixes, and the FILL/SKIP
+    /// lines alone cannot tell them apart.
+    func clusterHistogram(in range: ClosedRange<Double>) -> [(clusterID: Int, count: Int)] {
+        var counts: [Int: Int] = [:]
+        for a in assignments where range.contains(a.t) {
+            counts[a.clusterID, default: 0] += 1
+        }
+        return counts.map { (clusterID: $0.key, count: $0.value) }
+            .sorted { $0.count != $1.count ? $0.count > $1.count : $0.clusterID < $1.clusterID }
+    }
+
+    /// Angular separation between every pair of cluster centroids, in degrees —
+    /// diagnostic only. A pair below `tauDeg` means those two real speakers can
+    /// no longer be told apart at the current threshold.
+    func centroidSeparations() -> [(a: Int, b: Int, deg: Double)] {
+        var out: [(a: Int, b: Int, deg: Double)] = []
+        for i in 0..<clusters.count {
+            for j in (i + 1)..<clusters.count {
+                out.append((clusters[i].id, clusters[j].id,
+                            PositionMath.angularDistanceDeg(clusters[i].centroid,
+                                                            clusters[j].centroid)))
+            }
+        }
+        return out.sorted { $0.deg < $1.deg }
+    }
+
     /// Contiguous same-cluster runs of the assignment stream within `range`.
     /// Each returned turn is one talker's continuous span; a beam change mid-range
     /// yields two turns so the display can split rows at the switch.

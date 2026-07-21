@@ -762,6 +762,29 @@ final class AudioRecorder: ObservableObject {
                 positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(t.id):\(t.name) [\(fmt3(t.start))..\(fmt3(t.end))]")
                 fills.append((t.start, t.end, t.id, t.name))
             }
+            // Stretches the turns left uncovered AFTER snapping. These are what
+            // become UNKNOWN (or get swept into a neighbour by word attribution),
+            // and until now they were invisible in the log — only the turns that
+            // survived were ever printed. The histogram says who ATND actually
+            // heard there: their own cluster with samples means the turn filter
+            // dropped a short turn; a neighbour's cluster means the directions
+            // merged and the threshold is too wide.
+            var probe = a
+            for t in turns.sorted(by: { $0.start < $1.start }) {
+                if t.start - probe > 0.05 {
+                    positionLog("HOLE [\(fmt3(probe))..\(fmt3(t.start))] heard: "
+                                + pos.histogramDescription(in: probe...t.start))
+                }
+                probe = max(probe, t.end)
+            }
+            if b - probe > 0.05 {
+                positionLog("HOLE [\(fmt3(probe))..\(fmt3(b))] heard: "
+                            + pos.histogramDescription(in: probe...b))
+            }
+        }
+        if !fills.isEmpty {
+            let tau = UserDefaults.standard.object(forKey: "atnd.position.tauDeg") as? Double ?? 15
+            positionLog("SEPARATION \(pos.separationDescription()) (threshold \(Int(tau))°)")
         }
         return fills
     }
