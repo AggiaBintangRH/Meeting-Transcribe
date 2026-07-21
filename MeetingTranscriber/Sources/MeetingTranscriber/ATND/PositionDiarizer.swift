@@ -114,10 +114,12 @@ final class PositionDiarizer: ObservableObject {
                 // A direction outside every stored speaker's range is a new
                 // speaker — switch the row immediately, no debounce, so a short
                 // (~1 s) turn to a new direction isn't swallowed by the rate limit.
-                if changeDetector.forceChange(to: result.clusterID, at: sample.t) {
+                // (The returned boundary time is unused until Phase 2 wires the
+                // event-driven timeline; non-nil still means "fire", as before.)
+                if changeDetector.forceChange(to: result.clusterID, at: sample.t) != nil {
                     onClusterChange?()
                 }
-            } else if changeDetector.push(t: sample.t, clusterID: result.clusterID) {
+            } else if changeDetector.push(t: sample.t, clusterID: result.clusterID) != nil {
                 // Switch back to a KNOWN speaker: confirmed + rate-limited, so
                 // jitter between two nearby stored speakers can't thrash the rows.
                 onClusterChange?()

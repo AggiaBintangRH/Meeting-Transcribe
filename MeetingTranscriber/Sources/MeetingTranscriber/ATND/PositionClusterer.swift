@@ -44,7 +44,24 @@ struct DirectionSmoother {
     /// `recordingElapsed` essentially never does — using it locks the filter
     /// silent a couple of seconds into a real recording. Elapsed time is
     /// monotonic, so it crosses the threshold once and stays crossed.
-    private var windowStart: Double?
+    ///
+    /// Readable from outside because it is ALSO the exact back-dating correction
+    /// for the first emission after a reset: that emission is a full `windowSec`
+    /// late (the warm-up), and the raw stream really started here. See
+    /// `BoundaryBackdating.correctedBoundary`.
+    private(set) var windowStart: Double?
+
+    /// Emissions produced since the last reset/gap. `== 1` right after a `push`
+    /// that returned non-nil means THAT emission is the first since the reset,
+    /// which is the case that back-dates to `windowStart` rather than to
+    /// `reportedT - windowSec/2`. Exposed as a count rather than a flag so a
+    /// caller can read it after the fact without the smoother having to hand
+    /// back a wrapper type (which would churn the existing call sites).
+    private(set) var emissionsSinceReset = 0
+
+    /// True when the most recent non-nil `push` was the first emission since a
+    /// reset/gap. Only meaningful immediately after such a push.
+    var lastEmissionWasFirstSinceReset: Bool { emissionsSinceReset == 1 }
 
     init(windowSec: Double = 0.4) {
         self.windowSec = windowSec
@@ -55,6 +72,7 @@ struct DirectionSmoother {
         if let last = buffer.last, t - last.t > windowSec {
             buffer.removeAll(keepingCapacity: true)
             windowStart = nil
+            emissionsSinceReset = 0
         }
         if windowStart == nil { windowStart = t }
         buffer.append(DirectionSample(t: t, vector: vector))
@@ -79,12 +97,14 @@ struct DirectionSmoother {
         let len = simd_length(med)
         // Degenerate (opposing vectors cancelling) → fall back to the newest.
         let unit = len > 1e-9 ? med / len : vector
+        emissionsSinceReset += 1
         return DirectionSample(t: t, vector: unit)
     }
 
     mutating func reset() {
         buffer.removeAll(keepingCapacity: true)
         windowStart = nil
+        emissionsSinceReset = 0
     }
 
     private static func median(_ sorted: [Double]) -> Double {
@@ -277,25 +297,40 @@ struct ClusterChangeDetector {
     private var stableCluster: Int?
     private var candidate: Int?
     private var candidateCount = 0
+    /// Sample time of the FIRST sample of the current candidate run. This — not
+    /// the time the fire happens — is when the talker actually switched; by the
+    /// time `consecutiveRequired` samples have confirmed it, ~0.3 s of the new
+    /// talker has already elapsed. Reporting it removes the confirmation lag
+    /// EXACTLY (we know the sample time), instead of subtracting an estimate.
+    private var candidateFirstT: Double?
     private var lastFired: Double?
 
-    /// Returns true ONLY when `clusterID` differs from the current stable cluster,
+    /// Returns the BOUNDARY TIME (nil = no boundary) rather than a Bool: the
+    /// caller needs to stamp the new span with when the switch really happened,
+    /// and only the detector knows the candidate's first sample time. A plain
+    /// `Double?` is enough — there is nothing else to report — so no result
+    /// struct is introduced.
+    ///
+    /// Non-nil ONLY when `clusterID` differs from the current stable cluster,
     /// has been seen `consecutiveRequired` times in a row, AND `t - lastFired >=
     /// minIntervalSec`. The FIRST stable cluster of a session never fires (nothing
     /// to split). On a fire, `clusterID` becomes the new stable cluster.
-    mutating func push(t: Double, clusterID: Int) -> Bool {
+    ///
+    /// Debounce decides only WHETHER a boundary exists. While a candidate is
+    /// building or is rate-limited, no boundary is emitted, so the elapsed time
+    /// keeps accruing to the CURRENT span — a suppressed fire can never punch a
+    /// hole in the timeline, it only means the switch is not recognised at all.
+    mutating func push(t: Double, clusterID: Int) -> Double? {
         // Establish the first stable cluster silently — nothing to split yet.
         guard let stable = stableCluster else {
             stableCluster = clusterID
-            candidate = nil
-            candidateCount = 0
-            return false
+            clearCandidate()
+            return nil
         }
         // Back on the stable cluster — reset any building candidate.
         if clusterID == stable {
-            candidate = nil
-            candidateCount = 0
-            return false
+            clearCandidate()
+            return nil
         }
         // A different cluster — accumulate confirmation.
         if clusterID == candidate {
@@ -303,36 +338,146 @@ struct ClusterChangeDetector {
         } else {
             candidate = clusterID
             candidateCount = 1
+            candidateFirstT = t
         }
-        guard candidateCount >= consecutiveRequired else { return false }
+        guard candidateCount >= consecutiveRequired else { return nil }
         // Confirmed change, but rate-limit: suppress a fire too soon after the
         // last one (keep the candidate building so it fires once the interval passes).
-        if let last = lastFired, t - last < minIntervalSec { return false }
+        if let last = lastFired, t - last < minIntervalSec { return nil }
+        // Report when the switch STARTED, not now. Under the rate limit this can
+        // predate `lastFired`; `PositionTimeline.append` clamps monotonically, so
+        // an out-of-order report degrades to a zero-length gap, never a reordering.
+        let boundary = candidateFirstT ?? t
         stableCluster = clusterID
-        candidate = nil
-        candidateCount = 0
+        clearCandidate()
         lastFired = t
-        return true
+        return boundary
     }
 
     /// Switch the stable cluster IMMEDIATELY, with no confirmation or rate-limit —
     /// for a brand-new direction (outside every stored speaker's range), which is
-    /// an unambiguous new speaker, not jitter. Returns true to fire, except for the
-    /// very first speaker of the session (nothing to split from).
-    mutating func forceChange(to clusterID: Int, at t: Double) -> Bool {
-        candidate = nil
-        candidateCount = 0
+    /// an unambiguous new speaker, not jitter. Returns the boundary time to fire,
+    /// except for the very first speaker of the session (nothing to split from).
+    /// There is no confirmation lag to undo here, so the boundary is simply `t`.
+    mutating func forceChange(to clusterID: Int, at t: Double) -> Double? {
+        clearCandidate()
         let hadStable = stableCluster != nil
         stableCluster = clusterID
-        guard hadStable else { return false }
+        guard hadStable else { return nil }
         lastFired = t
-        return true
+        return t
     }
 
     mutating func reset() {
         stableCluster = nil
+        clearCandidate()
+        lastFired = nil
+    }
+
+    private mutating func clearCandidate() {
         candidate = nil
         candidateCount = 0
-        lastFired = nil
+        candidateFirstT = nil
+    }
+}
+
+/// Event-driven boundary timeline: an ordered list of "from time T the talker is
+/// cluster C" events, from which spans are DERIVED. The point of the type is what
+/// it refuses to do — it never drops a boundary for being short-lived, because
+/// dropping a boundary drops a stretch of TIME, and uncovered time is what leaves
+/// words with no row to land in (`SPEAKER UNKNOWN`). Debounce belongs upstream,
+/// in `ClusterChangeDetector`, where it decides whether an event exists at all.
+struct PositionTimeline: Equatable {
+    private(set) var boundaries: [(t: Double, clusterID: Int)] = []
+
+    init() {}
+
+    /// Append a boundary, clamping `t` to be ≥ the previous boundary so the list
+    /// can never come out of order. Back-dating (see `BoundaryBackdating`) moves
+    /// boundaries EARLIER, which can otherwise push one before its predecessor;
+    /// clamping degrades that to a zero-length span rather than a scrambled list.
+    mutating func append(t: Double, clusterID: Int) {
+        let clamped = max(t, boundaries.last?.t ?? t)
+        boundaries.append((t: clamped, clusterID: clusterID))
+    }
+
+    mutating func reset() {
+        boundaries.removeAll(keepingCapacity: true)
+    }
+
+    /// Spans that TILE `range` completely from the first boundary onward: no
+    /// minimum duration, no minimum sample count, no gaps, no dropping of short
+    /// spans. Each boundary runs until the next one; the last runs to the end of
+    /// `range`.
+    ///
+    /// The part of `range` BEFORE the first boundary is deliberately left
+    /// uncovered — that is pre-speech silence, and covering it would attribute
+    /// words to a talker who had not spoken yet.
+    ///
+    /// Consecutive boundaries carrying the same cluster collapse into a single
+    /// span (they describe one continuous turn), so the caller never sees two
+    /// adjacent identical spans.
+    func spans(in range: ClosedRange<Double>) -> [(start: Double, end: Double, clusterID: Int)] {
+        guard !boundaries.isEmpty else { return [] }
+
+        var out: [(start: Double, end: Double, clusterID: Int)] = []
+        for (i, b) in boundaries.enumerated() {
+            // Open-ended last boundary: the timeline says nothing has changed
+            // since, so it owns the rest of the queried window.
+            let rawEnd = i + 1 < boundaries.count ? boundaries[i + 1].t : Double.infinity
+            let start = max(b.t, range.lowerBound)
+            let end = min(rawEnd, range.upperBound)
+            guard end > start else { continue }   // clipped away, or zero-length
+            // Collapse same-cluster neighbours AFTER clipping, not before: the
+            // clamp in `append` can leave a zero-length boundary between two
+            // spans of the same cluster, and dropping it would otherwise emit
+            // two adjacent identical spans.
+            if var last = out.last, last.clusterID == b.clusterID, last.end == start {
+                last.end = end
+                out[out.count - 1] = last
+            } else {
+                out.append((start: start, end: end, clusterID: b.clusterID))
+            }
+        }
+        return out
+    }
+
+    static func == (lhs: PositionTimeline, rhs: PositionTimeline) -> Bool {
+        lhs.boundaries.count == rhs.boundaries.count
+            && zip(lhs.boundaries, rhs.boundaries).allSatisfy { $0.t == $1.t && $0.clusterID == $1.clusterID }
+    }
+}
+
+/// Undoes the systematic lateness of a smoothed boundary time. Pure and
+/// side-effect free so it can be unit-tested on its own; Phase 2 just calls it.
+enum BoundaryBackdating {
+    /// `DirectionSmoother` emits, at time `t`, the median of the TRAILING
+    /// `windowSec`. That median only flips to a new direction once the new
+    /// direction holds a MAJORITY of the window, i.e. about `windowSec / 2`
+    /// after the real switch — so a boundary stamped `t` is that much late.
+    ///
+    /// The first emission after a reset/gap is a different case: the smoother
+    /// warms up for a FULL `windowSec` before it emits at all, so that emission
+    /// is ~`windowSec` late and the exact correction is the raw stream's own
+    /// `windowStart` — no estimate needed.
+    ///
+    /// Roughly one word of speech rides on this correction, which is exactly the
+    /// word that decides whether a turn's first word lands in the right row.
+    ///
+    /// `previousBoundaryT` clamps the result so the timeline stays ordered: a
+    /// correction may never move a boundary before the one it follows.
+    static func correctedBoundary(reportedT: Double,
+                                  windowSec: Double,
+                                  isFirstEmissionAfterReset: Bool,
+                                  windowStart: Double?,
+                                  previousBoundaryT: Double?) -> Double {
+        let corrected: Double
+        if isFirstEmissionAfterReset, let start = windowStart {
+            corrected = start
+        } else {
+            corrected = reportedT - windowSec / 2
+        }
+        guard let previous = previousBoundaryT else { return corrected }
+        return max(previous, corrected)
     }
 }
