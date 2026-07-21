@@ -268,6 +268,17 @@ dl "mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16" "Voxtral Mini 4B Realtime 
 dl "mlx-community/granite-speech-4.1-2b-nar-mlx" "Granite Speech 4.1 2B NAR (MLX bf16)"
 
 # -------------------------------------------------------------
+# 2b. WORD ALIGNER — Qwen3-ForcedAligner 0.6B (MLX bf16)
+#     Forced alignment: audio + KNOWN text -> per-word timestamps. It never
+#     sees the ASR, so it works with ALL four chunked models above (the repo
+#     name says Qwen3 only because it shares that tokenizer/encoder lineage).
+#     Used for word-exact speaker attribution when the ATND beam switches
+#     mid-sentence. mlx_audio.stt.load() dispatches on the config's
+#     model_type=qwen3_forced_aligner — no extra pip package needed.
+# -------------------------------------------------------------
+dl "mlx-community/Qwen3-ForcedAligner-0.6B-bf16" "Qwen3-ForcedAligner 0.6B (MLX bf16, word timestamps)"
+
+# -------------------------------------------------------------
 # 3. DIARIZATION — pyannote community-1 (PyTorch MPS)
 #    GATED repo: accept terms + HF_TOKEN required.
 # -------------------------------------------------------------
