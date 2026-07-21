@@ -12,6 +12,11 @@ struct ChunkedModelTab: View {
                 .font(.system(size: 12))
                 .foregroundColor(Theme.textDim)
 
+            // Shows only when a Remote channel is configured and Voxtral is picked —
+            // the model choice and the thing that makes it unworkable live on
+            // different tabs, so the warning has to appear on both.
+            DualStreamVoxtralWarning()
+
             ForEach(ModelCatalog.chunked) { m in
                 Button(action: {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {

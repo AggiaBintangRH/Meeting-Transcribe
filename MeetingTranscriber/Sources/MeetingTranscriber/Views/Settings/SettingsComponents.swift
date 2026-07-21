@@ -150,6 +150,44 @@ struct SettingBlock<Content: View>: View {
     }
 }
 
+/// Warning shown when a Remote channel is selected while Voxtral is the chunked
+/// model. Measured on this M4, per 30 s chunk: Qwen3 4.3 s, Whisper 4.2 s,
+/// Granite 5.6 s, Voxtral 27.0 s — i.e. Voxtral already runs at ~90 % duty for a
+/// SINGLE stream, so two streams cannot keep up: chunk N+1 arrives before chunk N
+/// finishes and the queue grows without bound.
+///
+/// Warning only for now — the hard refusal at startup lands with the capture work.
+/// Deliberately NOT a silent model fallback: the owner picks models on measured
+/// WER and must not have that choice changed behind their back.
+struct DualStreamVoxtralWarning: View {
+    @AppStorage("chunked.model") private var chunkedModel = "qwen3"
+    @AppStorage(MicrophoneSettings.remoteChannelKey) private var remoteChannel = -1
+
+    var body: some View {
+        if remoteChannel >= 0 && chunkedModel == "voxtral" {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .bold))
+                Text("Voxtral cannot keep up with two streams — it needs about 27 s to transcribe a 30 s chunk (Qwen3 4.3 s, Whisper 4.2 s, Granite 5.6 s), so the second stream would fall permanently behind. Pick another chunked model, or turn the Remote channel off.")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .font(.system(size: 11))
+            .foregroundColor(Theme.red)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Theme.red.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Theme.red.opacity(0.35), lineWidth: 1)
+                    )
+            )
+        }
+    }
+}
+
 /// Language dropdown fed by Languages.all.
 struct LanguagePicker: View {
     @Binding var selection: String

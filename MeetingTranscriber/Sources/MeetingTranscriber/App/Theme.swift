@@ -38,6 +38,11 @@ enum Theme {
     static let toggleOnBorder        = Theme.teal.opacity(0.55)
     /// Border highlight shown on hover.
     static let hoverHighlight        = Color.white.opacity(0.18)
+    /// Accent for the Remote (conferencing) capture role, so it never reads as the
+    /// Office role — teal is Office everywhere in the app.
+    static let remoteRole            = Theme.amber
+    /// Border of a channel tile assigned to the Remote role.
+    static let remoteRoleBorder      = Theme.amber.opacity(0.55)
 
     // MARK: - Record Button
     /// Icon color on the idle (teal) record button.
