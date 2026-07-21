@@ -153,6 +153,13 @@ enum WordAttribution {
             pieces.append(Piece(id: r.id, name: r.name, start: start, end: end,
                                 text: run.words.joined(separator: " ")))
         }
+        // Success is logged too, not just the SKIP gates: without this, an
+        // absent SKIP line is ambiguous between "the word path ran" and "the
+        // aligner never sent words at all", which makes an on-device run
+        // impossible to judge from the log.
+        log("WORDS OK \(words.count)/\(sourceWords.count) aligned → \(pieces.count) row(s) "
+            + "[\(fmt(window.lowerBound))..\(fmt(window.upperBound))] "
+            + pieces.map { "\($0.name)@\(fmt($0.start))" }.joined(separator: " "))
         return pieces
     }
 
