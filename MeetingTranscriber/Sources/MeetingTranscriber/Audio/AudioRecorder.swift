@@ -38,7 +38,7 @@ final class AudioRecorder: ObservableObject {
         // is off or failed). Times are CHUNK-RELATIVE seconds exactly as the
         // sidecar sent them; `alignedChunkDuration` is that chunk buffer's
         // length, kept so the conversion to recording time can be sanity-checked
-        // against `window`. Stored only — nothing reads these yet.
+        // against `window`. Consumed by `WordAttribution` in `derivedRows`.
         var words: [ChunkedASRService.AlignedWord]? = nil
         var alignedChunkDuration: Double? = nil
     }
@@ -967,6 +967,21 @@ final class AudioRecorder: ObservableObject {
                                      speakerID: nil, start: window.lowerBound,
                                      end: window.upperBound, text: seg.text,
                                      confirmed: true)]
+        }
+        // Word-exact path: when the aligner ran, each word goes to the turn that
+        // covers it in time instead of to the turn its character offset guesses.
+        // Any failed sanity gate returns nil → the estimate below, unchanged.
+        if let words = seg.words,
+           let pieces = WordAttribution.attribute(text: seg.text, words: words,
+                                                  chunkDuration: seg.alignedChunkDuration,
+                                                  window: window, ranges: filled,
+                                                  log: { self.positionLog($0) }) {
+            return pieces.enumerated().map { i, p in
+                let overlapped = regions.contains { max($0.start, p.start) < min($0.end, p.end) }
+                return SpeakerUtterance(id: "\(seg.id.uuidString)-\(i)", speaker: p.name,
+                                        speakerID: p.id, start: p.start, end: p.end,
+                                        text: p.text, confirmed: true, overlapped: overlapped)
+            }
         }
         return assignSentences(seg.text, window: window, ranges: filled,
                                segID: seg.id.uuidString, regions: regions)
