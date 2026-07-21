@@ -141,6 +141,16 @@ final class AudioRecorder: ObservableObject {
 
     private var engine: AVAudioEngine?
     private var file: AVAudioFile?
+    /// Second mono WAV for the Remote (conferencing) stream, or nil for today's
+    /// single-stream behaviour. Written from the SAME tap callback as `file`, so
+    /// the two files are sample-aligned by construction.
+    ///
+    /// Two mono files rather than one stereo file: `lastRecordingURL` feeds the
+    /// final diarization pass, overlap repair (`maybeStartOverlapRepair`,
+    /// `OverlapRepairService.separate`) and DiCoW — all Office-only consumers that
+    /// must keep reading an unchanged mono office file. A stereo file would force
+    /// every one of them to learn channel extraction for no gain.
+    private var remoteFile: AVAudioFile?
     private var vad: VoiceActivityDetector?
 
     /// Recordings are stored under the data dir (project folder in dev,
@@ -214,6 +224,19 @@ final class AudioRecorder: ObservableObject {
             return
         }
         let channel = min(mic.channel, Int(format.channelCount) - 1)
+        // Remote (conferencing) channel, re-validated against the format the engine
+        // ACTUALLY delivers. `MicrophoneSettings.resolve` already checked it against
+        // the device's advertised channel count, but with an Aggregate Device the
+        // live format is the authority — sub-devices can present fewer channels than
+        // advertised. If it does not survive, degrade to single-stream and log it:
+        // a recording that captures the room beats no recording at all.
+        var remoteChannel = Self.resolveRemoteChannel(mic.remoteChannel,
+                                                      officeChannel: channel,
+                                                      liveChannelCount: Int(format.channelCount))
+        if let wanted = mic.remoteChannel, remoteChannel == nil {
+            dualStreamLog("Remote channel \(wanted) unusable against the live format "
+                          + "(\(format.channelCount) ch, office \(channel)) — recording Office only.")
+        }
 
         // 3. Mono output file (selected channel only)
         guard let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
@@ -230,6 +253,21 @@ final class AudioRecorder: ObservableObject {
         } catch {
             errorMessage = "Could not create recording file: \(error.localizedDescription)"
             return
+        }
+        // 3b. Second mono file for Remote, same format and directory as Office (see
+        // `remoteFile`'s doc comment for why two files and not one stereo file).
+        // Nothing consumes it yet — phase 2 is capture only. Failing to create it
+        // must not kill a working Office recording, so it degrades to single-stream.
+        if remoteChannel != nil {
+            let remoteURL = Self.remoteURL(forOffice: url)
+            do {
+                remoteFile = try AVAudioFile(forWriting: remoteURL, settings: monoFormat.settings)
+            } catch {
+                remoteFile = nil
+                remoteChannel = nil   // keep the tap on the inert single-stream path
+                dualStreamLog("Could not create the Remote recording file "
+                              + "(\(error.localizedDescription)) — recording Office only.")
+            }
         }
 
         // 4. VAD — fresh instance per session; uses Silero sidecar if it loaded
@@ -388,12 +426,25 @@ final class AudioRecorder: ObservableObject {
         }
 
         // 6. Tap: extract selected channel → write file → RMS + VAD → ASR
+        // Immutable copy for the escaping tap closure; nil = single-stream, in which
+        // case the Remote block below is skipped entirely and the callback does
+        // exactly the work it did before dual-stream existed.
+        let remoteTapChannel = remoteChannel
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
             guard let self,
                   let mono = AudioBufferProcessor.extractChannel(buffer, channel: channel)
             else { return }
 
             try? self.file?.write(from: mono)
+            // Remote is written from THIS callback so the two files stay
+            // sample-aligned. Capture only — nothing downstream (resampler,
+            // recordingElapsed, VAD, RMS, chunk/diar cadence, ATND) reads it; that
+            // arrives in phase 3. A failed extraction just skips this buffer rather
+            // than aborting the office write above.
+            if let remoteTapChannel,
+               let remoteMono = AudioBufferProcessor.extractChannel(buffer, channel: remoteTapChannel) {
+                try? self.remoteFile?.write(from: remoteMono)
+            }
             self.onBuffer?(mono)
 
             let level = AudioBufferProcessor.rms(mono)
@@ -458,6 +509,7 @@ final class AudioRecorder: ObservableObject {
             errorMessage = "Audio engine failed: \(error.localizedDescription)"
             input.removeTap(onBus: 0)
             file = nil
+            remoteFile = nil   // never leave the Remote handle open on a failed start
         }
     }
 
@@ -505,6 +557,7 @@ final class AudioRecorder: ObservableObject {
         engine?.stop()
         engine = nil
         file = nil
+        remoteFile = nil   // both files close here; releasing the AVAudioFile flushes it
         vad = nil
         rms = 0
         isSpeaking = false
@@ -1708,6 +1761,61 @@ final class AudioRecorder: ObservableObject {
         let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("position-diarization.log")
+        if !FileManager.default.fileExists(atPath: file.path) {
+            FileManager.default.createFile(atPath: file.path, contents: nil)
+        }
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let line = "[\(stamp)] \(message)\n"
+        guard let handle = try? FileHandle(forWritingTo: file) else { return }
+        handle.seekToEndOfFile()
+        if let data = line.data(using: .utf8) { handle.write(data) }
+        try? handle.close()
+    }
+
+    // MARK: - Dual-stream (Office + Remote) helpers
+
+    /// Final validation of the Remote channel against the format the engine is
+    /// actually delivering, run after `MicrophoneSettings.resolve` has already
+    /// checked it against the device's *advertised* channel count.
+    ///
+    /// The re-check exists because of Aggregate Devices: the owner's Office array
+    /// and the loopback input are combined in Audio MIDI Setup, and the aggregate
+    /// can present a different channel layout than the saved selection assumed
+    /// (a sub-device unplugged, reordered, or not yet running). Returning nil
+    /// degrades to single-stream — the same reject-don't-relocate rule as
+    /// `MicrophoneSettings.resolve`: silently moving Remote to another channel
+    /// would record whatever happens to be there without telling anyone.
+    ///
+    /// - Parameters:
+    ///   - wanted: the resolved `MicrophoneSettings.remoteChannel`, or nil.
+    ///   - officeChannel: the office channel ALREADY clamped to the live format.
+    ///   - liveChannelCount: `input.outputFormat(forBus: 0).channelCount`.
+    nonisolated static func resolveRemoteChannel(_ wanted: Int?,
+                                                 officeChannel: Int,
+                                                 liveChannelCount: Int) -> Int? {
+        guard let wanted, wanted >= 0 else { return nil }
+        guard wanted < liveChannelCount else { return nil }   // aggregate presents fewer channels
+        guard wanted != officeChannel else { return nil }     // one channel cannot be both roles
+        return wanted
+    }
+
+    /// Remote file URL derived from the Office one: `meeting-<stamp>.wav` →
+    /// `meeting-<stamp>-remote.wav`, same directory, same stamp. Derived rather
+    /// than re-formatted from `Date()` so the pair can never carry two stamps.
+    nonisolated static func remoteURL(forOffice office: URL) -> URL {
+        let ext = office.pathExtension
+        let base = office.deletingPathExtension().lastPathComponent
+        let name = ext.isEmpty ? "\(base)-remote" : "\(base)-remote.\(ext)"
+        return office.deletingLastPathComponent().appendingPathComponent(name)
+    }
+
+    /// Append a line to logs/dual-stream.log. Mirrors `overlapLog`: one line per
+    /// decision, so a Remote stream that silently degraded to single-stream on the
+    /// owner's machine is diagnosable after the fact.
+    private func dualStreamLog(_ message: String) {
+        let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("dual-stream.log")
         if !FileManager.default.fileExists(atPath: file.path) {
             FileManager.default.createFile(atPath: file.path, contents: nil)
         }
