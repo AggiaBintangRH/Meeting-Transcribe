@@ -14,6 +14,7 @@ struct ATNDPositionTab: View {
     @AppStorage("atnd.position.tauDeg")      private var tauDeg = 15.0
     @AppStorage("atnd.position.smoothingMs") private var smoothingMs = 400.0
     @AppStorage("atnd.position.mode")        private var mode = "firstcome"
+    @AppStorage("atnd.position.source")      private var source = PositionSource.both.rawValue
 
     private enum TauPreset: String, CaseIterable {
         case tight, normal, loose, custom
@@ -41,6 +42,30 @@ struct ATNDPositionTab: View {
     var body: some View {
         Group {
             SettingToggle(label: "Use talker direction for speaker labels", isOn: $enabled)
+
+            // Which layer the transcript's labels are DRAWN from. Both layers keep
+            // running in every mode — this only changes what you see, so it's safe
+            // to flip between recordings while calibrating a room.
+            SettingBlock(title: "Label source") {
+                Picker("", selection: $source) {
+                    Text("Both").tag(PositionSource.both.rawValue)
+                    Text("Position only").tag(PositionSource.atnd.rawValue)
+                    Text("Voice only").tag(PositionSource.pyannote.rawValue)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 360, alignment: .leading)
+                .disabled(!enabled)
+                VStack(alignment: .leading, spacing: 6) {
+                    sourceRow("Both", "Voice labels win wherever pyannote has a turn; talker direction fills only the stretches it left uncovered.")
+                    sourceRow("Position only", "Every row is labeled by talker direction. Voice diarization still runs underneath — its labels just aren't shown.")
+                    sourceRow("Voice only", "Pure voice labels, no direction at all. Effectively the same as turning this feature off; it's here so you can A/B the two layers on one recording.")
+                }
+                Text("With \"Both\", if voice diarization decides two seats are the same person it will merge them into one speaker — voice wins, so the direction split disappears. That is expected, not a bug: switch to \"Position only\" to see the seats.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             SettingBlock(title: "Cluster tightness") {
                 Picker("", selection: Binding(
@@ -113,6 +138,14 @@ struct ATNDPositionTab: View {
                 }
             }
         }
+    }
+
+    /// One "Mode — what it does" line under the source picker.
+    @ViewBuilder
+    private func sourceRow(_ name: String, _ text: String) -> some View {
+        Text("\(name) — ").bold().font(.system(size: 11)).foregroundColor(Theme.textDim)
+            + Text(text).font(.system(size: 11)).foregroundColor(Theme.textFaint)
+        // (the concatenation is one Text, so it wraps as a single paragraph)
     }
 
     @ViewBuilder

@@ -123,6 +123,10 @@ final class AudioRecorder: ObservableObject {
     // Recorder-owned, one per session; nil means the feature is off, so
     // positionGapFill returns [] and the display path is pure pyannote.
     @Published private(set) var positionDiarizer: PositionDiarizer?
+    /// Which layer the DISPLAY draws labels from — read once per session in
+    /// `configurePositionDiarization()`, like every other setting, so it can't
+    /// flip mid-recording and leave half the transcript on each policy.
+    private var positionSource: PositionSource = .both
     /// Last SEPARATION line written to the position log, so the per-room tau
     /// calibration diagnostic is emitted on change instead of on every rebuild.
     private var lastLoggedSeparation: String?
@@ -264,9 +268,13 @@ final class AudioRecorder: ObservableObject {
                     self.partialTranscript = text
                     // Trailing 1s window ≈ the beam active right now (after smoothing).
                     // Short so the live-partial label flips quickly on a talker switch.
-                    self.partialSpeakerName = self.positionDiarizer?.label(
-                        for: max(0, self.recordingElapsed - 1.0)...self.recordingElapsed,
-                        minSamples: 3)?.name
+                    // In `pyannote` source mode the position layer is not displayed
+                    // anywhere, so the live partial must not carry its label either.
+                    self.partialSpeakerName = self.positionSource.usesPosition
+                        ? self.positionDiarizer?.label(
+                            for: max(0, self.recordingElapsed - 1.0)...self.recordingElapsed,
+                            minSamples: 3)?.name
+                        : nil
                 }
             }
         }
@@ -684,6 +692,10 @@ final class AudioRecorder: ObservableObject {
         positionDiarizer = nil
         lastLoggedSeparation = nil
         let d = UserDefaults.standard
+        // Read once, here — the display policy is fixed for the whole session.
+        // Reset to `both` first so a session that bails out below (feature off /
+        // ATND down) is on the default policy, matching its nil diarizer.
+        positionSource = .both
         guard d.bool(forKey: "atnd.position.enabled"),
               ATNDBeamService.shared.state == .listening else { return }
 
@@ -691,6 +703,7 @@ final class AudioRecorder: ObservableObject {
         let smoothingMs = d.object(forKey: "atnd.position.smoothingMs") as? Double ?? 400
         let mode: PositionDiarizer.Mode =
             (d.string(forKey: "atnd.position.mode") == "enrollment") ? .enrollment : .firstCome
+        positionSource = PositionSource.current(d)
 
         let diarizer = PositionDiarizer()
         diarizer.start(tauDeg: tauDeg,
@@ -937,10 +950,17 @@ final class AudioRecorder: ObservableObject {
                                      text: seg.text, confirmed: seg.confirmed)]
         }
         let ranges = speakerRanges(in: window)
-        // Fill only the time regions pyannote has not covered with ATND position
-        // labels (pyannote wins where it has a turn). Off/silent → fills is [].
-        let fills = positionGapFill(window: window, covered: ranges)
-        let filled = (ranges + fills).sorted { $0.start < $1.start }
+        // The one switch on the display source (see `PositionSource.plan`):
+        //   both     → pyannote shows, ATND fills pyannote's own complement
+        //   atnd     → nothing pyannote shows, empty coverage ⇒ ATND tiles it all
+        //   pyannote → pyannote shows, no gap-fill runs at all
+        // `ranges` itself is untouched in every mode, and the position ids the
+        // fills carry never leave `filled` — liveTurns/overlapRegions/
+        // speakerCount/SpeakerProfileStore stay pure pyannote throughout.
+        let plan = positionSource.plan(pyannoteRanges: ranges)
+        // Off/silent ATND → fills is [] regardless of the source.
+        let fills = plan.gapFillCoverage.map { positionGapFill(window: window, covered: $0) } ?? []
+        let filled = (plan.displayRanges + fills).sorted { $0.start < $1.start }
 
         // Unconfirmed (realtime) segments stay a single provisional row — the text
         // isn't final, so it isn't sentence-split — but it must still carry the
