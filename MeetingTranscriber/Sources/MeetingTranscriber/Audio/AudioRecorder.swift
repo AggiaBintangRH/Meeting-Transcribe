@@ -46,9 +46,10 @@ final class AudioRecorder: ObservableObject {
     /// One transcribed Remote (conferencing) chunk. Deliberately NOT a
     /// `TranscriptSegment`: remote text never goes through the office display
     /// pipeline (`derivedRows` → speaker ranges → position gap-fill → word
-    /// attribution). It carries no diarization of its own in this phase, and
-    /// must never reach the ATND/position path, so it is a separate collection
-    /// that only meets office rows at the final sort in `rebuildDisplayRows`.
+    /// attribution). It IS speaker-split (phase 4), but against `remoteLiveTurns`
+    /// in the remote identity space, and it must never reach the ATND/position
+    /// path — so it is a separate collection that only meets office rows at the
+    /// final sort in `rebuildDisplayRows`.
     ///
     /// Text only, by design: the transcript comes from the sidecar's `-2`
     /// file-transcribe frame, which calls `transcribe_path()` directly and never
@@ -101,9 +102,11 @@ final class AudioRecorder: ObservableObject {
         var text: String
         let confirmed: Bool
         var overlapped: Bool = false      // spoke over another speaker in this window
-        /// Row came from the Remote stream, not the room. Purely a display flag —
-        /// it keeps the two label spaces visually distinct and keeps remote rows
-        /// out of the rename path (`speakerID` is nil for them).
+        /// Row came from the Remote stream, not the room. A display flag: it keeps
+        /// the two label spaces visually distinct (amber vs teal) and tells the
+        /// rename dialog to edit the remote PROFILE name rather than the composed
+        /// "Remote Speaker - …" label. The id range, not this flag, is what routes
+        /// a rename to the right store.
         var isRemote: Bool = false
     }
 
@@ -211,6 +214,37 @@ final class AudioRecorder: ObservableObject {
     /// session's gate is complete before it is ever consulted.
     private var remoteLastChunkDone = true
     private var remoteStopWatchdog: Task<Void, Never>?
+
+    // MARK: Remote diarization (dual-stream phase 4)
+    //
+    // A SECOND identity space over the SAME sidecar process: the jobs below carry
+    // `stream: .remote`, which selects the sidecar's remote ProfileStore. Nothing
+    // here may touch `liveTurns`, `sessionSpeakerIDs`, `speakerCount`,
+    // `overlapRegions`, `repairWindows` or the ATND/position path — those are all
+    // Office-only, and remote ids (>= remoteIDBase) reaching any of them is the
+    // corruption this split exists to prevent.
+
+    /// The Remote WAV for this session, diarized as a whole at stop. Held
+    /// separately from `lastRecordingURL`, which every Office-only consumer
+    /// (final pass, overlap repair, DiCoW) reads and must keep reading.
+    private var remoteRecordingURL: URL?
+    /// Remote-space turns collected so far — the remote twin of `liveTurns`.
+    /// Ids are already offset by `remoteIDBase` (the sidecar applies it).
+    private var remoteLiveTurns: [DiarizationService.Turn] = []
+    /// 16 kHz remote samples pending live diarization. Separate from
+    /// `remoteChunkAudio` because the diarization cadence is its own setting.
+    private var remoteDiarAudio: [Float] = []
+    /// Temp chunk WAVs awaiting a remote result. Keyed the same way as
+    /// `chunkFileByWindow` but kept apart, since both streams use the SAME
+    /// window starts and would otherwise delete each other's files.
+    private var remoteChunkFileByWindow: [Double: URL] = [:]
+    private var remoteSessionSpeakerIDs = Set<Int>()
+    /// Remote-space speaker count. `speakerCount` stays Office-only.
+    @Published var remoteSpeakerCount: Int?
+    /// Stop gate for the remote final pass. Starts true so a single-stream
+    /// session's gate is already complete before it is ever consulted.
+    private var remoteFinalDiarDone = true
+    private var remoteFinalDiarWatchdog: Task<Void, Never>?
 
     /// Publishes per-model progress for the loading overlay.
     let modelLoader = ModelLoader()
@@ -353,10 +387,12 @@ final class AudioRecorder: ObservableObject {
         // `remoteFile`'s doc comment for why two files and not one stereo file).
         // Nothing consumes it yet — phase 2 is capture only. Failing to create it
         // must not kill a working Office recording, so it degrades to single-stream.
+        remoteRecordingURL = nil
         if remoteChannel != nil {
             let remoteURL = Self.remoteURL(forOffice: url)
             do {
                 remoteFile = try AVAudioFile(forWriting: remoteURL, settings: monoFormat.settings)
+                remoteRecordingURL = remoteURL   // the stop-time remote final pass reads this
             } catch {
                 remoteFile = nil
                 remoteChannel = nil   // keep the tap on the inert single-stream path
@@ -495,6 +531,17 @@ final class AudioRecorder: ObservableObject {
         remoteLastChunkDone = !remoteStreamActive
         remoteStopWatchdog?.cancel()
         remoteStopWatchdog = nil
+        // Fresh remote diarization state. Gated on `remoteStreamActive` for the
+        // same reason the transcription side is: without remote 16 kHz audio
+        // there are no remote rows for the labels to land on.
+        remoteLiveTurns = []
+        remoteDiarAudio = []
+        remoteChunkFileByWindow = [:]
+        remoteSessionSpeakerIDs = []
+        remoteSpeakerCount = nil
+        remoteFinalDiarDone = true   // flipped to false in stop() iff a pass is dispatched
+        remoteFinalDiarWatchdog?.cancel()
+        remoteFinalDiarWatchdog = nil
         configureDiarization()
         configurePositionDiarization()
         // Real-time speaker split: when the beam settles on a different talker,
@@ -630,6 +677,10 @@ final class AudioRecorder: ObservableObject {
                 // session, so this is a no-op there.
                 if !remoteSamples16k.isEmpty {
                     self.remoteChunkAudio.append(contentsOf: remoteSamples16k)
+                    // Second, independent buffer for remote diarization: the two
+                    // cadences are separate settings, so one buffer cleared on the
+                    // ASR boundary could not also feed the diarization boundary.
+                    self.remoteDiarAudio.append(contentsOf: remoteSamples16k)
                 }
 
                 if boundary, chunked != nil {
@@ -665,6 +716,12 @@ final class AudioRecorder: ObservableObject {
                     let diarWindowStart = self.lastDiarBoundary
                     self.lastDiarBoundary = self.recordingElapsed
                     self.diarizeLiveChunk(windowStart: diarWindowStart)
+                    // Remote rides the SAME diarization cadence, dispatched as a
+                    // second job on the same stdin. One process, two stores: the
+                    // sidecar is single-threaded and drains stdin in order, so the
+                    // office job above always runs first and the interleaving is
+                    // deterministic. No-op for a single-stream session.
+                    self.diarizeRemoteLiveChunk(windowStart: diarWindowStart)
                 }
             }
         }
@@ -680,6 +737,7 @@ final class AudioRecorder: ObservableObject {
             input.removeTap(onBus: 0)
             file = nil
             remoteFile = nil   // never leave the Remote handle open on a failed start
+            remoteRecordingURL = nil
             remoteStreamActive = false
             remoteLastChunkDone = true
         }
@@ -758,9 +816,15 @@ final class AudioRecorder: ObservableObject {
         let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
         let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? true
         let willRunStopPass = finalOn && modelLoader.diarization != nil
+        // The remote pass is dispatched HERE, before the overlay is built, so the
+        // step list knows whether to show a remote-diarization row. Queued ahead
+        // of the office stop pass on the same stdin; the sidecar drains it in
+        // order, so both run to completion regardless of who is first.
+        let willRunRemoteDiar = startRemoteDiarization()
 
         // Everything below lands asynchronously; block the controls until it does.
-        buildStopSteps(willRunStopPass: willRunStopPass)
+        buildStopSteps(willRunStopPass: willRunStopPass,
+                       willRunRemoteDiar: willRunRemoteDiar)
         state = .processing
         startStopWatchdog()
 
@@ -787,7 +851,7 @@ final class AudioRecorder: ObservableObject {
     /// The legs the overlay lists for this stop, in the order they finish.
     /// `repair` only appears when the feature is on AND its engine loaded —
     /// otherwise there is nothing to wait for.
-    private func buildStopSteps(willRunStopPass: Bool) {
+    private func buildStopSteps(willRunStopPass: Bool, willRunRemoteDiar: Bool = false) {
         var steps = [StopStep(id: "chunk", name: "Transcribing final audio",
                               state: lastChunkDone ? .done : .loading)]
         // Remote only appears for a dual-stream session. Its state is read the
@@ -801,6 +865,13 @@ final class AudioRecorder: ObservableObject {
         }
         if willRunStopPass {
             steps.append(StopStep(id: "diarize", name: "Identifying speakers", state: .loading))
+        }
+        // Its own row: Office and Remote are separate identity spaces, so their
+        // progress is separate too — and a failed remote pass must read as a
+        // remote failure, not as "speakers could not be identified".
+        if willRunRemoteDiar {
+            steps.append(StopStep(id: "remote-diarize",
+                                  name: "Identifying remote speakers", state: .loading))
         }
         if overlapRepairWillRun {
             steps.append(StopStep(id: "repair", name: "Repairing overlapping speech",
@@ -828,7 +899,8 @@ final class AudioRecorder: ObservableObject {
     /// All post-stop work landed → drop the overlay and re-enable Start.
     /// Idempotent; every leg's completion path calls it.
     private func checkStopProcessingDone() {
-        guard state == .processing, lastChunkDone, remoteLastChunkDone, finalDiarDone,
+        guard state == .processing, lastChunkDone, remoteLastChunkDone,
+              finalDiarDone, remoteFinalDiarDone,
               !overlapRepairing, repairTask == nil else { return }
         stopWatchdog?.cancel()
         stopWatchdog = nil
@@ -869,19 +941,31 @@ final class AudioRecorder: ObservableObject {
     private func configureDiarization() {
         guard let service = modelLoader.diarization else { return }
 
-        service.onChunkResult = { [weak self] windowStart, turns in
+        service.onChunkResult = { [weak self] windowStart, turns, stream in
             Task { @MainActor in
                 guard let self else { return }
-                // Clean up the temp chunk file
-                if let file = self.chunkFileByWindow.removeValue(forKey: windowStart) {
-                    try? FileManager.default.removeItem(at: file)
-                }
-                // Turn times are chunk-local — offset to absolute recording time,
-                // add to the running set, then (re)label overlapping segments.
+                // Turn times are chunk-local — offset to absolute recording time.
                 let absolute = turns.map {
                     DiarizationService.Turn(start: $0.start + windowStart,
                                             end: $0.end + windowStart,
                                             id: $0.id, name: $0.name)
+                }
+                // The Remote branch returns early ON PURPOSE: it must not touch
+                // liveTurns, sessionSpeakerIDs, speakerCount or the office tail
+                // gate. Its ids are >= remoteIDBase and belong to the other space.
+                guard stream == .office else {
+                    if let file = self.remoteChunkFileByWindow.removeValue(forKey: windowStart) {
+                        try? FileManager.default.removeItem(at: file)
+                    }
+                    self.remoteLiveTurns.append(contentsOf: absolute)
+                    for turn in absolute { self.remoteSessionSpeakerIDs.insert(turn.id) }
+                    self.remoteSpeakerCount = self.remoteSessionSpeakerIDs.count
+                    self.rebuildDisplayRows()
+                    return
+                }
+                // Clean up the temp chunk file
+                if let file = self.chunkFileByWindow.removeValue(forKey: windowStart) {
+                    try? FileManager.default.removeItem(at: file)
                 }
                 // Raw pyannote turns — pyannote is authoritative. Position labels
                 // are folded in only at display time (derivedRows), never here.
@@ -896,9 +980,14 @@ final class AudioRecorder: ObservableObject {
             }
         }
 
-        service.onFinalResult = { [weak self] turns in
+        service.onFinalResult = { [weak self] turns, stream in
             Task { @MainActor in
                 guard let self else { return }
+                guard stream == .office else {
+                    self.applyRemoteFinalSpeakers(turns)
+                    self.completeRemoteDiarization()
+                    return
+                }
                 self.applyFinalSpeakers(turns)
                 self.diarizing = false
                 self.finalDiarDone = true
@@ -910,9 +999,17 @@ final class AudioRecorder: ObservableObject {
             }
         }
 
-        service.onError = { [weak self] message in
+        service.onError = { [weak self] message, stream in
             Task { @MainActor in
                 guard let self else { return }
+                // A remote job's failure settles only the remote leg. Remote
+                // trouble must never cost the user their office transcript —
+                // the same rule the remote chunk path already follows.
+                guard stream == .office else {
+                    self.dualStreamLog("remote diarization failed: \(message)")
+                    self.completeRemoteDiarization(error: message)
+                    return
+                }
                 self.diarizing = false
                 self.diarizationError = message
                 self.finalDiarDone = true
@@ -926,6 +1023,89 @@ final class AudioRecorder: ObservableObject {
                 self.checkStopProcessingDone()
             }
         }
+    }
+
+    // MARK: - Remote diarization (the second identity space)
+
+    /// Live: hand the remote audio accumulated since the last diarization
+    /// boundary to the sidecar as a `remote` job. Mirrors `diarizeLiveChunk`,
+    /// with no position/ATND involvement of any kind.
+    private func diarizeRemoteLiveChunk(windowStart: Double) {
+        guard remoteStreamActive, let service = modelLoader.diarization else { return }
+        let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
+        guard liveOn else {
+            // Same reasoning as the office path: the stop-time pass is a FULL
+            // re-diarization of the remote WAV, so pending live audio is not
+            // needed and must not accumulate for the whole meeting.
+            remoteDiarAudio = []
+            return
+        }
+        let samples = remoteDiarAudio
+        remoteDiarAudio = []
+        guard samples.count > 16_000 else { return }   // skip chunks under 1s
+        let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
+        Task.detached(priority: .utility) { [weak self] in
+            guard let url = Self.writeTempWAV(samples: samples, prefix: "remote-diar") else { return }
+            await MainActor.run { [weak self] in
+                self?.remoteChunkFileByWindow[windowStart] = url
+            }
+            service.diarizeChunk(audio: url, windowStart: windowStart,
+                                 exclusive: !detectOverlap, stream: .remote)
+        }
+    }
+
+    /// At stop: one batch pass over the whole Remote WAV — the remote twin of
+    /// `startDiarization`. Always the full-recording form (never the office
+    /// "continue from live labels" tail mode): the remote file is already a
+    /// clean, separate waveform, so global clustering is strictly better and
+    /// there is no live-numbering continuity to protect.
+    /// Returns whether a pass was actually dispatched, so `stop()` can decide
+    /// whether the overlay gets a remote-diarization row.
+    @discardableResult
+    private func startRemoteDiarization() -> Bool {
+        let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
+        guard finalOn, remoteStreamActive,
+              let service = modelLoader.diarization,
+              let recording = remoteRecordingURL else { return false }
+        remoteFinalDiarDone = false
+        let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
+        let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
+        service.diarizeFinal(audio: recording, numSpeakers: numSpeakers,
+                             exclusive: !detectOverlap, stream: .remote)
+        // Its own watchdog, on the same scale rule as the office final pass: the
+        // remote job is queued BEHIND the office one on a single stdin, so it can
+        // legitimately wait out the office pass before it even starts.
+        let limit = max(180, recordingElapsed) * 2
+        remoteFinalDiarWatchdog?.cancel()
+        remoteFinalDiarWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(limit))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, !self.remoteFinalDiarDone else { return }
+                self.completeRemoteDiarization(error: "Remote diarization timed out")
+            }
+        }
+        return true
+    }
+
+    /// The remote final result replaces the running remote set, exactly as
+    /// `applyFinalSpeakers` does for Office — but into `remoteLiveTurns`, so the
+    /// two spaces never share a collection.
+    private func applyRemoteFinalSpeakers(_ turns: [DiarizationService.Turn]) {
+        remoteSpeakerCount = Set(turns.map(\.id)).count
+        remoteLiveTurns = turns
+        rebuildDisplayRows()
+    }
+
+    /// Settle the remote leg of the stop gate exactly once. Idempotent; every
+    /// remote diarization exit path (result, error, timeout) calls it.
+    private func completeRemoteDiarization(error: String? = nil) {
+        remoteFinalDiarWatchdog?.cancel()
+        remoteFinalDiarWatchdog = nil
+        guard !remoteFinalDiarDone else { return }
+        remoteFinalDiarDone = true
+        setStopStep("remote-diarize", error.map { .failed($0) } ?? .done)
+        checkStopProcessingDone()
     }
 
     // MARK: - Position diarization (ATND beam) gap-fill
@@ -1171,8 +1351,9 @@ final class AudioRecorder: ObservableObject {
         // they only ever meet here, at the final sort. With no remote segments
         // the merge returns `rows` untouched — the single-stream path is exactly
         // what it was.
-        displayRows = Self.mergeRowsByStartTime(office: rows,
-                                                remote: Self.remoteRows(remoteSegments))
+        displayRows = Self.mergeRowsByStartTime(
+            office: rows,
+            remote: Self.remoteRows(remoteSegments, turns: remoteLiveTurns))
     }
 
     /// The display rows one raw segment expands into — the single source of truth
@@ -1237,7 +1418,7 @@ final class AudioRecorder: ObservableObject {
             // (unconfirmed) text into per-speaker rows too, so the switch shows in
             // real time. A single fill (or none) stays one provisional row.
             if filled.count > 1 {
-                return assignSentences(seg.text, window: window, ranges: filled,
+                return Self.assignSentences(seg.text, window: window, ranges: filled,
                                        segID: seg.id.uuidString, regions: regions,
                                        confirmed: false)
             }
@@ -1272,7 +1453,7 @@ final class AudioRecorder: ObservableObject {
                                         text: p.text, confirmed: true, overlapped: overlapped)
             }
         }
-        return assignSentences(seg.text, window: window, ranges: filled,
+        return Self.assignSentences(seg.text, window: window, ranges: filled,
                                segID: seg.id.uuidString, regions: regions)
     }
 
@@ -1280,12 +1461,16 @@ final class AudioRecorder: ObservableObject {
     /// character position in the chunk, then handed to the speaker turn it most
     /// overlaps — so text is never cut mid-sentence onto the wrong speaker.
     /// Consecutive sentences by the same speaker merge into one row.
-    private func assignSentences(_ text: String,
-                                 window: ClosedRange<Double>,
-                                 ranges: [(start: Double, end: Double, id: Int, name: String)],
-                                 segID: String,
-                                 regions: [(start: Double, end: Double)],
-                                 confirmed: Bool = true) -> [SpeakerUtterance] {
+    ///
+    /// Pure and `static` so the Remote stream can reuse it verbatim with its own
+    /// `ranges` (built from `remoteLiveTurns`) — the split logic is identical,
+    /// only the identity space differs.
+    nonisolated static func assignSentences(_ text: String,
+                                            window: ClosedRange<Double>,
+                                            ranges: [(start: Double, end: Double, id: Int, name: String)],
+                                            segID: String,
+                                            regions: [(start: Double, end: Double)],
+                                            confirmed: Bool = true) -> [SpeakerUtterance] {
         let sentences = splitSentences(text)
         guard !sentences.isEmpty else { return [] }
         let totalChars = max(1, sentences.reduce(0) { $0 + $1.count })
@@ -1351,7 +1536,7 @@ final class AudioRecorder: ObservableObject {
 
     /// Split text into sentences on . ? ! and line breaks, keeping punctuation.
     /// Fragments with no letters or digits (e.g. ". .") are dropped.
-    private func splitSentences(_ text: String) -> [String] {
+    nonisolated static func splitSentences(_ text: String) -> [String] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         func hasContent(_ s: String) -> Bool { s.contains { $0.isLetter || $0.isNumber } }
@@ -1374,9 +1559,19 @@ final class AudioRecorder: ObservableObject {
 
     /// Speaker turns overlapping a window, clipped to it and merged when the
     /// same speaker continues (small gaps bridged), sorted by start time.
+    /// The office view: always `liveTurns`, never the remote ones.
     private func speakerRanges(in window: ClosedRange<Double>)
         -> [(start: Double, end: Double, id: Int, name: String)] {
-        let clipped = liveTurns.compactMap { t -> (start: Double, end: Double, id: Int, name: String)? in
+        Self.speakerRanges(in: window, turns: liveTurns)
+    }
+
+    /// The same clipping/merging, parameterised by the turn set — so the Remote
+    /// stream can reuse it against `remoteLiveTurns` without any chance of the
+    /// two identity spaces meeting (each call sees exactly one of them).
+    nonisolated static func speakerRanges(in window: ClosedRange<Double>,
+                                          turns: [DiarizationService.Turn])
+        -> [(start: Double, end: Double, id: Int, name: String)] {
+        let clipped = turns.compactMap { t -> (start: Double, end: Double, id: Int, name: String)? in
             let s = max(t.start, window.lowerBound)
             let e = min(t.end, window.upperBound)
             return e > s ? (s, e, t.id, t.name) : nil
@@ -1395,15 +1590,27 @@ final class AudioRecorder: ObservableObject {
     }
 
     /// Rename a speaker profile and refresh all its rows in the transcript.
+    ///
+    /// THREE-WAY on the id range alone — the whole point of the disjoint bases
+    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position). A position id must
+    /// never reach the Python-owned profile stores at all; a remote id must
+    /// never reach profiles.json, and an office id never profiles-remote.json.
     func renameSpeaker(id: Int, to name: String) {
-        // Position ids are disjoint (>= positionIDBase) and must NEVER reach the
-        // Python-owned SpeakerProfileStore — route them to the position diarizer.
         if id >= PositionDiarizer.positionIDBase {
             positionDiarizer?.rename(clusterID: id - PositionDiarizer.positionIDBase, to: name)
         } else {
+            // `SpeakerProfileStore` picks the file and strips `remoteIDBase`
+            // itself, so the file choice cannot drift from the id range.
             SpeakerProfileStore.rename(id: id, to: name)
         }
+        // Only ONE of the two turn collections can contain this id (their ranges
+        // are disjoint), so mapping both is safe and keeps the branch out.
         liveTurns = liveTurns.map {
+            $0.id == id
+                ? DiarizationService.Turn(start: $0.start, end: $0.end, id: $0.id, name: name)
+                : $0
+        }
+        remoteLiveTurns = remoteLiveTurns.map {
             $0.id == id
                 ? DiarizationService.Turn(start: $0.start, end: $0.end, id: $0.id, name: name)
                 : $0
@@ -2016,18 +2223,37 @@ final class AudioRecorder: ObservableObject {
 
     // MARK: Remote stream — transcription, gating and rows
 
-    /// Label every Remote row carries in this phase. Remote diarization is
-    /// phase 4; until then the stream is known to be "not the room" and nothing
-    /// more, and the label says exactly that rather than implying an identity.
-    nonisolated static let remoteSpeakerLabel = "Remote Speaker - Speaker Unknown"
+    /// Prefix every Remote row's speaker label carries. Office and Remote are
+    /// two SEPARATE identity spaces on purpose (owner requirement): office
+    /// "Speaker 1" and remote "R1" are different people, and the label must make
+    /// that impossible to misread.
+    nonisolated static let remoteNamePrefix = "Remote Speaker - "
 
-    /// Offset phase 4 will add to remote-local speaker ids, mirroring the proven
+    /// Label a Remote row shows before (or without) remote diarization: the
+    /// stream is known to be "not the room" and nothing more.
+    nonisolated static let remoteSpeakerLabel = remoteNamePrefix + "Speaker Unknown"
+
+    /// Compose the displayed Remote label from a remote profile name ("R1" →
+    /// "Remote Speaker - R1").
+    nonisolated static func remoteDisplayName(_ name: String) -> String {
+        remoteNamePrefix + name
+    }
+
+    /// Inverse of `remoteDisplayName`, for the rename dialog: the user edits the
+    /// PROFILE name ("R1"), not the composed row label, so the prefix is not
+    /// saved into profiles-remote.json and then re-prefixed on the next rebuild.
+    nonisolated static func remoteBaseName(_ display: String) -> String {
+        display.hasPrefix(remoteNamePrefix)
+            ? String(display.dropFirst(remoteNamePrefix.count))
+            : display
+    }
+
+    /// Offset the sidecar adds to remote-local speaker ids, mirroring the proven
     /// `PositionDiarizer.positionIDBase = 100_000` split: a downstream consumer
-    /// then tells the three label spaces apart with one integer comparison
-    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position). Declared here now so
-    /// the ranges are chosen together and cannot collide later; NOTHING uses it
-    /// yet — remote rows carry no speaker id at all in this phase, so no remote
-    /// id can reach `SpeakerProfileStore`/profiles.json.
+    /// tells the three label spaces apart with one integer comparison
+    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position). It is what keeps a
+    /// remote id out of profiles.json and an office id out of profiles-remote.json
+    /// — see `renameSpeaker` and `SpeakerProfileStore.Space`.
     nonisolated static let remoteIDBase = 10_000
 
     /// RMS below which a remote chunk is treated as silence and never sent to the
@@ -2058,23 +2284,49 @@ final class AudioRecorder: ObservableObject {
         return nil
     }
 
-    /// The display rows the remote segments render as. All one label space, no
-    /// speaker ids (nothing to rename), no overlap tagging — remote text never
-    /// goes through the office pipeline.
+    /// The display rows the remote segments render as, split by the REMOTE
+    /// diarization turns (`remoteLiveTurns`) — never by `liveTurns`.
+    ///
+    /// The splitting machinery is the office one (`speakerRanges` →
+    /// `assignSentences`), parameterised by the remote turns; what is
+    /// deliberately absent is everything position-shaped: no `positionGapFill`,
+    /// no `PositionSource`, no `PositionDiarizer`, no ATND. The beam describes
+    /// the ROOM, so it says nothing whatsoever about the conferencing stream.
+    /// `regions: []` for the same reason overlap repair is Office-only — remote
+    /// rows are never tagged from office overlap windows.
+    ///
+    /// With no remote turns (feature idle, or the remote pass has not landed
+    /// yet) each segment stays ONE row labelled `remoteSpeakerLabel` with no
+    /// speaker id — exactly the phase-3 behaviour.
     ///
     /// Sorted by start time here rather than relying on append order: segments
     /// are appended when their transcription lands, which is chronological today
     /// (one sidecar, one queue) but is not something the merge should depend on.
-    nonisolated static func remoteRows(_ segments: [RemoteSegment]) -> [SpeakerUtterance] {
-        segments.sorted { $0.window.lowerBound < $1.window.lowerBound }.compactMap { seg in
-            let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            return SpeakerUtterance(id: seg.id.uuidString,
-                                    speaker: remoteSpeakerLabel, speakerID: nil,
-                                    start: seg.window.lowerBound, end: seg.window.upperBound,
-                                    text: text, confirmed: true, overlapped: false,
-                                    isRemote: true)
-        }
+    nonisolated static func remoteRows(_ segments: [RemoteSegment],
+                                       turns: [DiarizationService.Turn] = [])
+        -> [SpeakerUtterance] {
+        segments.sorted { $0.window.lowerBound < $1.window.lowerBound }
+            .flatMap { seg -> [SpeakerUtterance] in
+                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return [] }
+                let ranges = speakerRanges(in: seg.window, turns: turns)
+                guard !ranges.isEmpty else {
+                    return [SpeakerUtterance(id: seg.id.uuidString,
+                                             speaker: remoteSpeakerLabel, speakerID: nil,
+                                             start: seg.window.lowerBound,
+                                             end: seg.window.upperBound,
+                                             text: text, confirmed: true, overlapped: false,
+                                             isRemote: true)]
+                }
+                return assignSentences(text, window: seg.window, ranges: ranges,
+                                       segID: seg.id.uuidString, regions: [])
+                    .map { row in
+                        var row = row
+                        row.speaker = row.speaker.map(remoteDisplayName)
+                        row.isRemote = true
+                        return row
+                    }
+            }
     }
 
     /// Interleave office and remote rows by start time into one transcript.

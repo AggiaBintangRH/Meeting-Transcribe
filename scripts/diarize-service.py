@@ -12,14 +12,37 @@ Speaker profiles persist in models/speaker-profiles/:
   profiles.json   [{"id":1,"name":"Speaker 1","count":12}]  (names editable by app)
   embeddings.npz  {"1": centroid vector}
 
+Dual-stream (Office + Remote): ONE pipeline, TWO profile stores.
+  The Office array and the conferencing (Remote) channel are different rooms of
+  people, so their identities must not be comparable. `ProfileStore.assign()`
+  scores an incoming embedding against EVERY stored centroid, so a single shared
+  store would let a remote voice cosine-match onto an office profile — silent,
+  permanent identity corruption. Two stores make that structurally impossible
+  rather than merely filtered:
+      office  profiles.json         embeddings.npz         names "Speaker N"
+      remote  profiles-remote.json  embeddings-remote.npz  names "RN"
+  A SECOND PROCESS would also be structurally safe, but would mean a second
+  pyannote pipeline + WeSpeaker embedder resident (~2 GB) and a second long
+  startup for nothing: the one loaded pipeline serves both streams, and job
+  ordering on a single stdin gives deterministic interleaving.
+  Remote ids go on the wire as REMOTE_ID_BASE + local_id, mirroring the app's
+  proven position-id split (pyannote < 10_000 <= remote < 100_000 <= position),
+  so a downstream consumer tells the spaces apart with one integer comparison.
+  The remote files do not exist until a dual-stream session runs, and an office
+  job never touches them — so there is nothing to migrate.
+
 Protocol:
   stdout: {"type":"status","text":"LOADED"}
           {"type":"chunk_result","window_start":s,"segments":[{start,end,id,name}]}
           {"type":"result","segments":[{start,end,id,name}]}
           {"type":"error","text":...}
+          result/error messages carry "stream":"remote" for remote jobs; the
+          field is OMITTED for office jobs, so the single-stream wire format is
+          byte-identical to what it was before dual-stream existed.
   stdin (one JSON per line):
           {"cmd":"chunk","audio":path,"window_start":seconds}
           {"cmd":"final","audio":path,"num_speakers":0}
+          any job may carry "stream":"office"|"remote" — ABSENT MEANS OFFICE.
           EOF exits.
 
 Fully offline: HF_HOME points at the project models/ folder.
@@ -40,6 +63,9 @@ PROFILE_DIR = os.environ.get("MT_PROFILE_DIR", os.path.join(BASE, "models", "spe
 SIM_THRESHOLD = 0.5          # cosine similarity to accept a profile match
 MIN_EMBED_SEC = 1.5          # need this much speech to embed a voice
 MAX_CENTROID_COUNT = 50      # cap running-mean weight so voices can drift
+# Offset added to a REMOTE profile id before it leaves this process. Mirrors the
+# app's PositionDiarizer.positionIDBase = 100_000 split; must stay below it.
+REMOTE_ID_BASE = 10_000
 
 
 def emit(payload: dict) -> None:
@@ -67,13 +93,20 @@ def log(message: str) -> None:
 
 # ---------------------------------------------------------------- store
 class ProfileStore:
-    """Voice profiles: centroid embeddings on disk, names editable by the app."""
+    """Voice profiles: centroid embeddings on disk, names editable by the app.
 
-    def __init__(self, np):
+    One instance per identity SPACE (see the module docstring): the file names
+    and the generated-name template are constructor arguments precisely so a
+    second, disjoint space can exist without any cross-store code path.
+    """
+
+    def __init__(self, np, json_name="profiles.json", npz_name="embeddings.npz",
+                 name_template="Speaker {n}"):
         self.np = np
         os.makedirs(PROFILE_DIR, exist_ok=True)
-        self.json_path = os.path.join(PROFILE_DIR, "profiles.json")
-        self.npz_path = os.path.join(PROFILE_DIR, "embeddings.npz")
+        self.json_path = os.path.join(PROFILE_DIR, json_name)
+        self.npz_path = os.path.join(PROFILE_DIR, npz_name)
+        self.name_template = name_template
         self.profiles = []   # [{"id","name","count"}]
         self.centroids = {}  # id(int) -> np.ndarray
         self.load()
@@ -118,7 +151,7 @@ class ProfileStore:
         for p in self.profiles:
             if p["id"] == pid:
                 return p["name"]
-        return f"Speaker {pid}"
+        return self.name_template.format(n=pid)
 
     def _cosine(self, a, b) -> float:
         np = self.np
@@ -127,7 +160,9 @@ class ProfileStore:
 
     def _create(self, embedding) -> int:
         new_id = max([p["id"] for p in self.profiles], default=0) + 1
-        self.profiles.append({"id": new_id, "name": f"Speaker {new_id}", "count": 1})
+        self.profiles.append({"id": new_id,
+                              "name": self.name_template.format(n=new_id),
+                              "count": 1})
         self.centroids[new_id] = embedding
         return new_id
 
@@ -210,8 +245,15 @@ def main() -> None:
         fail(f"Embedding model load failed: {brief_traceback()} — "
              "run download-best-models.sh")
 
-    store = ProfileStore(np)
-    log(f"pipeline + embedder on {device}, {len(store.profiles)} saved profiles")
+    # Two disjoint identity spaces over one pipeline — see the module docstring.
+    # Creating the remote store does NOT create its files (load() only reads what
+    # exists, save() only runs for the store a job actually used), so a
+    # single-stream session leaves models/speaker-profiles/ exactly as it was.
+    office_store = ProfileStore(np)
+    remote_store = ProfileStore(np, "profiles-remote.json", "embeddings-remote.npz", "R{n}")
+    stores = (office_store, remote_store)
+    log(f"pipeline + embedder on {device}, {len(office_store.profiles)} saved profiles "
+        f"({len(remote_store.profiles)} remote)")
     emit({"type": "status", "text": "LOADED"})
 
     def local_turns(audio_path, num_speakers=0, exclusive=False):
@@ -228,8 +270,13 @@ def main() -> None:
         return [(t.start, t.end, label)
                 for t, _, label in annotation.itertracks(yield_label=True)]
 
-    def resolve_speakers(audio_path, turns):
-        """Embed each local speaker's speech, map local label → profile id."""
+    def resolve_speakers(audio_path, turns, store):
+        """Embed each local speaker's speech, map local label → profile id.
+
+        `store` is the ONLY place this stream's voices are ever compared: the
+        caller picks it from the job's stream, so an office embedding is never
+        scored against a remote centroid or vice versa.
+        """
         waveform, sr = torchaudio.load(audio_path)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
@@ -262,14 +309,17 @@ def main() -> None:
             mapping.update(store.assign(embeddings))
         return mapping
 
-    def labeled_segments(turns, mapping):
+    def labeled_segments(turns, mapping, store, id_base):
+        """Emit turns with WIRE ids: local id + id_base. The offset is applied
+        here, at the process boundary, so every id inside this file stays local
+        to its store and the two spaces can never be indexed by the same int."""
         result = []
         for start, end, label in turns:
             pid = mapping.get(label)
             if pid is None:
                 continue  # unidentifiable blip
             result.append({"start": round(start, 3), "end": round(end, 3),
-                           "id": pid, "name": store.name(pid)})
+                           "id": pid + id_base, "name": store.name(pid)})
         return result
 
     for line in sys.stdin:
@@ -283,41 +333,62 @@ def main() -> None:
             emit({"type": "error", "text": f"Bad job line: {line[:120]}"})
             continue
 
+        # Which identity space this job belongs to. ABSENT MEANS OFFICE, so a
+        # single-stream app (or an older one) drives this sidecar exactly as it
+        # always did. `echo` is spliced into every reply for this job and is
+        # empty for office — keeping the single-stream wire bytes unchanged.
+        stream = job.get("stream")
+        is_remote = stream == "remote"
+        store = remote_store if is_remote else office_store
+        id_base = REMOTE_ID_BASE if is_remote else 0
+        echo = {"stream": stream} if stream else {}
+
         if cmd == "reset":
-            store.reset()
-            log("speaker profiles reset — fresh session")
+            # A fresh session resets BOTH spaces: the setting is "start this
+            # recording with a clean speaker store", and leaving half of it
+            # populated would make remote numbering carry over on its own.
+            for s in stores:
+                s.reset()
+            log("speaker profiles reset (office + remote) — fresh session")
             emit({"type": "status", "text": "RESET"})
             continue
 
         audio = job.get("audio", "")
         if not os.path.exists(audio):
-            emit({"type": "error", "text": f"Audio not found: {audio}"})
+            emit({"type": "error", "text": f"Audio not found: {audio}", **echo})
             continue
 
-        store.reload_names()  # pick up renames from the app
+        # Renames land in either file, and a job of one stream may follow a
+        # rename of the other, so refresh both (a missing file is a no-op).
+        for s in stores:
+            s.reload_names()
         exclusive = bool(job.get("exclusive", False))
         started = time.time()
         try:
             if cmd == "chunk":
                 turns = local_turns(audio, exclusive=exclusive)
-                mapping = resolve_speakers(audio, turns)
+                mapping = resolve_speakers(audio, turns, store)
                 store.save()
-                segments = labeled_segments(turns, mapping)
+                segments = labeled_segments(turns, mapping, store, id_base)
                 log(f"chunk done in {time.time() - started:.1f}s — "
-                    f"{len(segments)} turns, {len({s['id'] for s in segments})} voices")
+                    f"{len(segments)} turns, {len({s['id'] for s in segments})} voices"
+                    f"{' [remote]' if is_remote else ''}")
                 emit({"type": "chunk_result",
                       "window_start": job.get("window_start", 0.0),
-                      "segments": segments})
+                      "segments": segments, **echo})
             else:  # final
                 turns = local_turns(audio, int(job.get("num_speakers", 0)), exclusive=exclusive)
-                mapping = resolve_speakers(audio, turns)
+                mapping = resolve_speakers(audio, turns, store)
                 store.save()
-                segments = labeled_segments(turns, mapping)
+                segments = labeled_segments(turns, mapping, store, id_base)
                 log(f"final done in {time.time() - started:.1f}s — "
-                    f"{len(segments)} turns, {len({s['id'] for s in segments})} speakers")
-                emit({"type": "result", "segments": segments})
+                    f"{len(segments)} turns, {len({s['id'] for s in segments})} speakers"
+                    f"{' [remote]' if is_remote else ''}")
+                emit({"type": "result", "segments": segments, **echo})
         except Exception:  # noqa: BLE001 — job error: report, keep serving
-            emit({"type": "error", "text": f"Diarization failed: {brief_traceback()}"})
+            # The stream is echoed so the app fails only THAT stream's gate —
+            # a remote failure must never abort the office transcript.
+            emit({"type": "error", "text": f"Diarization failed: {brief_traceback()}", **echo})
 
 
 if __name__ == "__main__":

@@ -15,6 +15,18 @@ final class DiarizationService: @unchecked Sendable {
         let name: String     // profile display name (renameable)
     }
 
+    /// Which identity space a job (and its result) belongs to.
+    ///
+    /// The sidecar keeps ONE pyannote pipeline but TWO profile stores, so an
+    /// office voice can never be cosine-matched onto a remote profile or vice
+    /// versa. `office` is the default everywhere and is sent as an ABSENT field:
+    /// a single-stream session's wire bytes are exactly what they were before
+    /// dual-stream existed, which is the regression bar for this phase.
+    enum Stream: String, Sendable {
+        case office
+        case remote
+    }
+
     enum ServiceError: LocalizedError {
         case scriptMissing
         case launchFailed(String)
@@ -32,11 +44,13 @@ final class DiarizationService: @unchecked Sendable {
         }
     }
 
-    /// Live chunk result: (windowStart, turns with chunk-local times).
-    var onChunkResult: ((Double, [Turn]) -> Void)?
-    /// Final batch result over the full recording.
-    var onFinalResult: (([Turn]) -> Void)?
-    var onError: ((String) -> Void)?
+    /// Live chunk result: (windowStart, turns with chunk-local times, stream).
+    var onChunkResult: ((Double, [Turn], Stream) -> Void)?
+    /// Final batch result over the full recording, for one stream.
+    var onFinalResult: (([Turn], Stream) -> Void)?
+    /// Job error, tagged with the stream it belongs to so one stream's failure
+    /// never settles the other's gate. Startup errors carry no stream → office.
+    var onError: ((String, Stream) -> Void)?
 
     private let process = Process()
     private let stdinPipe = Pipe()
@@ -81,15 +95,17 @@ final class DiarizationService: @unchecked Sendable {
 
     /// Diarize one live chunk; result turns are chunk-local, offset by windowStart.
     /// exclusive=false keeps overlapping speech (both speakers shown).
-    func diarizeChunk(audio: URL, windowStart: Double, exclusive: Bool = false) {
+    func diarizeChunk(audio: URL, windowStart: Double, exclusive: Bool = false,
+                      stream: Stream = .office) {
         send(["cmd": "chunk", "audio": audio.path,
-              "window_start": windowStart, "exclusive": exclusive])
+              "window_start": windowStart, "exclusive": exclusive], stream: stream)
     }
 
     /// Batch refinement over the full recording. numSpeakers 0 = auto.
-    func diarizeFinal(audio: URL, numSpeakers: Int = 0, exclusive: Bool = false) {
+    func diarizeFinal(audio: URL, numSpeakers: Int = 0, exclusive: Bool = false,
+                      stream: Stream = .office) {
         send(["cmd": "final", "audio": audio.path,
-              "num_speakers": numSpeakers, "exclusive": exclusive])
+              "num_speakers": numSpeakers, "exclusive": exclusive], stream: stream)
     }
 
     /// Wipe all saved voice profiles — call to start a recording fresh.
@@ -97,11 +113,16 @@ final class DiarizationService: @unchecked Sendable {
         send(["cmd": "reset"])
     }
 
-    private func send(_ job: [String: Any]) {
+    private func send(_ job: [String: Any], stream: Stream = .office) {
         guard process.isRunning else {
-            onError?("Diarization sidecar is not running — restart the recording session.")
+            onError?("Diarization sidecar is not running — restart the recording session.",
+                     stream)
             return
         }
+        // Office is sent as an absent key, not as "office": the sidecar reads a
+        // missing stream as office, so single-stream job lines are byte-identical.
+        var job = job
+        if stream == .remote { job["stream"] = stream.rawValue }
         guard var data = try? JSONSerialization.data(withJSONObject: job) else { return }
         data.append(0x0A)
         writeQueue.async { [stdinPipe] in
@@ -123,6 +144,8 @@ final class DiarizationService: @unchecked Sendable {
         let text: String?
         let segments: [Turn]?
         let window_start: Double?
+        /// Echoed back only for remote jobs; absent ⇒ office (see `Stream`).
+        let stream: String?
     }
 
     private func waitUntilLoaded(timeout: TimeInterval) -> (ready: Bool, errorReason: String?) {
@@ -175,13 +198,14 @@ final class DiarizationService: @unchecked Sendable {
                 guard let data = line.data(using: .utf8),
                       let message = try? JSONDecoder().decode(Message.self, from: data)
                 else { continue }
+                let stream = message.stream.flatMap(Stream.init(rawValue:)) ?? .office
                 switch message.type {
                 case "chunk_result":
-                    self.onChunkResult?(message.window_start ?? 0, message.segments ?? [])
+                    self.onChunkResult?(message.window_start ?? 0, message.segments ?? [], stream)
                 case "result":
-                    self.onFinalResult?(message.segments ?? [])
+                    self.onFinalResult?(message.segments ?? [], stream)
                 case "error":
-                    self.onError?(message.text ?? "unknown diarization error")
+                    self.onError?(message.text ?? "unknown diarization error", stream)
                 default: break
                 }
             }

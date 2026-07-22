@@ -105,7 +105,11 @@ struct TranscriptView: View {
             HStack(spacing: 8) {
                 if let speaker = row.speaker, let id = row.speakerID {
                     Button {
-                        renameText = speaker
+                        // Remote rows are renameable too, but what is stored is the
+                        // PROFILE name ("R1"), not the composed row label — strip
+                        // the "Remote Speaker - " prefix or it would be saved into
+                        // the profile and prefixed again on the next rebuild.
+                        renameText = row.isRemote ? AudioRecorder.remoteBaseName(speaker) : speaker
                         renamingID = id
                     } label: {
                         HStack(spacing: 4) {
@@ -116,14 +120,18 @@ struct TranscriptView: View {
                                 .font(.system(size: 12, weight: .bold))
                                 .opacity(0.6)
                         }
-                        .foregroundColor(Theme.speakerNameText)
+                        // Amber is the Remote capture role everywhere in the app,
+                        // teal/default is Office — the two identity spaces must
+                        // never be mistaken for each other, renameable or not.
+                        .foregroundColor(row.isRemote ? Theme.remoteRole : Theme.speakerNameText)
                     }
                     .buttonStyle(.plain)
-                    .help("Rename this speaker (saved for future meetings)")
+                    .help(row.isRemote
+                          ? "Rename this remote speaker (saved for future meetings)"
+                          : "Rename this speaker (saved for future meetings)")
                 } else if let speaker = row.speaker {
-                    // Remote rows share this branch (no speakerID → not renameable)
-                    // but must never read as an Office speaker: amber is the Remote
-                    // capture role everywhere in the app, teal/default is Office.
+                    // Undiarized remote rows land here (no speakerID → not
+                    // renameable) and keep the same amber colour.
                     Text(speaker.uppercased())
                         .font(.system(size: 14, weight: .heavy))
                         .kerning(0.8)
