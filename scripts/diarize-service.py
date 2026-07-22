@@ -60,6 +60,7 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 MODEL = "pyannote/speaker-diarization-community-1"
 EMBEDDING_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
 PROFILE_DIR = os.environ.get("MT_PROFILE_DIR", os.path.join(BASE, "models", "speaker-profiles"))
+EMBED_SR = 16_000            # WeSpeaker's training rate — see resolve_speakers
 SIM_THRESHOLD = 0.5          # cosine similarity to accept a profile match
 MIN_EMBED_SEC = 1.5          # need this much speech to embed a voice
 MAX_CENTROID_COUNT = 50      # cap running-mean weight so voices can drift
@@ -200,13 +201,29 @@ class ProfileStore:
                 used_profiles.add(pid)
                 log(f"matched {label} -> profile {pid} (sim={sim:.2f})")
 
+        # Best score each voice reached against ANY existing profile, kept so a
+        # failed match can say how close it came. Without this a "new profile"
+        # line is unreadable: 0.49 (the threshold is a hair too high) and 0.12
+        # (genuinely a different voice) look identical, and they call for
+        # opposite fixes. A real case sat behind this — the same speaker matched
+        # at 0.89 on a live chunk and then minted a second profile on the final
+        # pass, and the log could not say why.
+        best_sim = {}
+        for sim, label, _pid in pairs:
+            if sim > best_sim.get(label, -2.0):
+                best_sim[label] = sim
+
         # Any voice with no confident, still-free match becomes a new profile.
         for label, emb in embeddings.items():
             if label not in mapping:
                 new_id = self._create(emb)
                 mapping[label] = new_id
                 used_profiles.add(new_id)
-                log(f"new profile {new_id} for {label}")
+                if label in best_sim:
+                    log(f"new profile {new_id} for {label} "
+                        f"(best sim={best_sim[label]:.2f} < {SIM_THRESHOLD})")
+                else:
+                    log(f"new profile {new_id} for {label} (no existing profiles)")
 
         # Now fold each voice into its profile's running-mean centroid.
         for label, pid in mapping.items():
@@ -280,6 +297,22 @@ def main() -> None:
         waveform, sr = torchaudio.load(audio_path)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
+
+        # WeSpeaker is a 16 kHz model. Feeding it audio at another rate does not
+        # error — it silently embeds speech that is pitch- and tempo-shifted, and
+        # the result is not the same voice: measured on a real 44.1 kHz recording,
+        # the SAME 10 s of speech embedded at 44.1 kHz vs 16 kHz scored cosine
+        # 0.036 against itself.
+        #
+        # This was live. Live chunks arrive as 16 kHz temp WAVs and matched at
+        # 0.81–0.98, while a stop-time pass over the recording file (44.1 kHz,
+        # the capture device's native rate) scored 0.11 against the very profile
+        # it had just built and minted a duplicate — one person, two profiles.
+        # pyannote's own pipeline resamples internally, so the TURNS were always
+        # right; only the identity attached to them was wrong.
+        if sr != EMBED_SR:
+            waveform = torchaudio.functional.resample(waveform, sr, EMBED_SR)
+            sr = EMBED_SR
 
         by_label = {}
         for start, end, label in turns:
