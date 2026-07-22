@@ -17,99 +17,6 @@ final class AudioRecorder: ObservableObject {
     @Published var lastRecordingURL: URL?
     @Published var errorMessage: String?
 
-    /// Raw ASR unit: Nemotron text appears instantly (unconfirmed), then is
-    /// replaced in place by the accurate chunked text (confirmed). Diarization
-    /// then splits each confirmed chunk into per-speaker rows for display.
-    struct TranscriptSegment: Identifiable, Equatable {
-        let id = UUID()
-        var text: String
-        let confirmed: Bool               // true = chunked ASR (accurate), false = realtime
-        var window: ClosedRange<Double>? = nil  // recording-time span (confirmed only)
-        // Set only by overlap repair: this segment's text belongs entirely to one
-        // separated speaker, so display rows use it directly (skip re-attribution).
-        // Two fields (not a tuple) to keep Equatable synthesis working.
-        var pinnedSpeakerID: Int? = nil
-        var pinnedSpeakerName: String? = nil
-        // Debug/inspection: a raw MossFormer2 separated-track ASR result, shown as
-        // its own "MossFormer2 Index N" row (name in pinnedSpeakerName). No
-        // attribution, no merge — never replaces speaker text.
-        var isSeparationDebug: Bool = false
-        // Word timestamps from the optional forced aligner (nil when alignment
-        // is off or failed). Times are CHUNK-RELATIVE seconds exactly as the
-        // sidecar sent them; `alignedChunkDuration` is that chunk buffer's
-        // length, kept so the conversion to recording time can be sanity-checked
-        // against `window`. Consumed by `WordAttribution` in `derivedRows`.
-        var words: [ChunkedASRService.AlignedWord]? = nil
-        var alignedChunkDuration: Double? = nil
-    }
-
-    /// One transcribed Remote (conferencing) chunk. Deliberately NOT a
-    /// `TranscriptSegment`: remote text never goes through the office display
-    /// pipeline (`derivedRows` → speaker ranges → position gap-fill → word
-    /// attribution). It IS speaker-split (phase 4), but against `remoteLiveTurns`
-    /// in the remote identity space, and it must never reach the ATND/position
-    /// path — so it is a separate collection that only meets office rows at the
-    /// final sort in `rebuildDisplayRows`.
-    ///
-    /// Text only, by design: the transcript comes from the sidecar's `-2`
-    /// file-transcribe frame, which calls `transcribe_path()` directly and never
-    /// runs the forced aligner — so there are no `words`/`dur` and remote
-    /// attribution stays sentence-level. Acceptable: word-exact timing matters
-    /// where ATND and pyannote boundaries compete, which is Office-only.
-    struct RemoteSegment: Identifiable, Equatable {
-        let id = UUID()
-        var text: String
-        var window: ClosedRange<Double>   // recording-time span (shared clock)
-    }
-
-    /// The live Remote caption — what the Remote realtime engine has produced
-    /// since the last remote chunk boundary, shown as its own provisional card
-    /// exactly like the office `partialTranscript`.
-    ///
-    /// A tiny type rather than a bare String because the *rule* is the whole
-    /// point and it differs from the office one: a Remote FINAL is KEPT on
-    /// screen, not cleared. Office can clear on a final because it immediately
-    /// turns that final into an unconfirmed segment; Remote has no unconfirmed
-    /// segment (see `RemoteSegment` — remote text never enters the office
-    /// pipeline), so clearing on the final would blank the caption for the
-    /// several seconds the confirmed remote chunk takes to come back. The
-    /// caption instead survives until `commit()`, which every terminal outcome
-    /// of that chunk calls — transcribed, empty, skipped as silence, or failed.
-    struct RemoteCaption: Equatable {
-        /// What the view draws; empty means no caption card at all.
-        private(set) var text = ""
-
-        /// A realtime result arrived (partial or final — both are just "the best
-        /// text so far" for audio no confirmed row covers yet).
-        mutating func update(to incoming: String) {
-            text = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        /// This caption's audio is now represented (or deliberately not) by a
-        /// confirmed remote row — drop it so nothing stale lingers underneath.
-        mutating func commit() {
-            text = ""
-        }
-    }
-
-    /// One rendered row: a single speaker's turn with its time span and text.
-    struct SpeakerUtterance: Identifiable, Equatable {
-        let id: String                    // stable per (segment, turn index)
-        var speaker: String?              // nil = not diarized yet
-        var speakerID: Int?               // profile id (for rename)
-        var start: Double?                // recording-time seconds (confirmed only)
-        var end: Double?
-        var text: String
-        let confirmed: Bool
-        var overlapped: Bool = false      // spoke over another speaker in this window
-        /// Row came from the Remote stream, not the room. A display flag: it keeps
-        /// the two label spaces visually distinct (amber vs teal) and tells the
-        /// rename dialog to edit the remote PROFILE name rather than the composed
-        /// "Remote Speaker - …" label. The id range, not this flag, is what routes
-        /// a rename to the right store.
-        var isRemote: Bool = false
-    }
-
     @Published var segments: [TranscriptSegment] = []
     @Published var displayRows: [SpeakerUtterance] = []
     @Published var partialTranscript = ""
@@ -138,15 +45,6 @@ final class AudioRecorder: ObservableObject {
     @Published var overlapRepairProgress: String?
     @Published var overlapRepairError: String?
 
-    /// One line in the processing overlay — a leg of the post-stop work.
-    /// Reuses `ModelLoader.ItemState` for the icons; the loader itself doesn't
-    /// fit here (its `loadAll` runs one item at a time, these run concurrently).
-    struct StopStep: Identifiable, Equatable {
-        let id: String            // "chunk" | "diarize" | "repair"
-        let name: String
-        var state: ModelLoader.ItemState
-    }
-
     @Published private(set) var stopSteps: [StopStep] = []
 
     // Gating for the "wait for last chunk AND diarization final" sequencing.
@@ -163,7 +61,7 @@ final class AudioRecorder: ObservableObject {
     private var chunkWatchdog: Task<Void, Never>?
 
     // Chunk time-window bookkeeping (for mapping speakers onto segments)
-    private var recordingElapsed: Double = 0
+    var recordingElapsed: Double = 0
     private var lastChunkBoundary: Double = 0
     private var pendingChunkWindows: [ClosedRange<Double>] = []
     // Elapsed time of the previous realtime (Nemotron) final. Each final covers
@@ -176,18 +74,18 @@ final class AudioRecorder: ObservableObject {
     private var chunkAudio: [Float] = []                       // 16k samples pending diarization
     private var chunkFileByWindow: [Double: URL] = [:]
     private var sessionSpeakerIDs = Set<Int>()
-    private var liveTurns: [DiarizationService.Turn] = []      // absolute-time turns collected so far
+    var liveTurns: [DiarizationService.Turn] = []      // absolute-time turns collected so far
     // Position-based diarization (ATND beam) — off unless atnd.position.enabled.
     // Recorder-owned, one per session; nil means the feature is off, so
     // positionGapFill returns [] and the display path is pure pyannote.
-    @Published private(set) var positionDiarizer: PositionDiarizer?
+    @Published var positionDiarizer: PositionDiarizer?
     /// Which layer the DISPLAY draws labels from — read once per session in
     /// `configurePositionDiarization()`, like every other setting, so it can't
     /// flip mid-recording and leave half the transcript on each policy.
-    private var positionSource: PositionSource = .both
+    var positionSource: PositionSource = .both
     /// Last SEPARATION line written to the position log, so the per-room tau
     /// calibration diagnostic is emitted on change instead of on every rebuild.
-    private var lastLoggedSeparation: String?
+    var lastLoggedSeparation: String?
     private var diarElapsed: Double = 0                        // seconds since the last diar chunk
     private var lastDiarBoundary: Double = 0                   // recording-time where this diar chunk began
 
@@ -209,7 +107,7 @@ final class AudioRecorder: ObservableObject {
     /// 16 kHz remote samples accumulated since the last chunk boundary.
     private var remoteChunkAudio: [Float] = []
     /// Transcribed remote chunks, merged into `displayRows` by start time.
-    private var remoteSegments: [RemoteSegment] = []
+    var remoteSegments: [RemoteSegment] = []
     /// Remote file-transcribe requests currently in flight.
     private var remotePendingChunks = 0
     /// Last remote failure, shown on the stop step. Never fatal — a remote
@@ -236,7 +134,7 @@ final class AudioRecorder: ObservableObject {
     private var remoteRecordingURL: URL?
     /// Remote-space turns collected so far — the remote twin of `liveTurns`.
     /// Ids are already offset by `remoteIDBase` (the sidecar applies it).
-    private var remoteLiveTurns: [DiarizationService.Turn] = []
+    var remoteLiveTurns: [DiarizationService.Turn] = []
     /// 16 kHz remote samples pending live diarization. Separate from
     /// `remoteChunkAudio` because the diarization cadence is its own setting.
     private var remoteDiarAudio: [Float] = []
@@ -1260,114 +1158,6 @@ final class AudioRecorder: ObservableObject {
         checkStopProcessingDone()
     }
 
-    // MARK: - Position diarization (ATND beam) gap-fill
-    //
-    // Policy (owner, 2026-07-20): pyannote is AUTHORITATIVE. Wherever pyannote has
-    // a turn, its own label wins. ATND position only fills the DISPLAY-time gaps
-    // pyannote has not (yet) covered — freshly-committed text, the first ~1-2s
-    // pyannote never turns, and the live partial. A pyannote chunk landing later
-    // OVERRIDES the fill automatically (it shrinks the gap on the next rebuild).
-    // Silence gaps where ATND also heard nothing STAY unknown — never force-filled.
-
-    /// Create + start the position diarizer for this session, but ONLY when the
-    /// feature is explicitly enabled AND the beam service is actually listening.
-    /// Otherwise leave it nil — `positionGapFill` then returns [] and the display
-    /// path is pure pyannote, byte-identical to before this feature existed.
-    private func configurePositionDiarization() {
-        positionDiarizer = nil
-        lastLoggedSeparation = nil
-        let d = UserDefaults.standard
-        // Read once, here — the display policy is fixed for the whole session.
-        // Reset to `both` first so a session that bails out below (feature off /
-        // ATND down) is on the default policy, matching its nil diarizer.
-        positionSource = .both
-        guard d.bool(forKey: "atnd.position.enabled"),
-              ATNDBeamService.shared.state == .listening else { return }
-
-        let tauDeg = d.object(forKey: "atnd.position.tauDeg") as? Double ?? 15
-        let smoothingMs = d.object(forKey: "atnd.position.smoothingMs") as? Double ?? 400
-        let mode: PositionDiarizer.Mode =
-            (d.string(forKey: "atnd.position.mode") == "enrollment") ? .enrollment : .firstCome
-        positionSource = PositionSource.current(d)
-
-        let diarizer = PositionDiarizer()
-        diarizer.start(tauDeg: tauDeg,
-                       smoothingSec: smoothingMs / 1000,
-                       mode: mode,
-                       now: { [weak self] in self?.recordingElapsed ?? 0 })
-        positionDiarizer = diarizer
-    }
-
-    /// Position-labeled ranges covering the sub-ranges of `window` that pyannote
-    /// has NOT (yet) covered. Empty when the feature is off or ATND was silent.
-    private func positionGapFill(window: ClosedRange<Double>,
-                                 covered: [(start: Double, end: Double, id: Int, name: String)])
-        -> [(start: Double, end: Double, id: Int, name: String)] {
-        guard let pos = positionDiarizer else { return [] }
-        let minGapSec = 0.75   // below this is pyannote boundary slop → filling flickers
-        // `covered` is already sorted by start (from speakerRanges). Walk it and
-        // emit the complement gaps of `window`.
-        var fills: [(start: Double, end: Double, id: Int, name: String)] = []
-        var cursor = window.lowerBound
-        // Build the ordered list of gap ranges (before/between/after covered ranges).
-        var gaps: [(Double, Double)] = []
-        for r in covered {
-            if r.start > cursor { gaps.append((cursor, r.start)) }
-            cursor = max(cursor, r.end)
-        }
-        if window.upperBound > cursor { gaps.append((cursor, window.upperBound)) }
-
-        for (a, b) in gaps {
-            let dur = b - a
-            if dur < minGapSec {
-                positionLog("SKIP gap<0.75s [\(fmt3(a))..\(fmt3(b))]")
-                continue
-            }
-            // One fill PER SPAN — a beam change mid-gap splits into multiple rows.
-            // The boundary timeline TILES the gap from its first boundary onward:
-            // every stretch of elapsed time belongs to whoever the beam had last
-            // settled on, so a fill can no longer leave a hole in the middle of a
-            // gap. That is the whole point of the switch away from reconstructed
-            // turns — the old density gate (minDurationSec/minSamples) DISCARDED a
-            // short run, and discarding a run discarded a stretch of TIME, whose
-            // words then had no range to land in and rendered as SPEAKER UNKNOWN.
-            // Debounce still decides WHETHER a boundary exists, upstream in
-            // `ClusterChangeDetector`; it can no longer delete elapsed time.
-            //
-            // `labeledSpans` already clips to the queried range, so no snapping,
-            // hole-closing or dominant-label fallback is needed here any more.
-            let spans = pos.labeledSpans(in: a...b)
-            if spans.isEmpty {
-                // The only way a gap yields nothing now: it lies entirely BEFORE
-                // the first beam boundary of the session (pre-speech silence, or
-                // ATND not streaming yet). Leaving it UNKNOWN is correct — there is
-                // no talker to attribute it to.
-                positionLog("SKIP gap=[\(fmt3(a))..\(fmt3(b))] samples=\(pos.sampleCount(in: a...b)) no-spans")
-                continue
-            }
-            for s in spans {
-                positionLog("FILL gap=[\(fmt3(a))..\(fmt3(b))] -> \(s.id):\(s.name) [\(fmt3(s.start))..\(fmt3(s.end))]")
-                fills.append((s.start, s.end, s.id, s.name))
-            }
-        }
-        // Calibration instrument, not noise: the owner tunes `atnd.position.tauDeg`
-        // per room ("the tables differ in every room"), and this is the only line
-        // that shows how far apart the seats actually landed — e.g. a phantom
-        // cluster 16.2° from Speaker 1 against a 15° threshold while the real seats
-        // sit 33–41° apart. Logged only when it CHANGES: `positionGapFill` runs once
-        // per segment per rebuild, so logging it unconditionally repeated the same
-        // line after every FILL.
-        if !fills.isEmpty {
-            let tau = UserDefaults.standard.object(forKey: "atnd.position.tauDeg") as? Double ?? 15
-            let line = "SEPARATION \(pos.separationDescription()) (threshold \(Int(tau))°)"
-            if line != lastLoggedSeparation {
-                lastLoggedSeparation = line
-                positionLog(line)
-            }
-        }
-        return fills
-    }
-
     /// Live: write the current chunk's audio to a temp WAV and diarize it.
     private func diarizeLiveChunk(windowStart: Double) {
         let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
@@ -1486,292 +1276,6 @@ final class AudioRecorder: ObservableObject {
         let turns = Self.officeTurnsOnly(turns, "applyFinalSpeakers")
         speakerCount = Set(turns.map(\.id)).count
         liveTurns = turns
-        rebuildDisplayRows()
-    }
-
-    // MARK: - Display rows (speaker · time · text)
-
-    /// Rebuild the rendered transcript from the raw ASR segments and the
-    /// diarization turns collected so far. Each confirmed chunk is split into
-    /// one row per speaker turn; undiarized/realtime text stays a single row.
-    private func rebuildDisplayRows() {
-        var rows: [SpeakerUtterance] = []
-        let regions = overlapRegions()   // genuine simultaneous-speech windows
-        for seg in segments {
-            rows.append(contentsOf: derivedRows(for: seg, regions: regions))
-        }
-        // Office and Remote are two independent label spaces sharing one clock;
-        // they only ever meet here, at the final sort. With no remote segments
-        // the merge returns `rows` untouched — the single-stream path is exactly
-        // what it was.
-        displayRows = Self.mergeRowsByStartTime(
-            office: rows,
-            remote: Self.remoteRows(remoteSegments, turns: remoteLiveTurns))
-    }
-
-    /// The display rows one raw segment expands into — the single source of truth
-    /// shared by `rebuildDisplayRows` and `applyRepair` (so repair sees exactly the
-    /// rows the transcript shows). `regions` are the genuine-overlap windows.
-    private func derivedRows(for seg: TranscriptSegment,
-                             regions: [(start: Double, end: Double)]) -> [SpeakerUtterance] {
-        // Debug: raw MossFormer2 separated-track ASR, shown verbatim as its own
-        // "MossFormer2 Index N" row (no rename, no attribution, never replaces).
-        if seg.isSeparationDebug {
-            let w = seg.window
-            return [SpeakerUtterance(id: seg.id.uuidString,
-                                     speaker: seg.pinnedSpeakerName, speakerID: nil,
-                                     start: w?.lowerBound, end: w?.upperBound,
-                                     text: seg.text, confirmed: true, overlapped: true)]
-        }
-        // Overlap-repair (pinned) segments belong entirely to one separated speaker —
-        // a single row. Tag it orange only if it genuinely sits over an overlap
-        // region, so PRESERVED bystander rows aren't all flagged.
-        if let pid = seg.pinnedSpeakerID {
-            let w = seg.window
-            let overlapped = regions.contains {
-                min($0.end, seg.window?.upperBound ?? 0) - max($0.start, seg.window?.lowerBound ?? 0) > 0
-            }
-            return [SpeakerUtterance(id: seg.id.uuidString,
-                                     speaker: seg.pinnedSpeakerName, speakerID: pid,
-                                     start: w?.lowerBound, end: w?.upperBound,
-                                     text: seg.text, confirmed: true, overlapped: overlapped)]
-        }
-        guard let window = seg.window else {
-            return [SpeakerUtterance(id: seg.id.uuidString, speaker: nil,
-                                     speakerID: nil, start: nil, end: nil,
-                                     text: seg.text, confirmed: seg.confirmed)]
-        }
-        let ranges = speakerRanges(in: window)
-        // The one switch on the display source (see `PositionSource.plan`):
-        //   both       → pyannote shows, ATND fills pyannote's own complement
-        //   atnd       → nothing pyannote shows, empty coverage ⇒ ATND tiles it all
-        //   pyannote   → pyannote shows, no gap-fill runs at all
-        //   atndTiming → ATND tiles it all, then each span takes the identity of
-        //                the pyannote turn it overlaps most (`relabelFromPyannote`)
-        // `ranges` itself is untouched in every mode, and the position ids the
-        // fills carry never leave `filled` — liveTurns/overlapRegions/
-        // speakerCount/SpeakerProfileStore stay pure pyannote throughout.
-        let plan = positionSource.plan(pyannoteRanges: ranges)
-        // Off/silent ATND → fills is [] regardless of the source.
-        let fills = plan.gapFillCoverage.map { positionGapFill(window: window, covered: $0) } ?? []
-        var filled = (plan.displayRanges + fills).sorted { $0.start < $1.start }
-        // Timing from ATND, identity from pyannote: rename in place, boundaries
-        // untouched. Only ids move here, and only pyannote → display, never back.
-        if plan.relabelFromPyannote {
-            filled = PositionRelabel.fromPyannote(filled, pyannote: ranges)
-        }
-
-        // Unconfirmed (realtime) segments stay a single provisional row — the text
-        // isn't final, so it isn't sentence-split — but it must still carry the
-        // speaker the live view already showed. Label it with whoever dominates
-        // the window (pyannote if it has a turn there, else the ATND position
-        // fill), so it doesn't drop back to UNKNOWN the moment it commits.
-        if !seg.confirmed {
-            // A beam change split this window into multiple fills → split the live
-            // (unconfirmed) text into per-speaker rows too, so the switch shows in
-            // real time. A single fill (or none) stays one provisional row.
-            if filled.count > 1 {
-                return Self.assignSentences(seg.text, window: window, ranges: filled,
-                                       segID: seg.id.uuidString, regions: regions,
-                                       confirmed: false)
-            }
-            func overlap(_ r: (start: Double, end: Double, id: Int, name: String)) -> Double {
-                max(0, min(r.end, window.upperBound) - max(r.start, window.lowerBound))
-            }
-            let best = filled.max { overlap($0) < overlap($1) }
-            return [SpeakerUtterance(id: seg.id.uuidString, speaker: best?.name,
-                                     speakerID: best?.id, start: window.lowerBound,
-                                     end: window.upperBound, text: seg.text,
-                                     confirmed: false)]
-        }
-
-        if filled.isEmpty {
-            return [SpeakerUtterance(id: seg.id.uuidString, speaker: nil,
-                                     speakerID: nil, start: window.lowerBound,
-                                     end: window.upperBound, text: seg.text,
-                                     confirmed: true)]
-        }
-        // Word-exact path: when the aligner ran, each word goes to the turn that
-        // covers it in time instead of to the turn its character offset guesses.
-        // Any failed sanity gate returns nil → the estimate below, unchanged.
-        if let words = seg.words,
-           let pieces = WordAttribution.attribute(text: seg.text, words: words,
-                                                  chunkDuration: seg.alignedChunkDuration,
-                                                  window: window, ranges: filled,
-                                                  log: { self.positionLog($0) }) {
-            return pieces.enumerated().map { i, p in
-                let overlapped = regions.contains { max($0.start, p.start) < min($0.end, p.end) }
-                return SpeakerUtterance(id: "\(seg.id.uuidString)-\(i)", speaker: p.name,
-                                        speakerID: p.id, start: p.start, end: p.end,
-                                        text: p.text, confirmed: true, overlapped: overlapped)
-            }
-        }
-        return Self.assignSentences(seg.text, window: window, ranges: filled,
-                               segID: seg.id.uuidString, regions: regions)
-    }
-
-    /// Assign whole sentences to speakers. Each sentence is placed in time by its
-    /// character position in the chunk, then handed to the speaker turn it most
-    /// overlaps — so text is never cut mid-sentence onto the wrong speaker.
-    /// Consecutive sentences by the same speaker merge into one row.
-    ///
-    /// Pure and `static` so the Remote stream can reuse it verbatim with its own
-    /// `ranges` (built from `remoteLiveTurns`) — the split logic is identical,
-    /// only the identity space differs.
-    nonisolated static func assignSentences(_ text: String,
-                                            window: ClosedRange<Double>,
-                                            ranges: [(start: Double, end: Double, id: Int, name: String)],
-                                            segID: String,
-                                            regions: [(start: Double, end: Double)],
-                                            confirmed: Bool = true) -> [SpeakerUtterance] {
-        let sentences = splitSentences(text)
-        guard !sentences.isEmpty else { return [] }
-        let totalChars = max(1, sentences.reduce(0) { $0 + $1.count })
-        let span = max(0, window.upperBound - window.lowerBound)
-
-        struct Piece { var id: Int; var name: String; var start: Double; var end: Double; var text: String }
-        var pieces: [Piece] = []
-        var charsSoFar = 0
-        for sentence in sentences {
-            let sStart = window.lowerBound + span * Double(charsSoFar) / Double(totalChars)
-            charsSoFar += sentence.count
-            let sEnd = window.lowerBound + span * Double(charsSoFar) / Double(totalChars)
-
-            var chosen = ranges[0]
-            var bestOverlap = -1.0
-            for r in ranges {
-                let ov = max(0, min(r.end, sEnd) - max(r.start, sStart))
-                if ov > bestOverlap { bestOverlap = ov; chosen = r }
-            }
-            if bestOverlap <= 0 {
-                let mid = (sStart + sEnd) / 2
-                chosen = ranges.min { abs(($0.start + $0.end) / 2 - mid) < abs(($1.start + $1.end) / 2 - mid) } ?? ranges[0]
-            }
-            pieces.append(Piece(id: chosen.id, name: chosen.name, start: sStart, end: sEnd, text: sentence))
-        }
-
-        var merged: [Piece] = []
-        for p in pieces {
-            if var last = merged.last, last.id == p.id {
-                last.end = p.end
-                last.text += " " + p.text
-                merged[merged.count - 1] = last
-            } else {
-                merged.append(p)
-            }
-        }
-
-        return merged.enumerated().map { i, p in
-            // Flag only if this row's time genuinely sits over a simultaneous-
-            // speech region (two different speakers active at once).
-            let overlapped = regions.contains { max($0.start, p.start) < min($0.end, p.end) }
-            return SpeakerUtterance(id: "\(segID)-\(i)", speaker: p.name, speakerID: p.id,
-                                    start: p.start, end: p.end, text: p.text,
-                                    confirmed: confirmed, overlapped: overlapped)
-        }
-    }
-
-    /// Windows where two DIFFERENT speakers are active at the same time
-    /// (genuine overlap), each at least 0.4s long. Empty in exclusive mode.
-    private func overlapRegions() -> [(start: Double, end: Double)] {
-        let turns = Self.officeTurnsOnly(liveTurns, "overlapRegions")
-        guard turns.count > 1 else { return [] }
-        var regions: [(start: Double, end: Double)] = []
-        for i in 0..<turns.count {
-            for j in (i + 1)..<turns.count where turns[i].id != turns[j].id {
-                let s = max(turns[i].start, turns[j].start)
-                let e = min(turns[i].end, turns[j].end)
-                if e - s >= 0.4 { regions.append((s, e)) }
-            }
-        }
-        return regions
-    }
-
-    /// Split text into sentences on . ? ! and line breaks, keeping punctuation.
-    /// Fragments with no letters or digits (e.g. ". .") are dropped.
-    nonisolated static func splitSentences(_ text: String) -> [String] {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-        func hasContent(_ s: String) -> Bool { s.contains { $0.isLetter || $0.isNumber } }
-
-        var result: [String] = []
-        var current = ""
-        for ch in trimmed {
-            current.append(ch)
-            if ch == "." || ch == "?" || ch == "!" || ch == "\n" {
-                let s = current.trimmingCharacters(in: .whitespacesAndNewlines)
-                if hasContent(s) { result.append(s) }
-                current = ""
-            }
-        }
-        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
-        if hasContent(tail) { result.append(tail) }
-        if result.isEmpty { return hasContent(trimmed) ? [trimmed] : [] }
-        return result
-    }
-
-    /// Speaker turns overlapping a window, clipped to it and merged when the
-    /// same speaker continues (small gaps bridged), sorted by start time.
-    /// The office view: always `liveTurns`, never the remote ones.
-    private func speakerRanges(in window: ClosedRange<Double>)
-        -> [(start: Double, end: Double, id: Int, name: String)] {
-        Self.speakerRanges(in: window, turns: liveTurns)
-    }
-
-    /// The same clipping/merging, parameterised by the turn set — so the Remote
-    /// stream can reuse it against `remoteLiveTurns` without any chance of the
-    /// two identity spaces meeting (each call sees exactly one of them).
-    nonisolated static func speakerRanges(in window: ClosedRange<Double>,
-                                          turns: [DiarizationService.Turn])
-        -> [(start: Double, end: Double, id: Int, name: String)] {
-        let clipped = turns.compactMap { t -> (start: Double, end: Double, id: Int, name: String)? in
-            let s = max(t.start, window.lowerBound)
-            let e = min(t.end, window.upperBound)
-            return e > s ? (s, e, t.id, t.name) : nil
-        }.sorted { $0.start < $1.start }
-
-        var merged: [(start: Double, end: Double, id: Int, name: String)] = []
-        for c in clipped {
-            if var last = merged.last, last.id == c.id, c.start - last.end < 1.0 {
-                last.end = max(last.end, c.end)
-                merged[merged.count - 1] = last
-            } else {
-                merged.append(c)
-            }
-        }
-        return merged
-    }
-
-    /// Rename a speaker profile and refresh all its rows in the transcript.
-    ///
-    /// THREE-WAY on the id range alone — the whole point of the disjoint bases
-    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position). A position id must
-    /// never reach the Python-owned profile stores at all; a remote id must
-    /// never reach profiles.json, and an office id never profiles-remote.json.
-    func renameSpeaker(id: Int, to name: String) {
-        if id >= PositionDiarizer.positionIDBase {
-            positionDiarizer?.rename(clusterID: id - PositionDiarizer.positionIDBase, to: name)
-        } else {
-            // `SpeakerProfileStore` picks the file and strips `remoteIDBase`
-            // itself, so the file choice cannot drift from the id range.
-            SpeakerProfileStore.rename(id: id, to: name)
-        }
-        // Only ONE of the two turn collections can contain this id (their ranges
-        // are disjoint), so mapping both is safe and keeps the branch out.
-        liveTurns = liveTurns.map {
-            $0.id == id
-                ? DiarizationService.Turn(start: $0.start, end: $0.end, id: $0.id, name: name)
-                : $0
-        }
-        remoteLiveTurns = remoteLiveTurns.map {
-            $0.id == id
-                ? DiarizationService.Turn(start: $0.start, end: $0.end, id: $0.id, name: name)
-                : $0
-        }
-        // Repaired/preserved pinned rows carry their own name copy — keep it in sync.
-        for i in segments.indices where segments[i].pinnedSpeakerID == id {
-            segments[i].pinnedSpeakerName = name
-        }
         rebuildDisplayRows()
     }
 
@@ -2298,7 +1802,7 @@ final class AudioRecorder: ObservableObject {
     }
 
     private func fmt(_ s: Double) -> String { String(format: "%.1f", s) }
-    private func fmt3(_ x: Double) -> String { String(format: "%.3f", x) }
+    func fmt3(_ x: Double) -> String { String(format: "%.3f", x) }
 
     private func cleanup(_ dir: URL) {
         try? FileManager.default.removeItem(at: dir)
@@ -2311,23 +1815,6 @@ final class AudioRecorder: ObservableObject {
         let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("overlap-repair-decisions.log")
-        if !FileManager.default.fileExists(atPath: file.path) {
-            FileManager.default.createFile(atPath: file.path, contents: nil)
-        }
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(stamp)] \(message)\n"
-        guard let handle = try? FileHandle(forWritingTo: file) else { return }
-        handle.seekToEndOfFile()
-        if let data = line.data(using: .utf8) { handle.write(data) }
-        try? handle.close()
-    }
-
-    /// Append a line to logs/position-diarization.log (position gap-fill decisions).
-    /// Mirrors overlapLog: one FILL/SKIP line per display-time gap.
-    private func positionLog(_ message: String) {
-        let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("position-diarization.log")
         if !FileManager.default.fileExists(atPath: file.path) {
             FileManager.default.createFile(atPath: file.path, contents: nil)
         }
@@ -2378,94 +1865,6 @@ final class AudioRecorder: ObservableObject {
 
     // MARK: Remote stream — transcription, gating and rows
 
-    /// Prefix every Remote row's speaker label carries. Office and Remote are
-    /// two SEPARATE identity spaces on purpose (owner requirement): office
-    /// "Speaker 1" and remote "R1" are different people, and the label must make
-    /// that impossible to misread.
-    nonisolated static let remoteNamePrefix = "Remote Speaker - "
-
-    /// Label a Remote row shows before (or without) remote diarization: the
-    /// stream is known to be "not the room" and nothing more.
-    nonisolated static let remoteSpeakerLabel = remoteNamePrefix + "Speaker Unknown"
-
-    /// Compose the displayed Remote label from a remote profile name ("R1" →
-    /// "Remote Speaker - R1").
-    nonisolated static func remoteDisplayName(_ name: String) -> String {
-        remoteNamePrefix + name
-    }
-
-    /// Inverse of `remoteDisplayName`, for the rename dialog: the user edits the
-    /// PROFILE name ("R1"), not the composed row label, so the prefix is not
-    /// saved into profiles-remote.json and then re-prefixed on the next rebuild.
-    nonisolated static func remoteBaseName(_ display: String) -> String {
-        display.hasPrefix(remoteNamePrefix)
-            ? String(display.dropFirst(remoteNamePrefix.count))
-            : display
-    }
-
-    /// Offset the sidecar adds to remote-local speaker ids, mirroring the proven
-    /// `PositionDiarizer.positionIDBase = 100_000` split: a downstream consumer
-    /// tells the three label spaces apart with one integer comparison
-    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position). It is what keeps a
-    /// remote id out of profiles.json and an office id out of profiles-remote.json
-    /// — see `renameSpeaker` and `SpeakerProfileStore.Space`.
-    nonisolated static let remoteIDBase = 10_000
-
-    // MARK: Id-space guards (phase 5)
-    //
-    // The disjoint ranges above hold BY CONSTRUCTION today: office turns live in
-    // `liveTurns`, remote ones in `remoteLiveTurns`, position ids never leave the
-    // `filled` array in `derivedRows`. Correct, but silent if a future edit hands
-    // the wrong collection to an Office-only consumer — the damage (a remote voice
-    // matched onto an office profile, desyncing the Python-owned store) would not
-    // surface until profiles.json was already corrupt.
-    //
-    // So the ranges are also checked at the boundaries that matter. The predicates
-    // are pure and testable; the wrappers `assert` and are compiled out of release
-    // builds, both the check and its message — a shipped app never pays for them,
-    // and never crashes on them either.
-
-    /// Ids in `turns` that are NOT office (pyannote) ids, i.e. ≥ `remoteIDBase`.
-    /// Empty is the invariant every Office-only consumer relies on.
-    nonisolated static func nonOfficeIDs(in turns: [DiarizationService.Turn]) -> [Int] {
-        turns.map(\.id).filter { $0 >= remoteIDBase }
-    }
-
-    /// Ids in `turns` that are NOT remote ids — office ids below `remoteIDBase`
-    /// or position ids at/above `PositionDiarizer.positionIDBase`. The mirror of
-    /// `nonOfficeIDs`: profiles-remote.json must never see an office id either.
-    nonisolated static func nonRemoteIDs(in turns: [DiarizationService.Turn]) -> [Int] {
-        turns.map(\.id).filter {
-            $0 < remoteIDBase || $0 >= PositionDiarizer.positionIDBase
-        }
-    }
-
-    /// Pass-through that asserts (debug only) every turn is office-space.
-    /// `site` names the consumer so a tripped assertion points straight at the
-    /// wrong-collection call rather than at this helper.
-    @discardableResult
-    nonisolated static func officeTurnsOnly(_ turns: [DiarizationService.Turn],
-                                            _ site: @autoclosure () -> String)
-        -> [DiarizationService.Turn] {
-        assert(nonOfficeIDs(in: turns).isEmpty,
-               "\(site()) was given non-office speaker ids \(nonOfficeIDs(in: turns)) — "
-               + "Office-only state must never see remote (≥ \(remoteIDBase)) or position "
-               + "(≥ \(PositionDiarizer.positionIDBase)) ids.")
-        return turns
-    }
-
-    /// The remote twin of `officeTurnsOnly`.
-    @discardableResult
-    nonisolated static func remoteTurnsOnly(_ turns: [DiarizationService.Turn],
-                                            _ site: @autoclosure () -> String)
-        -> [DiarizationService.Turn] {
-        assert(nonRemoteIDs(in: turns).isEmpty,
-               "\(site()) was given non-remote speaker ids \(nonRemoteIDs(in: turns)) — "
-               + "remote state only holds ids in [\(remoteIDBase), "
-               + "\(PositionDiarizer.positionIDBase)).")
-        return turns
-    }
-
     /// RMS below which a remote chunk is treated as silence and never sent to the
     /// sidecar. An idle conferencing channel is otherwise a standing ~14 % GPU
     /// cost every chunk interval for a guaranteed-empty transcript (measured duty
@@ -2492,87 +1891,6 @@ final class AudioRecorder: ObservableObject {
             return String(format: "near-silent (rms %.5f < %.5f)", level, threshold)
         }
         return nil
-    }
-
-    /// The display rows the remote segments render as, split by the REMOTE
-    /// diarization turns (`remoteLiveTurns`) — never by `liveTurns`.
-    ///
-    /// The splitting machinery is the office one (`speakerRanges` →
-    /// `assignSentences`), parameterised by the remote turns; what is
-    /// deliberately absent is everything position-shaped: no `positionGapFill`,
-    /// no `PositionSource`, no `PositionDiarizer`, no ATND. The beam describes
-    /// the ROOM, so it says nothing whatsoever about the conferencing stream.
-    /// `regions: []` for the same reason overlap repair is Office-only — remote
-    /// rows are never tagged from office overlap windows.
-    ///
-    /// With no remote turns (feature idle, or the remote pass has not landed
-    /// yet) each segment stays ONE row labelled `remoteSpeakerLabel` with no
-    /// speaker id — exactly the phase-3 behaviour.
-    ///
-    /// Sorted by start time here rather than relying on append order: segments
-    /// are appended when their transcription lands, which is chronological today
-    /// (one sidecar, one queue) but is not something the merge should depend on.
-    nonisolated static func remoteRows(_ segments: [RemoteSegment],
-                                       turns: [DiarizationService.Turn] = [])
-        -> [SpeakerUtterance] {
-        segments.sorted { $0.window.lowerBound < $1.window.lowerBound }
-            .flatMap { seg -> [SpeakerUtterance] in
-                let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { return [] }
-                let ranges = speakerRanges(in: seg.window, turns: turns)
-                guard !ranges.isEmpty else {
-                    return [SpeakerUtterance(id: seg.id.uuidString,
-                                             speaker: remoteSpeakerLabel, speakerID: nil,
-                                             start: seg.window.lowerBound,
-                                             end: seg.window.upperBound,
-                                             text: text, confirmed: true, overlapped: false,
-                                             isRemote: true)]
-                }
-                return assignSentences(text, window: seg.window, ranges: ranges,
-                                       segID: seg.id.uuidString, regions: [])
-                    .map { row in
-                        var row = row
-                        row.speaker = row.speaker.map(remoteDisplayName)
-                        row.isRemote = true
-                        return row
-                    }
-            }
-    }
-
-    /// Interleave office and remote rows by start time into one transcript.
-    ///
-    /// A merge walk, NOT a sort of the combined list: office rows keep their own
-    /// order exactly as `rebuildDisplayRows` produced it, and each remote row is
-    /// placed before the first office row that starts later. Re-sorting the whole
-    /// list would silently reorder office rows the office pipeline placed
-    /// deliberately — separation-debug segments, for instance, carry real windows
-    /// but are pinned to the end on purpose.
-    ///
-    /// A tie puts Office first (the room is the primary record). A row with no
-    /// start time — an unconfirmed realtime segment with no window yet — sorts as
-    /// +∞, the same convention `insertPinnedSorted` uses, so remote rows go ahead
-    /// of it; it still keeps its place among the office rows.
-    ///
-    /// With no remote rows this returns `office` untouched: the single-stream
-    /// transcript is not re-sorted, re-ordered or otherwise disturbed by this
-    /// feature existing. `remote` is expected sorted (see `remoteRows`).
-    nonisolated static func mergeRowsByStartTime(office: [SpeakerUtterance],
-                                                 remote: [SpeakerUtterance]) -> [SpeakerUtterance] {
-        guard !remote.isEmpty else { return office }
-        func key(_ r: SpeakerUtterance) -> Double { r.start ?? .greatestFiniteMagnitude }
-        var out: [SpeakerUtterance] = []
-        out.reserveCapacity(office.count + remote.count)
-        var i = 0, j = 0
-        while i < office.count, j < remote.count {
-            if key(remote[j]) < key(office[i]) {
-                out.append(remote[j]); j += 1
-            } else {
-                out.append(office[i]); i += 1
-            }
-        }
-        out.append(contentsOf: office[i...])
-        out.append(contentsOf: remote[j...])
-        return out
     }
 
     /// Startup refusal for the one dual-stream configuration that cannot work:
