@@ -4,21 +4,23 @@ import XCTest
 /// Unit tests for live realtime captions on the Remote stream.
 ///
 /// Two decisions are genuinely pure here and both are tested: whether a session
-/// wants a second realtime engine at all (`ModelLoader.wantsRemoteRealtime`), and
-/// what the caption shows as realtime results arrive and confirmed remote chunks
-/// land (`AudioRecorder.RemoteCaption`). Everything else this change touches —
-/// the second sidecar process, the tap feeding it, the flushes at the chunk
-/// boundary and at Stop — needs the Aggregate Device and a running sidecar, and
-/// is listed as an on-device check instead.
+/// wants the realtime sidecar's REMOTE LANE at all (`ModelLoader.wantsRemoteRealtime`),
+/// and what the caption shows as realtime results arrive and confirmed remote
+/// chunks land (`AudioRecorder.RemoteCaption`). Everything else this change
+/// touches — the lane's frames on the shared sidecar's stdin, the tap feeding
+/// it, the flushes at the chunk boundary and at Stop — needs the Aggregate
+/// Device and a running sidecar, and is listed as an on-device check instead.
+/// (Lane ISOLATION inside the sidecar was proven against the real process with a
+/// two-file interleaved harness, not from here.)
 @MainActor
 final class DualStreamRealtimeTests: XCTestCase {
 
     // MARK: - 1. The unset path is inert (the regression bar)
 
-    /// With no Remote channel configured, no second realtime engine is ever
-    /// wanted — whatever the realtime setting says. This is the predicate the
-    /// loader uses both to decide the extra loading step and to tear a leftover
-    /// engine down, so a single-stream session cannot start (or keep) one.
+    /// With no Remote channel configured, the remote lane is never wanted —
+    /// whatever the realtime setting says. This is the predicate the loader uses
+    /// to detach a leftover lane, so a single-stream session cannot keep a
+    /// previous meeting's remote wiring alive.
     func testNoRemoteChannelNeverWantsARemoteRealtimeEngine() {
         XCTAssertFalse(ModelLoader.wantsRemoteRealtime(remoteChannel: nil,
                                                        realtimeEnabled: true))
@@ -27,7 +29,7 @@ final class DualStreamRealtimeTests: XCTestCase {
     }
 
     /// With realtime captions switched off there is nothing to draw for either
-    /// stream, so a Remote channel alone is not enough.
+    /// lane, so a Remote channel alone is not enough.
     func testRealtimeOffNeverWantsARemoteRealtimeEngine() {
         XCTAssertFalse(ModelLoader.wantsRemoteRealtime(remoteChannel: 1,
                                                        realtimeEnabled: false))

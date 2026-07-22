@@ -419,7 +419,10 @@ final class AudioRecorder: ObservableObject {
 
         // 5. Realtime ASR — stream audio in, receive partial/final transcripts
         let realtimeOn = UserDefaults.standard.object(forKey: "realtime.enabled") as? Bool ?? true
-        let asr = realtimeOn ? modelLoader.nemotronASR : nil
+        // `asr` is the OFFICE LANE of the one realtime sidecar (the remote lane
+        // of the same process is picked up in 5b). Same `feed`/`flush`/
+        // `onTranscript` calls as when this was a whole service.
+        let asr = realtimeOn ? modelLoader.nemotronASR?.office : nil
         asr?.onTranscript = { [weak self] text, isFinal in
             Task { @MainActor in
                 guard let self else { return }
@@ -456,14 +459,20 @@ final class AudioRecorder: ObservableObject {
             }
         }
 
-        // 5b. Realtime ASR for the Remote stream — a second sidecar, captioning
-        // only. It gets audio and flushes; it never touches `recordingElapsed`,
-        // the VAD, the RMS meter, either cadence or the ATND position path.
-        // Nil unless this session has remote 16 kHz audio to give it (the same
-        // `remoteResampler` condition the rest of the remote side hangs off) —
-        // so a single-stream session never installs this callback at all.
+        // 5b. Realtime ASR for the Remote stream — the SECOND LANE of the same
+        // sidecar, captioning only. It gets audio and flushes; it never touches
+        // `recordingElapsed`, the VAD, the RMS meter, either cadence or the ATND
+        // position path. Nil unless this session has remote 16 kHz audio to give
+        // it (the same `remoteResampler` condition the rest of the remote side
+        // hangs off) — so a single-stream session never installs this callback at
+        // all, and (see the `else` below) never leaves a stale one installed.
         let remoteASR = (realtimeOn && remoteResampler != nil)
-            ? modelLoader.remoteNemotronASR : nil
+            ? modelLoader.nemotronASR?.remote : nil
+        if remoteASR == nil {
+            // Sharing one process means the remote lane outlives the session that
+            // wanted it. Detach so a previous meeting's closure can never fire.
+            modelLoader.nemotronASR?.detachRemoteLane()
+        }
         remoteASR?.onTranscript = { [weak self] text, _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -554,14 +563,14 @@ final class AudioRecorder: ObservableObject {
         // The realtime engine is modelLoader.nemotronASR (there is no `self.asr`
         // property — `asr` is a local in beginCapture); flush() is a safe no-op
         // when idle, and empty-text finals are already dropped in onTranscript.
-        // Office-only on purpose: the beam describes the ROOM, so a cluster change
-        // says nothing about the conferencing stream. Flushing the remote engine
-        // here would cut its caption on an event from the other stream — and it is
-        // the first step towards remote audio reaching the position path, which it
-        // must never do.
+        // Office-only on purpose, and now spelled out by the `.office` lane: the
+        // beam describes the ROOM, so a cluster change says nothing about the
+        // conferencing stream. Flushing the remote lane here would cut its caption
+        // on an event from the other stream — and it is the first step towards
+        // remote audio reaching the position path, which it must never do.
         positionDiarizer?.onClusterChange = { [weak self] in
             guard let self, !self.stopped else { return }
-            self.modelLoader.nemotronASR?.flush()  // end the old speaker's realtime segment now
+            self.modelLoader.nemotronASR?.office.flush()  // end the old speaker's realtime segment now
             self.rebuildDisplayRows()              // relabel existing rows' fills instantly
         }
         // Optionally start each recording with a clean speaker store.
@@ -773,7 +782,7 @@ final class AudioRecorder: ObservableObject {
         // Stop ingesting beam notices, but KEEP the collected data — display-time
         // gap-fill (positionGapFill → label(for:)) still queries it afterward.
         positionDiarizer?.stop()
-        modelLoader.nemotronASR?.flush() // finalize any trailing speech
+        modelLoader.nemotronASR?.office.flush() // finalize any trailing speech
         // Remote's tail window is the office tail window — read BEFORE the office
         // branch below advances `lastChunkBoundary`, so both streams' last windows
         // still line up exactly as they did at every live boundary.
@@ -799,9 +808,10 @@ final class AudioRecorder: ObservableObject {
         // Remote tail, on the office tail's window. Inert for a single-stream
         // session (`remoteLastChunkDone` is already true and stays true).
         if remoteStreamActive {
-            // Flush parity with the office engine above: finalize the remote
-            // caption's trailing speech before its tail chunk is queued.
-            modelLoader.remoteNemotronASR?.flush()
+            // Flush parity with the office lane above: finalize the remote
+            // caption's trailing speech before its tail chunk is queued. Its own
+            // opcode, so this resets only the remote buffer in the sidecar.
+            modelLoader.nemotronASR?.remote.flush()
             flushRemoteChunk(window: tailStart...max(recordingElapsed, tailStart + 0.01),
                              chunked: modelLoader.chunkedASR)
             startRemoteStopWatchdog()

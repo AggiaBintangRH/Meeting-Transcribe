@@ -2,9 +2,19 @@ import Foundation
 
 /// Client for the Nemotron 3.5 realtime ASR sidecar (scripts/nemotron-asr-service.py).
 ///
-/// Feed 16 kHz mono samples continuously; call `flush()` at utterance end
-/// (VAD speech→silence edge). Emits partial transcripts every ~1.5 s while
-/// audio streams in, and a final transcript on flush.
+/// ONE process, TWO independent lanes — `office` and `remote`. Feed 16 kHz mono
+/// samples to a lane continuously; call `flush()` on it at utterance end (VAD
+/// speech→silence edge). Each lane emits partial transcripts every ~1.5 s while
+/// its audio streams in, and a final transcript on its flush.
+///
+/// The lanes share only the process (and therefore one copy of the ~1 GB
+/// weights) — never audio. Each writes its own frame type, the sidecar keeps a
+/// separate buffer per lane, and results are routed back by the `stream` tag, so
+/// the two waveforms never meet on either side of the pipe. That separation is
+/// the entire value of dual-stream capture; do not "optimize" it into one buffer.
+///
+/// A session without a Remote channel simply never touches `remote`, which means
+/// the wire traffic is byte-identical to the single-stream sidecar.
 ///
 /// Configured from Settings → Models → Realtime (language, chunk size).
 final class NemotronASRService: @unchecked Sendable {
@@ -45,8 +55,65 @@ final class NemotronASRService: @unchecked Sendable {
         }
     }
 
-    /// Transcript callback: (text, isFinal). Called on an arbitrary thread.
-    var onTranscript: ((String, Bool) -> Void)?
+    /// One audio stream's client-side handle: the same `feed` / `flush` /
+    /// `onTranscript` ergonomics the service itself used to expose, scoped to a
+    /// single lane. Holding two of these (rather than two services) is what
+    /// keeps the call sites unchanged while the process count drops to one.
+    ///
+    /// The lane owns no audio state of its own — the buffering happens in the
+    /// sidecar, per lane — so there is nothing here for two lanes to share.
+    final class Lane: @unchecked Sendable {
+
+        /// Transcript callback: (text, isFinal). Called on an arbitrary thread.
+        var onTranscript: ((String, Bool) -> Void)?
+
+        /// Frame opcodes this lane writes. Office keeps the historical encoding
+        /// (a bare positive count, `0` to flush); remote uses additive negative
+        /// opcodes so an office-only session's byte stream is unchanged.
+        private let isRemote: Bool
+        private unowned let service: NemotronASRService
+
+        init(service: NemotronASRService, isRemote: Bool) {
+            self.service = service
+            self.isRemote = isRemote
+        }
+
+        /// Stream samples to this lane's recognizer.
+        func feed(_ samples: [Float]) {
+            guard !samples.isEmpty else { return }
+            var packet = Data()
+            if isRemote {
+                // -2 = "remote audio follows", then the sample count. Two headers
+                // rather than a signed count so the office path stays literally
+                // the bytes it always was.
+                packet.append(Self.header(-2))
+            }
+            packet.append(Self.header(Int32(samples.count)))
+            samples.withUnsafeBufferPointer { packet.append(Data(buffer: $0)) }
+            service.write(packet)
+        }
+
+        /// Utterance ended — request this lane's final transcript and reset only
+        /// this lane's buffer. The other lane keeps accumulating untouched.
+        func flush() {
+            service.write(Self.header(isRemote ? -3 : 0))
+        }
+
+        private static func header(_ value: Int32) -> Data {
+            withUnsafeBytes(of: value.littleEndian) { Data($0) }
+        }
+    }
+
+    /// The room microphone. Drives the clock, the VAD and both cadences.
+    ///
+    /// Assigned in `init`, never nil afterwards. Deliberately NOT `lazy`: the
+    /// audio tap and the stdout reader touch the lanes from different threads,
+    /// and `lazy` initialization is not thread-safe.
+    private(set) var office: Lane!
+
+    /// The conferencing (Remote) stream. Captions only — it must never reach the
+    /// ATND/position path or the speaker profile store.
+    private(set) var remote: Lane!
 
     private let process = Process()
     private let stdinPipe = Pipe()
@@ -58,6 +125,10 @@ final class NemotronASRService: @unchecked Sendable {
 
     init(config: Config = .fromSettings()) throws {
         self.config = config
+        // Both lanes exist before the process does, so nothing has to check for
+        // their presence later; neither writes anything until it is fed.
+        self.office = Lane(service: self, isRemote: false)
+        self.remote = Lane(service: self, isRemote: true)
 
         let script = PythonRuntime.scriptsDir.appendingPathComponent("nemotron-asr-service.py")
         guard FileManager.default.fileExists(atPath: script.path) else {
@@ -97,23 +168,23 @@ final class NemotronASRService: @unchecked Sendable {
 
     // MARK: - Input (safe to call from the audio tap thread)
 
-    /// Stream samples to the recognizer.
-    func feed(_ samples: [Float]) {
-        guard process.isRunning, !samples.isEmpty else { return }
-        var packet = withUnsafeBytes(of: Int32(samples.count).littleEndian) { Data($0) }
-        samples.withUnsafeBufferPointer { packet.append(Data(buffer: $0)) }
+    /// The single writer both lanes go through. Serialized on `writeQueue`, so
+    /// two lanes writing concurrently can never interleave halfway through a
+    /// frame — which is what would let one lane's samples be read as the other's.
+    fileprivate func write(_ packet: Data) {
+        guard process.isRunning else { return }
         writeQueue.async { [stdinPipe] in
             try? stdinPipe.fileHandleForWriting.write(contentsOf: packet)
         }
     }
 
-    /// Utterance ended — request the final transcript and reset the buffer.
-    func flush() {
-        guard process.isRunning else { return }
-        let packet = withUnsafeBytes(of: Int32(0).littleEndian) { Data($0) }
-        writeQueue.async { [stdinPipe] in
-            try? stdinPipe.fileHandleForWriting.write(contentsOf: packet)
-        }
+    /// Detach the remote lane when a session no longer wants remote captions.
+    /// There is no process to orphan any more — the lane simply goes silent —
+    /// but a stale callback would still hold a finished session's recorder, so
+    /// clear it. The sidecar-side buffer is already empty: `stop()` flushes the
+    /// remote lane, and nothing feeds it afterwards.
+    func detachRemoteLane() {
+        remote.onTranscript = nil
     }
 
     func terminate() {
@@ -168,6 +239,10 @@ final class NemotronASRService: @unchecked Sendable {
     private struct Message: Decodable {
         let type: String
         let text: String
+        /// Which lane produced this line. ABSENT MEANS OFFICE — the same
+        /// convention diarize-service.py uses, chosen so office lines keep their
+        /// exact historical bytes.
+        let stream: String?
     }
 
     private func startTranscriptReader() {
@@ -185,9 +260,12 @@ final class NemotronASRService: @unchecked Sendable {
                 guard let data = line.data(using: .utf8),
                       let message = try? JSONDecoder().decode(Message.self, from: data)
                 else { continue }
+                // Route strictly by the tag: an untagged line is office, and a
+                // remote line can only ever reach the remote lane's callback.
+                let lane: Lane = message.stream == "remote" ? self.remote : self.office
                 switch message.type {
-                case "partial": self.onTranscript?(message.text, false)
-                case "final":   self.onTranscript?(message.text, true)
+                case "partial": lane.onTranscript?(message.text, false)
+                case "final":   lane.onTranscript?(message.text, true)
                 default: break
                 }
             }
