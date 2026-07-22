@@ -734,6 +734,7 @@ def run_chunked(rep: Report, ctx):
 DIARIZE_CHECKS = [
     "diarize/absent-stream-means-office",
     "diarize/profile-stores-are-disjoint",
+    "diarize/native-rate-final-matches-16k-chunks",
     "diarize/reset-wipes-both-stores",
 ]
 
@@ -852,6 +853,71 @@ def run_diarize(rep: Report, ctx):
 
         # -- check 10: reset wipes BOTH spaces. Leaving half of it populated
         #    would make remote numbering carry over into a "fresh" session.
+        # -- the sample-rate regression. WeSpeaker is a 16 kHz model and does not
+        #    error on another rate — it silently embeds pitch- and tempo-shifted
+        #    speech. Live chunks arrive as 16 kHz temp WAVs, but a stop-time pass
+        #    reads the RECORDING, which is at the capture device's native rate
+        #    (44.1 kHz here). On the owner's audio the same voice scored 0.98 on a
+        #    chunk and 0.11 on the final, fell under SIM_THRESHOLD and minted a
+        #    duplicate profile — one person shown as two speakers.
+        #
+        #    So: enrol from 16 kHz chunks, then run a final over a 44.1 kHz file
+        #    of the SAME speech. It must land on the SAME profile. Without the
+        #    resample in resolve_speakers this yields a new id, which is exactly
+        #    the shipped bug.
+        if ctx.wants("diarize/native-rate-final-matches-16k-chunks"):
+            cid = "diarize/native-rate-final-matches-16k-chunks"
+            try:
+                import numpy as np
+                import torch
+                import torchaudio
+
+                sc.send_json({"cmd": "reset"})
+                sc.wait_for(lambda m: m.get("text") == "RESET", timeout=60)
+
+                # Build the 44.1 kHz file by genuinely resampling the 16 kHz clip,
+                # so the check holds even if the fixture is already 16 kHz.
+                native_sr = 44_100
+                up = torchaudio.functional.resample(
+                    torch.from_numpy(np.asarray(clip, dtype=np.float32)).unsqueeze(0),
+                    SR, native_sr).squeeze(0).numpy()
+                native_path = write_wav(pathlib.Path(ctx.tmp) / "diarize-native.wav",
+                                        up, sr=native_sr)
+
+                # Enrol from 16 kHz chunks, the live path.
+                half = clip.size // 2
+                chunk_ids = []
+                for i, piece in enumerate((clip[:half], clip[half:])):
+                    cp = write_wav(pathlib.Path(ctx.tmp) / f"diarize-16k-{i}.wav", piece)
+                    sc.send_json({"cmd": "chunk", "audio": cp,
+                                  "window_start": 0.0, "stream": "remote"})
+                    m = sc.wait_for(lambda m: m.get("type") in ("chunk_result", "error"),
+                                    timeout=ctx.job_timeout)
+                    if m and m.get("type") == "chunk_result":
+                        chunk_ids += [s["id"] for s in m.get("segments", [])]
+
+                sc.send_json({"cmd": "final", "audio": native_path, "stream": "remote"})
+                fin = sc.wait_for(lambda m: m.get("type") in ("result", "error"),
+                                  timeout=ctx.final_timeout)
+                final_ids = ([s["id"] for s in fin.get("segments", [])]
+                             if fin and fin.get("type") == "result" else [])
+
+                if not chunk_ids:
+                    rep.fail(cid, "16 kHz chunks enrolled no speaker — nothing to compare")
+                elif not final_ids:
+                    rep.fail(cid, f"the {native_sr} Hz final produced no labelled turns: {fin}")
+                else:
+                    known = set(chunk_ids)
+                    unknown = sorted(set(final_ids) - known)
+                    rep.expect(cid, not unknown,
+                               f"{native_sr} Hz final reused the 16 kHz profile "
+                               f"{sorted(known)}",
+                               f"final minted {unknown} instead of reusing "
+                               f"{sorted(known)} — the same voice embedded at "
+                               f"{native_sr} Hz did not match its own 16 kHz profile")
+            except Exception as exc:  # noqa: BLE001
+                rep.fail(cid, f"check could not run: {exc!r}")
+
         if ctx.wants("diarize/reset-wipes-both-stores"):
             cid = "diarize/reset-wipes-both-stores"
             before = sorted(p.name for p in profile_dir.iterdir())
