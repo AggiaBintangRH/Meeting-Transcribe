@@ -61,6 +61,36 @@ final class AudioRecorder: ObservableObject {
         var window: ClosedRange<Double>   // recording-time span (shared clock)
     }
 
+    /// The live Remote caption — what the Remote realtime engine has produced
+    /// since the last remote chunk boundary, shown as its own provisional card
+    /// exactly like the office `partialTranscript`.
+    ///
+    /// A tiny type rather than a bare String because the *rule* is the whole
+    /// point and it differs from the office one: a Remote FINAL is KEPT on
+    /// screen, not cleared. Office can clear on a final because it immediately
+    /// turns that final into an unconfirmed segment; Remote has no unconfirmed
+    /// segment (see `RemoteSegment` — remote text never enters the office
+    /// pipeline), so clearing on the final would blank the caption for the
+    /// several seconds the confirmed remote chunk takes to come back. The
+    /// caption instead survives until `commit()`, which every terminal outcome
+    /// of that chunk calls — transcribed, empty, skipped as silence, or failed.
+    struct RemoteCaption: Equatable {
+        /// What the view draws; empty means no caption card at all.
+        private(set) var text = ""
+
+        /// A realtime result arrived (partial or final — both are just "the best
+        /// text so far" for audio no confirmed row covers yet).
+        mutating func update(to incoming: String) {
+            text = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        /// This caption's audio is now represented (or deliberately not) by a
+        /// confirmed remote row — drop it so nothing stale lingers underneath.
+        mutating func commit() {
+            text = ""
+        }
+    }
+
     /// One rendered row: a single speaker's turn with its time span and text.
     struct SpeakerUtterance: Identifiable, Equatable {
         let id: String                    // stable per (segment, turn index)
@@ -80,6 +110,9 @@ final class AudioRecorder: ObservableObject {
     @Published var segments: [TranscriptSegment] = []
     @Published var displayRows: [SpeakerUtterance] = []
     @Published var partialTranscript = ""
+    /// Live caption for the Remote stream. Stays empty for a single-stream
+    /// session, so the view draws nothing extra.
+    @Published var remoteCaption = RemoteCaption()
     /// ATND position label for the live partial ("the beam active right now"),
     /// or nil when the feature is off / ATND is silent → shows SPEAKER UNKNOWN.
     @Published var partialSpeakerName: String?
@@ -387,7 +420,27 @@ final class AudioRecorder: ObservableObject {
             }
         }
 
-        // 5b. Chunked ASR — rolling accurate pass every N seconds.
+        // 5b. Realtime ASR for the Remote stream — a second sidecar, captioning
+        // only. It gets audio and flushes; it never touches `recordingElapsed`,
+        // the VAD, the RMS meter, either cadence or the ATND position path.
+        // Nil unless this session has remote 16 kHz audio to give it (the same
+        // `remoteResampler` condition the rest of the remote side hangs off) —
+        // so a single-stream session never installs this callback at all.
+        let remoteASR = (realtimeOn && remoteResampler != nil)
+            ? modelLoader.remoteNemotronASR : nil
+        remoteASR?.onTranscript = { [weak self] text, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                // Partial and final are handled identically — see `RemoteCaption`
+                // for why a final is kept rather than cleared. After Stop the
+                // remote chunk pass owns the remaining audio, exactly as the
+                // office branch above reasons about its own trailing final.
+                guard !self.stopped else { self.remoteCaption.commit(); return }
+                self.remoteCaption.update(to: text)
+            }
+        }
+
+        // 5c. Chunked ASR — rolling accurate pass every N seconds.
         // Its result REPLACES the unconfirmed Nemotron segments in place.
         let chunked = modelLoader.chunkedASR
         chunkedModelName = chunked?.config.modelName ?? ""
@@ -435,6 +488,7 @@ final class AudioRecorder: ObservableObject {
                           + "written, but remote audio will not be transcribed this session.")
         }
         remoteChunkAudio = []
+        remoteCaption.commit()
         remoteSegments = []
         remotePendingChunks = 0
         remoteChunkError = nil
@@ -453,6 +507,11 @@ final class AudioRecorder: ObservableObject {
         // The realtime engine is modelLoader.nemotronASR (there is no `self.asr`
         // property — `asr` is a local in beginCapture); flush() is a safe no-op
         // when idle, and empty-text finals are already dropped in onTranscript.
+        // Office-only on purpose: the beam describes the ROOM, so a cluster change
+        // says nothing about the conferencing stream. Flushing the remote engine
+        // here would cut its caption on an event from the other stream — and it is
+        // the first step towards remote audio reaching the position path, which it
+        // must never do.
         positionDiarizer?.onClusterChange = { [weak self] in
             guard let self, !self.stopped else { return }
             self.modelLoader.nemotronASR?.flush()  // end the old speaker's realtime segment now
@@ -532,6 +591,11 @@ final class AudioRecorder: ObservableObject {
                let remoteMono = AudioBufferProcessor.extractChannel(buffer, channel: remoteTapChannel) {
                 try? self.remoteFile?.write(from: remoteMono)
                 remoteSamples16k = remoteResampler?.resample(remoteMono) ?? []
+                // Live captions for the conferencing audio. Fed from here (not
+                // from the main-actor hop below) for the same reason the office
+                // engine is: `feed` hands the samples to its own write queue, and
+                // the caption should not wait on the main actor to be scheduled.
+                remoteASR?.feed(remoteSamples16k)
             }
             self.onBuffer?(mono)
 
@@ -583,6 +647,11 @@ final class AudioRecorder: ObservableObject {
                     // second; the sidecar is single-threaded and processes its
                     // stdin strictly in order, so they run sequentially with no
                     // new concurrency of our own.
+                    //
+                    // The remote realtime engine is flushed on the SAME boundary
+                    // as the office one, for the same reason: its caption covers
+                    // exactly the audio the chunk below is about to confirm.
+                    remoteASR?.flush()
                     self.flushRemoteChunk(window: windowStart...self.recordingElapsed,
                                           chunked: chunked)
                 }
@@ -672,6 +741,9 @@ final class AudioRecorder: ObservableObject {
         // Remote tail, on the office tail's window. Inert for a single-stream
         // session (`remoteLastChunkDone` is already true and stays true).
         if remoteStreamActive {
+            // Flush parity with the office engine above: finalize the remote
+            // caption's trailing speech before its tail chunk is queued.
+            modelLoader.remoteNemotronASR?.flush()
             flushRemoteChunk(window: tailStart...max(recordingElapsed, tailStart + 0.01),
                              chunked: modelLoader.chunkedASR)
             startRemoteStopWatchdog()
@@ -2071,6 +2143,10 @@ final class AudioRecorder: ObservableObject {
         guard let chunked else { return }
         if let reason = Self.remoteChunkSkipReason(samples) {
             dualStreamLog("SKIP remote [\(fmt(window.lowerBound))-\(fmt(window.upperBound))] \(reason)")
+            // No confirmed row is coming for this window, so nothing would ever
+            // replace the caption — drop it rather than leave it hanging under
+            // the transcript for the whole of the next chunk interval.
+            remoteCaption.commit()
             return
         }
         remotePendingChunks += 1
@@ -2083,6 +2159,7 @@ final class AudioRecorder: ObservableObject {
                 self.remoteChunkError = "Could not write remote audio for transcription"
                 self.dualStreamLog("FAIL remote [\(self.fmt(window.lowerBound))-"
                                    + "\(self.fmt(window.upperBound))] could not write a temp WAV")
+                self.remoteCaption.commit()   // nothing will confirm this window
                 self.finishRemoteChunk()
                 return
             }
@@ -2107,6 +2184,10 @@ final class AudioRecorder: ObservableObject {
                                    + "\(self.fmt(window.upperBound))] \(error.localizedDescription)")
             }
             try? FileManager.default.removeItem(at: url)
+            // This window is settled either way (transcribed, empty or failed):
+            // the caption has served its purpose and must not outlive the row —
+            // or the absence of one — that answers for the same audio.
+            self.remoteCaption.commit()
             self.finishRemoteChunk()
         }
     }

@@ -49,6 +49,14 @@ final class ModelLoader: ObservableObject {
     /// Nemotron realtime ASR sidecar; recreated only when its settings change.
     private(set) var nemotronASR: NemotronASRService?
 
+    /// Second Nemotron sidecar, captioning the Remote (conferencing) stream.
+    /// Nil unless this session both has a Remote channel and wants realtime
+    /// captions — see `wantsRemoteRealtime`. Kept alive across sessions exactly
+    /// like `nemotronASR` (a reload costs ~30 s), but torn down as soon as a
+    /// session no longer wants it so a single-stream meeting is not paying for a
+    /// second resident model.
+    private(set) var remoteNemotronASR: NemotronASRService?
+
     /// Chunked ASR sidecar (Qwen3/Whisper/Voxtral per settings); persistent.
     private(set) var chunkedASR: ChunkedASRService?
 
@@ -64,16 +72,41 @@ final class ModelLoader: ObservableObject {
     /// whichever is picked in Settings → Models → Overlap.
     private(set) var dicowRepair: DicowService?
 
+    /// Whether this session should run a SECOND realtime engine for the Remote
+    /// stream. Both conditions are necessary: no Remote channel means there is no
+    /// second stream at all, and with realtime captions off there is nothing for
+    /// either engine to draw. Pure, so the "inert without a Remote channel"
+    /// guarantee is testable without audio hardware.
+    nonisolated static func wantsRemoteRealtime(remoteChannel: Int?,
+                                                realtimeEnabled: Bool) -> Bool {
+        remoteChannel != nil && realtimeEnabled
+    }
+
     /// Load everything the session needs. Returns true if all succeeded.
     func loadAll() async -> Bool {
         isLoading = true
         failureMessage = nil
         defer { isLoading = false }
 
-        items = buildSteps().map { Item(id: $0.model.id, name: $0.model.name) }
+        let d = UserDefaults.standard
+        let wantsRemote = Self.wantsRemoteRealtime(
+            remoteChannel: MicrophoneSettings.current().remoteChannel,
+            realtimeEnabled: d.object(forKey: "realtime.enabled") as? Bool ?? true)
+        // A session that does not want remote captions must not keep paying for
+        // them: the second sidecar is a whole resident model, so shut a leftover
+        // one down here rather than letting it idle for the rest of the app's life.
+        if !wantsRemote, remoteNemotronASR != nil {
+            remoteNemotronASR?.terminate()
+            remoteNemotronASR = nil
+        }
+
+        // Built once and reused for both the overlay list and the run below, so
+        // the indices into `items` can never disagree with the steps executed.
+        let steps = buildSteps(includeRemoteRealtime: wantsRemote)
+        items = steps.map { Item(id: $0.model.id, name: $0.model.name) }
         var allOK = true
 
-        for (index, step) in buildSteps().enumerated() {
+        for (index, step) in steps.enumerated() {
             items[index].state = .loading
             do {
                 try await load(step)
@@ -96,7 +129,9 @@ final class ModelLoader: ObservableObject {
     }
 
     /// Which models this session needs, based on current settings.
-    private func buildSteps() -> [Step] {
+    /// `includeRemoteRealtime` is decided by the caller (it needs the resolved
+    /// microphone selection, which this function has no business reading).
+    private func buildSteps(includeRemoteRealtime: Bool) -> [Step] {
         let d = UserDefaults.standard
         var steps: [Step] = []
 
@@ -105,6 +140,11 @@ final class ModelLoader: ObservableObject {
         }
         if d.object(forKey: "realtime.enabled") as? Bool ?? true {
             steps.append(Step(model: ModelCatalog.realtime, checkInstalled: true))
+            // Same weights, second process — right after the office engine so the
+            // overlay reads as one realtime pair rather than an unrelated model.
+            if includeRemoteRealtime {
+                steps.append(Step(model: ModelCatalog.realtimeRemote, checkInstalled: true))
+            }
         }
         // Word aligner — no sidecar of its own (it loads inside the chunked ASR
         // process), so this step only verifies the weights are there. Checked
@@ -176,6 +216,25 @@ final class ModelLoader: ObservableObject {
             nemotronASR = nil
             // Throws with the sidecar's exact error message (shown in overlay)
             nemotronASR = try await Task.detached(priority: .userInitiated) {
+                try NemotronASRService(config: config)
+            }.value
+            return
+        }
+
+        // Nemotron realtime ASR for the Remote stream: a SECOND sidecar process
+        // with the same config as the office one. Its own branch (not a shared
+        // one keyed on a flag) because the two must never be confused: the office
+        // engine drives the clock, VAD and both cadences, this one only captions.
+        // On a failed start `NemotronASRService.init` terminates its own process
+        // and throws, so nothing is left running and the property stays nil.
+        if step.model.id == ModelCatalog.realtimeRemote.id {
+            let config = NemotronASRService.Config.fromSettings()
+            if let existing = remoteNemotronASR, existing.config == config {
+                return
+            }
+            remoteNemotronASR?.terminate()
+            remoteNemotronASR = nil
+            remoteNemotronASR = try await Task.detached(priority: .userInitiated) {
                 try NemotronASRService(config: config)
             }.value
             return

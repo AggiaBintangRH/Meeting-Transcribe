@@ -19,6 +19,22 @@ enum ModelCatalog {
         hfRepo: "mlx-community/nemotron-3.5-asr-streaming-0.6b"
     )
 
+    /// The SAME Nemotron weights as `realtime`, loaded a second time to caption
+    /// the Remote (conferencing) stream live. It is a distinct `ModelInfo` purely
+    /// so the loading overlay can list it as its own step and `ModelLoader` can
+    /// tell the two sidecars apart by id — `hfRepo` is identical, so the install
+    /// check passes on the one download that is already there.
+    ///
+    /// Only listed when a Remote channel is configured AND realtime captions are
+    /// on; a single-stream session never sees this row.
+    static let realtimeRemote = ModelInfo(
+        id: "nemotron-remote",
+        name: "Nemotron 3.5 ASR Streaming 0.6B (Remote stream)",
+        detail: "Second instance — live captions for the conferencing audio",
+        badges: ["MLX", "40 locales", "112x RT", "0.6B"],
+        hfRepo: "mlx-community/nemotron-3.5-asr-streaming-0.6b"
+    )
+
     static let chunked: [ModelInfo] = [
         ModelInfo(id: "qwen3",
                   name: "Qwen3-ASR 1.7B (bf16)",

@@ -12,6 +12,7 @@ struct TranscriptView: View {
     private var isEmpty: Bool {
         recorder.displayRows.isEmpty
             && recorder.partialTranscript.isEmpty
+            && recorder.remoteCaption.text.isEmpty
             && recorder.chunkedError == nil
             && !recorder.overlapRepairing
             && recorder.overlapRepairError == nil
@@ -29,19 +30,20 @@ struct TranscriptView: View {
                         }
 
                         if !recorder.partialTranscript.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text((recorder.partialSpeakerName ?? "SPEAKER UNKNOWN").uppercased())
-                                    .font(.system(size: 14, weight: .heavy))
-                                    .kerning(0.8)
-                                    .foregroundColor(Theme.speakerNameText)
-                                Text(recorder.partialTranscript)
-                                    .font(.system(size: 21))
-                                    .lineSpacing(5)
-                                    .italic()
-                                    .foregroundColor(Theme.bodyTextConfirmed)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .modifier(TranscriptCard())
+                            partialCard(label: recorder.partialSpeakerName ?? "SPEAKER UNKNOWN",
+                                        labelColor: Theme.speakerNameText,
+                                        text: recorder.partialTranscript)
+                        }
+
+                        // The Remote stream's own live caption, below the office
+                        // one (the room is the primary record). Amber is the
+                        // Remote capture role everywhere in the app, so the two
+                        // provisional cards can never be mistaken for each other.
+                        // It disappears the moment its confirmed remote row lands.
+                        if !recorder.remoteCaption.text.isEmpty {
+                            partialCard(label: AudioRecorder.remoteSpeakerLabel,
+                                        labelColor: Theme.remoteRole,
+                                        text: recorder.remoteCaption.text)
                         }
 
                         if recorder.chunkedBusy {
@@ -70,6 +72,9 @@ struct TranscriptView: View {
                     withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") }
                 }
                 .onChange(of: recorder.partialTranscript) { _, _ in
+                    proxy.scrollTo("bottom")
+                }
+                .onChange(of: recorder.remoteCaption) { _, _ in
                     proxy.scrollTo("bottom")
                 }
                 .alert("Rename speaker", isPresented: Binding(
@@ -155,6 +160,25 @@ struct TranscriptView: View {
                 .foregroundColor(Theme.bodyTextConfirmed)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
+        }
+        .modifier(TranscriptCard())
+    }
+
+    /// A provisional (realtime) card: speaker label + italic, not-yet-confirmed
+    /// text. Shared by the Office and Remote captions so the two stay visually
+    /// identical apart from the label colour.
+    private func partialCard(label: String, labelColor: Color, text: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label.uppercased())
+                .font(.system(size: 14, weight: .heavy))
+                .kerning(0.8)
+                .foregroundColor(labelColor)
+            Text(text)
+                .font(.system(size: 21))
+                .lineSpacing(5)
+                .italic()
+                .foregroundColor(Theme.bodyTextConfirmed)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .modifier(TranscriptCard())
     }
