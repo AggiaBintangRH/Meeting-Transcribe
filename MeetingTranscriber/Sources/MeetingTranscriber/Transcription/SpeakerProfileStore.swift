@@ -38,10 +38,25 @@ enum SpeakerProfileStore {
 
         /// Which space a wire id belongs to (pyannote < 10_000 ≤ remote).
         /// Position ids (≥ 100_000) never reach here — `renameSpeaker` routes
-        /// them to the position diarizer before this type is consulted.
+        /// them to the position diarizer before this type is consulted. The
+        /// assert is that routing's tripwire: a position id arriving here would
+        /// be filed as a remote profile and quietly corrupt profiles-remote.json.
+        /// Debug-only (compiled out of release) — a mis-filed rename is a bug to
+        /// catch in development, not a reason to crash on a user's meeting.
         static func forWireID(_ id: Int) -> Space {
-            id >= AudioRecorder.remoteIDBase ? .remote : .office
+            assert(isProfileID(id),
+                   "position id \(id) reached SpeakerProfileStore — renameSpeaker "
+                   + "must branch on PositionDiarizer.positionIDBase first.")
+            return id >= AudioRecorder.remoteIDBase ? .remote : .office
         }
+    }
+
+    /// True when `id` belongs to one of the two voice-profile stores at all.
+    /// Position ids are not voice profiles — they are ATND beam clusters, owned
+    /// by `PositionDiarizer` and stored nowhere near profiles.json. Pure, so the
+    /// boundary can be tested without tripping the assert that enforces it.
+    static func isProfileID(_ id: Int) -> Bool {
+        id < PositionDiarizer.positionIDBase
     }
 
     static var fileURL: URL { fileURL(.office) }

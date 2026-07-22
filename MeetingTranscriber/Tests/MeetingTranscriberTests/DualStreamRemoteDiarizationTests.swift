@@ -74,10 +74,14 @@ final class DualStreamRemoteDiarizationTests: XCTestCase {
 
     /// Position ids never reach the profile stores at all — `renameSpeaker`
     /// intercepts them first. This pins the boundary the interception relies on.
+    ///
+    /// Asked through `isProfileID` rather than `forWireID`: as of phase 5 a
+    /// position id handed to `forWireID` trips its debug assert (which is the
+    /// point — it would otherwise be filed as a remote profile), so the boundary
+    /// is checked with the pure predicate that assert is written against.
     func testPositionIDsAreAboveBothProfileSpaces() {
         XCTAssertGreaterThan(PositionDiarizer.positionIDBase, AudioRecorder.remoteIDBase)
-        XCTAssertEqual(SpeakerProfileStore.Space.forWireID(PositionDiarizer.positionIDBase),
-                       .remote,
+        XCTAssertFalse(SpeakerProfileStore.isProfileID(PositionDiarizer.positionIDBase),
                        "Position ids would land in the remote space if they ever got "
                        + "this far — renameSpeaker must branch on positionIDBase FIRST")
     }

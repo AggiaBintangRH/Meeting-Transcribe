@@ -199,8 +199,13 @@ final class AudioRecorder: ObservableObject {
     // boundary and the single `recordingElapsed`, which is the whole reason both
     // inputs must come from one Aggregate Device (see `MicrophoneSettings`).
 
-    /// True when this session resolved a usable Remote channel.
-    private var remoteStreamActive = false
+    /// True when this session resolved a usable Remote channel. Published so the
+    /// status chips can show the Remote speaker count for a dual-stream session
+    /// ONLY — with `mic.remoteChannel` unset this stays false for the whole app
+    /// lifetime and the chip row is exactly what it was before dual-stream.
+    /// It survives stop on purpose: the finished session's remote count stays
+    /// readable until the next start re-evaluates it.
+    @Published private(set) var remoteStreamActive = false
     /// 16 kHz remote samples accumulated since the last chunk boundary.
     private var remoteChunkAudio: [Float] = []
     /// Transcribed remote chunks, merged into `displayRows` by start time.
@@ -974,8 +979,9 @@ final class AudioRecorder: ObservableObject {
                     if let file = self.remoteChunkFileByWindow.removeValue(forKey: windowStart) {
                         try? FileManager.default.removeItem(at: file)
                     }
-                    self.remoteLiveTurns.append(contentsOf: absolute)
-                    for turn in absolute { self.remoteSessionSpeakerIDs.insert(turn.id) }
+                    let remote = Self.remoteTurnsOnly(absolute, "remote onChunkResult")
+                    self.remoteLiveTurns.append(contentsOf: remote)
+                    for turn in remote { self.remoteSessionSpeakerIDs.insert(turn.id) }
                     self.remoteSpeakerCount = self.remoteSessionSpeakerIDs.count
                     self.rebuildDisplayRows()
                     // Remote tail-mode stop: THIS chunk result is the remote tail —
@@ -994,8 +1000,9 @@ final class AudioRecorder: ObservableObject {
                 }
                 // Raw pyannote turns — pyannote is authoritative. Position labels
                 // are folded in only at display time (derivedRows), never here.
-                self.liveTurns.append(contentsOf: absolute)
-                for turn in absolute { self.sessionSpeakerIDs.insert(turn.id) }
+                let office = Self.officeTurnsOnly(absolute, "office onChunkResult")
+                self.liveTurns.append(contentsOf: office)
+                for turn in office { self.sessionSpeakerIDs.insert(turn.id) }
                 self.speakerCount = self.sessionSpeakerIDs.count
                 self.rebuildDisplayRows()
                 // Tail-only stop mode: this chunk result IS the tail — complete the gate.
@@ -1235,6 +1242,7 @@ final class AudioRecorder: ObservableObject {
     /// `applyFinalSpeakers` does for Office — but into `remoteLiveTurns`, so the
     /// two spaces never share a collection.
     private func applyRemoteFinalSpeakers(_ turns: [DiarizationService.Turn]) {
+        let turns = Self.remoteTurnsOnly(turns, "applyRemoteFinalSpeakers")
         remoteSpeakerCount = Set(turns.map(\.id)).count
         remoteLiveTurns = turns
         rebuildDisplayRows()
@@ -1475,6 +1483,7 @@ final class AudioRecorder: ObservableObject {
     /// set. Raw pyannote (authoritative); position labels are folded in only at
     /// display time (derivedRows), so liveTurns stays pure pyannote.
     private func applyFinalSpeakers(_ turns: [DiarizationService.Turn]) {
+        let turns = Self.officeTurnsOnly(turns, "applyFinalSpeakers")
         speakerCount = Set(turns.map(\.id)).count
         liveTurns = turns
         rebuildDisplayRows()
@@ -1665,7 +1674,7 @@ final class AudioRecorder: ObservableObject {
     /// Windows where two DIFFERENT speakers are active at the same time
     /// (genuine overlap), each at least 0.4s long. Empty in exclusive mode.
     private func overlapRegions() -> [(start: Double, end: Double)] {
-        let turns = liveTurns
+        let turns = Self.officeTurnsOnly(liveTurns, "overlapRegions")
         guard turns.count > 1 else { return [] }
         var regions: [(start: Double, end: Double)] = []
         for i in 0..<turns.count {
@@ -1882,7 +1891,9 @@ final class AudioRecorder: ObservableObject {
     /// behaviour) drops merged windows longer than the engine can accept.
     private func repairWindows(windowSec: Double,
                                maxDurationSec: Double? = nil) -> [RepairWindow] {
-        let turns = liveTurns
+        // Overlap repair rewrites transcript text under a speaker id — the last
+        // place a stray remote id should ever reach.
+        let turns = Self.officeTurnsOnly(liveTurns, "repairWindows")
         guard turns.count > 1 else { return [] }
 
         // Raw windows from pairwise different-speaker overlaps.
@@ -2399,6 +2410,61 @@ final class AudioRecorder: ObservableObject {
     /// remote id out of profiles.json and an office id out of profiles-remote.json
     /// — see `renameSpeaker` and `SpeakerProfileStore.Space`.
     nonisolated static let remoteIDBase = 10_000
+
+    // MARK: Id-space guards (phase 5)
+    //
+    // The disjoint ranges above hold BY CONSTRUCTION today: office turns live in
+    // `liveTurns`, remote ones in `remoteLiveTurns`, position ids never leave the
+    // `filled` array in `derivedRows`. Correct, but silent if a future edit hands
+    // the wrong collection to an Office-only consumer — the damage (a remote voice
+    // matched onto an office profile, desyncing the Python-owned store) would not
+    // surface until profiles.json was already corrupt.
+    //
+    // So the ranges are also checked at the boundaries that matter. The predicates
+    // are pure and testable; the wrappers `assert` and are compiled out of release
+    // builds, both the check and its message — a shipped app never pays for them,
+    // and never crashes on them either.
+
+    /// Ids in `turns` that are NOT office (pyannote) ids, i.e. ≥ `remoteIDBase`.
+    /// Empty is the invariant every Office-only consumer relies on.
+    nonisolated static func nonOfficeIDs(in turns: [DiarizationService.Turn]) -> [Int] {
+        turns.map(\.id).filter { $0 >= remoteIDBase }
+    }
+
+    /// Ids in `turns` that are NOT remote ids — office ids below `remoteIDBase`
+    /// or position ids at/above `PositionDiarizer.positionIDBase`. The mirror of
+    /// `nonOfficeIDs`: profiles-remote.json must never see an office id either.
+    nonisolated static func nonRemoteIDs(in turns: [DiarizationService.Turn]) -> [Int] {
+        turns.map(\.id).filter {
+            $0 < remoteIDBase || $0 >= PositionDiarizer.positionIDBase
+        }
+    }
+
+    /// Pass-through that asserts (debug only) every turn is office-space.
+    /// `site` names the consumer so a tripped assertion points straight at the
+    /// wrong-collection call rather than at this helper.
+    @discardableResult
+    nonisolated static func officeTurnsOnly(_ turns: [DiarizationService.Turn],
+                                            _ site: @autoclosure () -> String)
+        -> [DiarizationService.Turn] {
+        assert(nonOfficeIDs(in: turns).isEmpty,
+               "\(site()) was given non-office speaker ids \(nonOfficeIDs(in: turns)) — "
+               + "Office-only state must never see remote (≥ \(remoteIDBase)) or position "
+               + "(≥ \(PositionDiarizer.positionIDBase)) ids.")
+        return turns
+    }
+
+    /// The remote twin of `officeTurnsOnly`.
+    @discardableResult
+    nonisolated static func remoteTurnsOnly(_ turns: [DiarizationService.Turn],
+                                            _ site: @autoclosure () -> String)
+        -> [DiarizationService.Turn] {
+        assert(nonRemoteIDs(in: turns).isEmpty,
+               "\(site()) was given non-remote speaker ids \(nonRemoteIDs(in: turns)) — "
+               + "remote state only holds ids in [\(remoteIDBase), "
+               + "\(PositionDiarizer.positionIDBase)).")
+        return turns
+    }
 
     /// RMS below which a remote chunk is treated as silence and never sent to the
     /// sidecar. An idle conferencing channel is otherwise a standing ~14 % GPU

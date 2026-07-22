@@ -43,7 +43,8 @@ struct TranscriptView: View {
                         if !recorder.remoteCaption.text.isEmpty {
                             partialCard(label: AudioRecorder.remoteSpeakerLabel,
                                         labelColor: Theme.remoteRole,
-                                        text: recorder.remoteCaption.text)
+                                        text: recorder.remoteCaption.text,
+                                        accent: Theme.remoteRoleBorder)
                         }
 
                         if recorder.chunkedBusy {
@@ -169,13 +170,14 @@ struct TranscriptView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
-        .modifier(TranscriptCard())
+        .modifier(TranscriptCard(accent: row.isRemote ? Theme.remoteRoleBorder : nil))
     }
 
     /// A provisional (realtime) card: speaker label + italic, not-yet-confirmed
     /// text. Shared by the Office and Remote captions so the two stay visually
-    /// identical apart from the label colour.
-    private func partialCard(label: String, labelColor: Color, text: String) -> some View {
+    /// identical apart from the Remote accent (label colour + card spine).
+    private func partialCard(label: String, labelColor: Color, text: String,
+                             accent: Color? = nil) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label.uppercased())
                 .font(.system(size: 14, weight: .heavy))
@@ -188,7 +190,7 @@ struct TranscriptView: View {
                 .foregroundColor(Theme.bodyTextConfirmed)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .modifier(TranscriptCard())
+        .modifier(TranscriptCard(accent: accent))
     }
 
     private func statusLine(_ text: String) -> some View {
@@ -229,16 +231,32 @@ struct TranscriptView: View {
 }
 
 /// Wraps a single transcript turn (label + time + text) in a bordered card.
+///
+/// `accent` marks the card as Remote: amber border plus an amber spine down the
+/// leading edge. When both streams pick up the same speech the transcript shows
+/// two rows for it, and the speaker label alone is too easy to skim past — the
+/// spine makes "this row came from the call, not the room" readable at a glance
+/// without touching the layout, spacing or text of any row. Office rows pass nil
+/// and render exactly as before.
 private struct TranscriptCard: ViewModifier {
+    var accent: Color? = nil
+
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.rowCardBackground, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(alignment: .leading) {
+                if let accent {
+                    UnevenRoundedRectangle(topLeadingRadius: 12, bottomLeadingRadius: 12)
+                        .fill(accent)
+                        .frame(width: 3)
+                }
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Theme.rowCardBorder, lineWidth: 1)
+                    .strokeBorder(accent ?? Theme.rowCardBorder, lineWidth: 1)
             )
     }
 }

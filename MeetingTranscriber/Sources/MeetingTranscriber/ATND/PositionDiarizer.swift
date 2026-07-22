@@ -17,7 +17,10 @@ import Foundation
 @MainActor
 final class PositionDiarizer: ObservableObject {
     /// Position ids start here; never collide with pyannote profile ids (small ints).
-    static let positionIDBase = 100_000
+    /// `nonisolated` because it is a plain constant that the id-range guards
+    /// (`AudioRecorder.officeTurnsOnly`, `SpeakerProfileStore.isProfileID`) read
+    /// from non-MainActor code — the class itself stays MainActor-isolated.
+    nonisolated static let positionIDBase = 100_000
 
     enum Mode { case firstCome, enrollment }
 

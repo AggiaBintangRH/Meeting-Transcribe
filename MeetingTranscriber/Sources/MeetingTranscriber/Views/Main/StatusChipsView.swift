@@ -18,6 +18,7 @@ struct StatusChipsView: View {
             }
             vadChip
             atndChip
+            remoteChip
             chip {
                 Circle()
                     .fill(isRecording ? Theme.red : Theme.teal)
@@ -58,6 +59,35 @@ struct StatusChipsView: View {
         case .listening:            return "Listening for ATND1061 beam notices."
         case .waitingForControl:    return "Waiting for the TCP connection — the array only sends beam data once connected. Connect in Settings → ATND."
         case .off:                  return "ATND1061 is off — enable it in Settings → ATND."
+        }
+    }
+
+    /// How many speakers the REMOTE (conferencing) stream has produced — its own
+    /// identity space, so the number is unrelated to the room's speakers.
+    ///
+    /// Present only for a dual-stream session: `remoteStreamActive` is false for
+    /// the entire life of a single-stream app, so this `if` renders nothing and
+    /// the chip row is byte-for-byte the pre-dual-stream one. Amber, because
+    /// amber is the Remote capture role everywhere in the app.
+    @ViewBuilder
+    private var remoteChip: some View {
+        if recorder.remoteStreamActive {
+            chip {
+                Image(systemName: "phone.and.waveform")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(Theme.remoteRole)
+                label("REMOTE", dim: true)
+                // "–" until the first remote diarization result lands, matching
+                // how the ATND chip shows its own not-yet-known state.
+                if let count = recorder.remoteSpeakerCount {
+                    label("\(count)", weight: .heavy, color: Theme.remoteRole)
+                } else {
+                    label("–", dim: true)
+                }
+            }
+            .frame(minWidth: 86, alignment: .leading)
+            .help("Speakers identified on the Remote (conferencing) stream. "
+                  + "Remote speakers are a separate identity space from the room's.")
         }
     }
 
