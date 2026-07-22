@@ -201,17 +201,24 @@ class ProfileStore:
                 used_profiles.add(pid)
                 log(f"matched {label} -> profile {pid} (sim={sim:.2f})")
 
-        # Best score each voice reached against ANY existing profile, kept so a
-        # failed match can say how close it came. Without this a "new profile"
-        # line is unreadable: 0.49 (the threshold is a hair too high) and 0.12
-        # (genuinely a different voice) look identical, and they call for
-        # opposite fixes. A real case sat behind this — the same speaker matched
-        # at 0.89 on a live chunk and then minted a second profile on the final
-        # pass, and the log could not say why.
-        best_sim = {}
-        for sim, label, _pid in pairs:
-            if sim > best_sim.get(label, -2.0):
-                best_sim[label] = sim
+        # Why each unmatched voice lost, so a "new profile" line can be read.
+        # 0.49 (the threshold is a hair too high) and 0.12 (genuinely a different
+        # voice) call for opposite fixes and used to look identical — a real bug
+        # hid behind exactly that ambiguity.
+        #
+        # There are TWO ways to lose, and they must not be conflated: scoring
+        # below the threshold against everything, or scoring ABOVE it on a
+        # profile another voice in this same run already claimed. The one-to-one
+        # rule above makes the second case normal, not an anomaly — but reporting
+        # it as "best sim=0.56 < 0.5" is a self-contradiction that sends the
+        # reader hunting for a threshold bug that isn't there.
+        best_free = {}   # label -> (sim, pid) over profiles still unclaimed
+        best_any = {}    # label -> (sim, pid) over every profile
+        for sim, label, pid in pairs:
+            if sim > best_any.get(label, (-2.0, None))[0]:
+                best_any[label] = (sim, pid)
+            if pid not in used_profiles and sim > best_free.get(label, (-2.0, None))[0]:
+                best_free[label] = (sim, pid)
 
         # Any voice with no confident, still-free match becomes a new profile.
         for label, emb in embeddings.items():
@@ -219,11 +226,22 @@ class ProfileStore:
                 new_id = self._create(emb)
                 mapping[label] = new_id
                 used_profiles.add(new_id)
-                if label in best_sim:
-                    log(f"new profile {new_id} for {label} "
-                        f"(best sim={best_sim[label]:.2f} < {SIM_THRESHOLD})")
-                else:
+                if label not in best_any:
                     log(f"new profile {new_id} for {label} (no existing profiles)")
+                    continue
+                any_sim, any_pid = best_any[label]
+                free = best_free.get(label)
+                if any_sim >= SIM_THRESHOLD:
+                    # Lost to the one-to-one rule, not to the threshold.
+                    free_note = (f"best free was profile {free[1]} at {free[0]:.2f}"
+                                 if free else "no free profile left")
+                    log(f"new profile {new_id} for {label} — profile {any_pid} "
+                        f"fit at {any_sim:.2f} but was taken by another voice "
+                        f"in this run; {free_note}")
+                else:
+                    log(f"new profile {new_id} for {label} "
+                        f"(best sim={any_sim:.2f} on profile {any_pid}, "
+                        f"below {SIM_THRESHOLD})")
 
         # Now fold each voice into its profile's running-mean centroid.
         for label, pid in mapping.items():
