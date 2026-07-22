@@ -224,7 +224,8 @@ final class AudioRecorder: ObservableObject {
     // Office-only, and remote ids (>= remoteIDBase) reaching any of them is the
     // corruption this split exists to prevent.
 
-    /// The Remote WAV for this session, diarized as a whole at stop. Held
+    /// The Remote WAV for this session, diarized as a whole at stop when
+    /// `diarization.continueOnStop` is OFF (tail mode needs no file). Held
     /// separately from `lastRecordingURL`, which every Office-only consumer
     /// (final pass, overlap repair, DiCoW) reads and must keep reading.
     private var remoteRecordingURL: URL?
@@ -245,6 +246,11 @@ final class AudioRecorder: ObservableObject {
     /// session's gate is already complete before it is ever consulted.
     private var remoteFinalDiarDone = true
     private var remoteFinalDiarWatchdog: Task<Void, Never>?
+    /// Window start of the remote TAIL chunk the stop gate is waiting on, or nil
+    /// when the remote stop pass is not a tail (full pass / no pass). The remote
+    /// twin of `awaitingTailWindowStart`; kept apart because both streams use the
+    /// SAME window starts and one would otherwise settle the other's gate.
+    private var awaitingRemoteTailWindowStart: Double? = nil
 
     /// Publishes per-model progress for the loading overlay.
     let modelLoader = ModelLoader()
@@ -551,6 +557,7 @@ final class AudioRecorder: ObservableObject {
         remoteFinalDiarDone = true   // flipped to false in stop() iff a pass is dispatched
         remoteFinalDiarWatchdog?.cancel()
         remoteFinalDiarWatchdog = nil
+        awaitingRemoteTailWindowStart = nil
         configureDiarization()
         configurePositionDiarization()
         // Real-time speaker split: when the beam settles on a different talker,
@@ -971,6 +978,14 @@ final class AudioRecorder: ObservableObject {
                     for turn in absolute { self.remoteSessionSpeakerIDs.insert(turn.id) }
                     self.remoteSpeakerCount = self.remoteSessionSpeakerIDs.count
                     self.rebuildDisplayRows()
+                    // Remote tail-mode stop: THIS chunk result is the remote tail —
+                    // settle the remote leg of the gate. Matched on the remote
+                    // window start only, so an office chunk sharing the same window
+                    // can never settle it (and vice versa).
+                    if let expected = self.awaitingRemoteTailWindowStart,
+                       abs(windowStart - expected) < 0.001 {
+                        self.completeRemoteDiarization()
+                    }
                     return
                 }
                 // Clean up the temp chunk file
@@ -1044,18 +1059,35 @@ final class AudioRecorder: ObservableObject {
         guard remoteStreamActive, let service = modelLoader.diarization else { return }
         let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
         guard liveOn else {
-            // Same reasoning as the office path: the stop-time pass is a FULL
-            // re-diarization of the remote WAV, so pending live audio is not
-            // needed and must not accumulate for the whole meeting.
-            remoteDiarAudio = []
+            // Exactly `diarizeLiveChunk`'s rule, and for the same reason: with live
+            // labels off but "continue from live labels (tail only)" on, the whole
+            // recording becomes the single tail diarized at stop, so the accumulated
+            // audio must be KEPT. (Before the 2026-07-22 tail change this always
+            // cleared, because the remote stop pass was always a full re-diarization
+            // of the remote WAV — see `startRemoteDiarization`.)
+            let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? true
+            if !(continueOnStop && !liveOn) { remoteDiarAudio = [] }
             return
         }
         let samples = remoteDiarAudio
         remoteDiarAudio = []
         guard samples.count > 16_000 else { return }   // skip chunks under 1s
+        dispatchRemoteDiarChunk(samples: samples, windowStart: windowStart, service: service)
+    }
+
+    /// Shared: write a chunk of 16 kHz REMOTE samples to a temp WAV off-thread and
+    /// hand it to the sidecar as a `remote` job. The remote twin of
+    /// `dispatchDiarChunk` — live calls pass no failure handler (silent, as
+    /// before); the stop-time tail passes one so the remote gate still settles.
+    private func dispatchRemoteDiarChunk(samples: [Float], windowStart: Double,
+                                         service: DiarizationService,
+                                         onDispatchFailure: (() -> Void)? = nil) {
         let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
         Task.detached(priority: .utility) { [weak self] in
-            guard let url = Self.writeTempWAV(samples: samples, prefix: "remote-diar") else { return }
+            guard let url = Self.writeTempWAV(samples: samples, prefix: "remote-diar") else {
+                await MainActor.run { onDispatchFailure?() }
+                return
+            }
             await MainActor.run { [weak self] in
                 self?.remoteChunkFileByWindow[windowStart] = url
             }
@@ -1064,38 +1096,139 @@ final class AudioRecorder: ObservableObject {
         }
     }
 
-    /// At stop: one batch pass over the whole Remote WAV — the remote twin of
-    /// `startDiarization`. Always the full-recording form (never the office
-    /// "continue from live labels" tail mode): the remote file is already a
-    /// clean, separate waveform, so global clustering is strictly better and
-    /// there is no live-numbering continuity to protect.
+    /// What the remote stop pass is for this session. Pure, so the branch itself
+    /// is unit-testable without an engine, a sidecar or an Aggregate Device.
+    enum RemoteStopMode: Hashable {
+        case none   // no remote pass at all — the gate is never taken
+        case tail   // diarize only the audio since the last remote live boundary
+        case full   // re-diarize the whole Remote WAV
+    }
+
+    /// The stop-pass decision. Remote now honours `diarization.continueOnStop`
+    /// exactly as Office does — see `startRemoteDiarization` for WHY this reverses
+    /// the phase-4 rule.
+    nonisolated static func remoteStopMode(finalPass: Bool,
+                                           continueOnStop: Bool,
+                                           remoteStreamActive: Bool,
+                                           hasDiarizationService: Bool,
+                                           hasRemoteRecording: Bool,
+                                           tailSamples: Int) -> RemoteStopMode {
+        guard finalPass, remoteStreamActive, hasDiarizationService else { return .none }
+        if continueOnStop {
+            // < 1 s of tail is not worth a job — the same early-out (and the same
+            // 16 000-sample threshold) as `diarizeTailChunk`. Returning `.none`
+            // rather than dispatching keeps the stop gate untaken, so there is
+            // nothing left to settle.
+            return tailSamples > 16_000 ? .tail : .none
+        }
+        return hasRemoteRecording ? .full : .none
+    }
+
+    /// At stop: the remote twin of the office stop branch, and it now honours the
+    /// SAME `diarization.continueOnStop` setting.
+    ///
+    /// Phase 4 made this pass ALWAYS a full re-diarization of the Remote WAV, on
+    /// the reasoning that a clean separate waveform clusters better globally. The
+    /// owner overruled that on 2026-07-22 for a stronger reason: LABEL STABILITY.
+    /// A full pass re-embeds voices the live passes already enrolled, and one real
+    /// session produced a second profile (R2) for a voice that had matched profile
+    /// 1 at sim=0.89 four seconds earlier — one person shown as two speakers, with
+    /// the transcript rendering the final pass's mapping. Why that embedding
+    /// collapsed below SIM_THRESHOLD=0.5 against a centroid it had just matched at
+    /// 0.89 is UNEXPLAINED — nobody has accounted for it, so do not assume it was
+    /// understood. Tail mode sidesteps it structurally: the tail never re-embeds
+    /// already-enrolled voices, so it cannot mint a duplicate profile for them.
+    ///
     /// Returns whether a pass was actually dispatched, so `stop()` can decide
-    /// whether the overlay gets a remote-diarization row.
+    /// whether the overlay gets a remote-diarization row. This MUST stay decidable
+    /// synchronously — `stop()` calls it before `buildStopSteps`.
     @discardableResult
     private func startRemoteDiarization() -> Bool {
-        let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
-        guard finalOn, remoteStreamActive,
-              let service = modelLoader.diarization,
-              let recording = remoteRecordingURL else { return false }
+        let d = UserDefaults.standard
+        let finalOn = d.object(forKey: "diarization.finalPass") as? Bool ?? true
+        let continueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? true
+        let mode = Self.remoteStopMode(finalPass: finalOn,
+                                       continueOnStop: continueOnStop,
+                                       remoteStreamActive: remoteStreamActive,
+                                       hasDiarizationService: modelLoader.diarization != nil,
+                                       hasRemoteRecording: remoteRecordingURL != nil,
+                                       tailSamples: remoteDiarAudio.count)
+        guard let service = modelLoader.diarization, mode != .none else {
+            // Nothing dispatched → the gate was never taken (`remoteFinalDiarDone`
+            // is still true) and no overlay row is added. Drop any pending tail
+            // audio so it cannot outlive the session.
+            remoteDiarAudio = []
+            return false
+        }
         remoteFinalDiarDone = false
+        switch mode {
+        case .tail:  startRemoteTailDiarization(service: service)
+        case .full:  startRemoteFullDiarization(service: service)
+        case .none:  break   // unreachable, guarded above
+        }
+        return true
+    }
+
+    /// `continueOnStop == true`: diarize only the remote audio accumulated since
+    /// the last remote live boundary, as a `chunk` job on the remote stream, so
+    /// every label the live passes assigned survives Stop untouched. Mirrors
+    /// `diarizeTailChunk`, including its window-start reasoning.
+    private func startRemoteTailDiarization(service: DiarizationService) {
+        let samples = remoteDiarAudio
+        remoteDiarAudio = []
+        // Same rule as the office tail: with live labels on, the pending audio
+        // began at the last live diarization boundary — which is the SAME
+        // `lastDiarBoundary`, because remote rides the office diarization cadence
+        // (see `diarizeRemoteLiveChunk`'s call site). With live off (+
+        // continueOnStop) nothing was ever cleared, so this is the whole recording
+        // and begins at 0.
+        let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
+        let windowStart = liveOn ? lastDiarBoundary : 0
+        awaitingRemoteTailWindowStart = windowStart
+        // The tail is a chunk job, not a full pass, so it is bounded by the office
+        // tail's limit rather than the recording length — but it still queues
+        // BEHIND the office stop job on one stdin, hence the doubling.
+        startRemoteDiarWatchdog(seconds: 240, message: "Remote tail diarization timed out")
+        dispatchRemoteDiarChunk(samples: samples, windowStart: windowStart, service: service,
+                                onDispatchFailure: { [weak self] in
+                                    self?.dualStreamLog("could not write remote tail audio for diarization")
+                                    self?.completeRemoteDiarization(
+                                        error: "Could not write remote tail audio for diarization")
+                                })
+    }
+
+    /// `continueOnStop == false`: one batch pass over the whole Remote WAV — the
+    /// remote twin of `startDiarization`, and phase 4's original behaviour.
+    private func startRemoteFullDiarization(service: DiarizationService) {
+        guard let recording = remoteRecordingURL else {
+            // `remoteStopMode` already proved this non-nil; belt-and-braces so the
+            // gate can never be left open by a future edit.
+            completeRemoteDiarization(error: "Remote recording is missing")
+            return
+        }
         let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
         let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers,
                              exclusive: !detectOverlap, stream: .remote)
-        // Its own watchdog, on the same scale rule as the office final pass: the
-        // remote job is queued BEHIND the office one on a single stdin, so it can
-        // legitimately wait out the office pass before it even starts.
-        let limit = max(180, recordingElapsed) * 2
+        // Same scale rule as the office final pass: the remote job is queued BEHIND
+        // the office one on a single stdin, so it can legitimately wait out the
+        // office pass before it even starts.
+        startRemoteDiarWatchdog(seconds: max(180, recordingElapsed) * 2,
+                                message: "Remote diarization timed out")
+    }
+
+    /// One watchdog for both remote stop modes — whichever path stalls, the gate
+    /// still settles and the overlay still drops.
+    private func startRemoteDiarWatchdog(seconds: Double, message: String) {
         remoteFinalDiarWatchdog?.cancel()
         remoteFinalDiarWatchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(limit))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, !self.remoteFinalDiarDone else { return }
-                self.completeRemoteDiarization(error: "Remote diarization timed out")
+                self.completeRemoteDiarization(error: message)
             }
         }
-        return true
     }
 
     /// The remote final result replaces the running remote set, exactly as
@@ -1112,6 +1245,7 @@ final class AudioRecorder: ObservableObject {
     private func completeRemoteDiarization(error: String? = nil) {
         remoteFinalDiarWatchdog?.cancel()
         remoteFinalDiarWatchdog = nil
+        awaitingRemoteTailWindowStart = nil
         guard !remoteFinalDiarDone else { return }
         remoteFinalDiarDone = true
         setStopStep("remote-diarize", error.map { .failed($0) } ?? .done)
