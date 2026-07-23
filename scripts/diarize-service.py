@@ -352,8 +352,20 @@ def main() -> None:
                 mapping[label] = None  # too little speech to identify reliably
                 continue
             speech = torch.cat(pieces, dim=1)
-            embedding = embedder(speech.unsqueeze(0))  # (1, ch, samples) → (1, dim)
-            embeddings[label] = np.asarray(embedding).reshape(-1)
+            embedding = np.asarray(embedder(speech.unsqueeze(0))).reshape(-1)
+            # Reject a degenerate embedding rather than let it mint a profile.
+            # MIN_EMBED_SEC gates on the turns' CLAIMED duration, but the vector
+            # comes from waveform[:, a:b] slices; if a turn's timestamps run past
+            # the actual audio the slice is empty, the embedder returns NaN (numpy
+            # logs "Mean of empty slice"), and a NaN vector scores ~0 against
+            # everything, so it always looks like a brand-new speaker. That was
+            # the "best sim=-0.01" spurious profile in the log.
+            norm = float(np.linalg.norm(embedding))
+            if not np.all(np.isfinite(embedding)) or norm < 1e-6:
+                log(f"skip {label}: degenerate embedding (norm={norm:.3g})")
+                mapping[label] = None
+                continue
+            embeddings[label] = embedding
 
         # Assign all voices at once so distinct speakers get distinct profiles.
         if embeddings:
