@@ -157,6 +157,16 @@ def main() -> None:
         # This is Whisper-only; the mlx-audio models never hallucinate this way.
         WHISPER_NO_SPEECH_MAX = 0.5
         WHISPER_COMPRESSION_MAX = 2.4   # Whisper's own repetition-loop threshold
+        # A segment longer than this holding fewer than DENSITY words/second is a
+        # hallucination regardless of what Whisper's own confidence says. Real
+        # speech runs ~2-3 words/s; the classic failure is a 30 s stretch of
+        # silence transcribed as the two words "Thank you." (0.07 words/s). The
+        # no_speech gate above misses it when Whisper is confident (seen at
+        # no_speech 0.88 on a 30 s chunk), so density is the backstop that does
+        # not depend on Whisper's confidence at all. The 4 s floor protects a
+        # genuine short reply ("Okay.") from being judged on density.
+        WHISPER_MIN_DENSITY_DURATION = 4.0
+        WHISPER_MIN_WORDS_PER_SEC = 0.5
 
         def transcribe_path(path: str) -> str:
             # Keep Whisper's default decoding — condition_on_previous_text stays
@@ -172,11 +182,18 @@ def main() -> None:
                 ns = s.get("no_speech_prob", 0.0)
                 cr = s.get("compression_ratio", 0.0)
                 text = (s.get("text") or "").strip()
+                dur = float(s.get("end", 0.0)) - float(s.get("start", 0.0))
+                words = len(text.split())
                 if ns > WHISPER_NO_SPEECH_MAX:
                     log(f"drop hallucination (no_speech={ns:.2f}): {text!r}")
                     continue
                 if cr > WHISPER_COMPRESSION_MAX:
                     log(f"drop repetition (compression={cr:.2f}): {text!r}")
+                    continue
+                if (dur >= WHISPER_MIN_DENSITY_DURATION
+                        and words < dur * WHISPER_MIN_WORDS_PER_SEC):
+                    log(f"drop hallucination ({words} words in {dur:.0f}s = "
+                        f"{words / dur:.2f}/s): {text!r}")
                     continue
                 kept.append(text)
             return " ".join(kept).strip()
