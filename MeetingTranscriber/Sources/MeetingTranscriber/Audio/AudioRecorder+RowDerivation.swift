@@ -21,9 +21,53 @@ extension AudioRecorder {
         // they only ever meet here, at the final sort. With no remote segments
         // the merge returns `rows` untouched — the single-stream path is exactly
         // what it was.
-        displayRows = Self.mergeRowsByStartTime(
+        let merged = Self.mergeRowsByStartTime(
             office: rows,
             remote: Self.remoteRows(remoteSegments, turns: remoteLiveTurns))
+        displayRows = Self.coalesceAdjacentSameSpeaker(merged)
+    }
+
+    /// Join consecutive rows that belong to the same speaker into one.
+    ///
+    /// A chunk boundary can fall mid-sentence, and each chunk becomes its own
+    /// segment, so "…just one minute? You" and "know," end up as two rows even
+    /// though one person said them without pausing. assignSentences already
+    /// merges within a chunk; this closes the seam BETWEEN chunks.
+    ///
+    /// Two rows merge only when they are adjacent in the final (time-sorted)
+    /// list, share a non-nil `speakerID`, agree on `isRemote`, and are both
+    /// confirmed. Adjacent in the sorted list with the same speaker means nobody
+    /// spoke between them — so it is genuinely one turn. The guards matter:
+    /// - non-nil id: two UNKNOWN rows are not known to be the same person;
+    /// - same isRemote: office and remote are separate label spaces;
+    /// - a different speaker (or a remote row) sitting between two same-speaker
+    ///   rows keeps them apart, because it breaks adjacency;
+    /// - unconfirmed rows are provisional and left alone.
+    /// Text is joined with a space, the span widens to cover both, and the
+    /// overlap flag is OR-ed. This is display-only — `derivedRows` (what overlap
+    /// repair reads) is untouched, and `anchorText` joins per-speaker text with
+    /// a space anyway, so its result is byte-identical before and after.
+    nonisolated static func coalesceAdjacentSameSpeaker(
+        _ rows: [SpeakerUtterance]) -> [SpeakerUtterance] {
+        var out: [SpeakerUtterance] = []
+        out.reserveCapacity(rows.count)
+        for row in rows {
+            if var last = out.last,
+               let id = last.speakerID, row.speakerID == id,
+               last.isRemote == row.isRemote,
+               last.confirmed, row.confirmed {
+                last.text = [last.text, row.text]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                if let e = row.end { last.end = max(last.end ?? e, e) }
+                last.overlapped = last.overlapped || row.overlapped
+                out[out.count - 1] = last
+            } else {
+                out.append(row)
+            }
+        }
+        return out
     }
 
     /// The display rows one raw segment expands into — the single source of truth
