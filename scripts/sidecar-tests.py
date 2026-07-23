@@ -75,9 +75,7 @@ DEFAULT_CHUNKED_MODEL = "mlx-community/Qwen3-ASR-1.7B-bf16"
 DEFAULT_ALIGN_MODEL = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
 
 # Mirrors of the sidecars' own constants. Deliberately RE-DECLARED rather than
-# imported: if someone changes PARTIAL_WINDOW in the sidecar the check should
 # force a conscious decision here, not silently follow along.
-PARTIAL_WINDOW_SEC = 10.0
 REMOTE_ID_BASE = 10_000
 
 
@@ -378,7 +376,7 @@ def load_sidecar_module(filename: str, mod_name: str):
 NEMOTRON_CHECKS = [
     "nemotron/single-stream-bytes",
     "nemotron/lane-isolation",
-    "nemotron/partial-window-cap",
+    "nemotron/partial-full-buffer-keeps-up",
     "nemotron/silence-gate",
 ]
 
@@ -510,15 +508,18 @@ def run_nemotron(rep: Report, ctx):
                                    f"remote {got_r[:60]!r} vs baseline {base_b[:60]!r}")
                 sc.drain()
 
-        # -- check 3: a partial transcribes at most PARTIAL_WINDOW no matter how
-        #    long the buffer is. Without the cap, cost grew quadratically across
-        #    an utterance (measured 1.5 s per partial at a 20 s buffer, against a
-        #    1.5 s cadence) and the realtime loop fell behind realtime.
-        #    Observed through the sidecar's own `buf=.. sent=..` stderr line.
-        if ctx.wants("nemotron/partial-window-cap"):
-            cid = "nemotron/partial-window-cap"
+        # -- check 3: a partial transcribes the WHOLE buffer (so the live caption
+        #    shows the full utterance, not just its tail), and the realtime loop
+        #    stays caught up regardless, because the cadence stretches as the
+        #    buffer grows. An earlier fixed 10 s window kept cost flat but froze
+        #    the caption mid-sentence; a naive full-buffer partial at a fixed 1.5 s
+        #    cadence fell behind (`wait` drifted to seconds). This asserts both:
+        #    the buffer is fully transcribed AND the loop never falls far behind.
+        #    Observed through the sidecar's `buf=.. took=.. wait=..` stderr line.
+        if ctx.wants("nemotron/partial-full-buffer-keeps-up"):
+            cid = "nemotron/partial-full-buffer-keeps-up"
             mark = len(sc.stderr_lines)
-            audio = tone(16.0, base_hz=200.0, seed=3)
+            audio = tone(24.0, base_hz=200.0, seed=3)
             for i in range(0, audio.size, SR // 2):
                 sc.write(frame_office(audio[i:i + SR // 2]))
             sc.write(FLUSH_OFFICE)
@@ -527,27 +528,36 @@ def run_nemotron(rep: Report, ctx):
 
             import re
             pattern = re.compile(
-                r"(office|remote) (partial|final) buf=([\d.]+)s sent=([\d.]+)s")
-            partials = []
+                r"(office|remote) (partial|final) buf=([\d.]+)s took=[\d.]+s "
+                r"\([\d.]+x\) wait=([\d.]+)s")
+            partials = []   # (buf_sec, wait_sec)
+            bufs = []
             for line in sc.stderr_lines[mark:]:
                 m = pattern.search(line)
-                if m and m.group(2) == "partial":
+                if not m:
+                    continue
+                if m.group(2) == "partial":
                     partials.append((float(m.group(3)), float(m.group(4))))
-            over = [p for p in partials if p[1] > PARTIAL_WINDOW_SEC + 0.05]
-            long_buf = [p for p in partials if p[0] > PARTIAL_WINDOW_SEC + 0.5]
+                    bufs.append(float(m.group(3)))
             if not partials:
-                rep.fail(cid, "no partials were logged at all — cannot judge the cap")
-            elif not long_buf:
-                rep.fail(cid, f"buffer never grew past {PARTIAL_WINDOW_SEC}s "
-                              f"(max {max(p[0] for p in partials):.1f}s), so the cap "
-                              "was never exercised")
+                rep.fail(cid, "no partials were logged at all")
+            elif max(bufs) < 15.0:
+                rep.fail(cid, f"buffer never grew past 15 s (max {max(bufs):.1f}s) — "
+                              "long-utterance behaviour was not exercised")
             else:
-                rep.expect(cid, not over,
-                           f"{len(partials)} partials, buffer reached "
-                           f"{max(p[0] for p in partials):.1f}s, sent never exceeded "
-                           f"{max(p[1] for p in partials):.1f}s",
-                           f"{len(over)} partial(s) transcribed more than "
-                           f"{PARTIAL_WINDOW_SEC}s: {over[:3]}")
+                # Caught up: the loop never sat idle waiting a long time between
+                # generate() calls (the drift bug pushed wait to seconds).
+                max_wait = max(w for _, w in partials)
+                # Cadence stretched: the buffer-size step between consecutive
+                # partials near the end is larger than near the start.
+                steps = [bufs[i + 1] - bufs[i] for i in range(len(bufs) - 1)]
+                stretched = len(steps) >= 2 and steps[-1] > steps[0] + 0.4
+                rep.expect(cid, max_wait < 1.5 and stretched,
+                           f"{len(partials)} partials, buffer reached {max(bufs):.1f}s, "
+                           f"cadence step {steps[0]:.1f}s→{steps[-1]:.1f}s, "
+                           f"max wait {max_wait:.2f}s",
+                           f"max_wait={max_wait:.2f}s (want <1.5), "
+                           f"stretched={stretched} (steps {steps})")
             sc.drain()
 
         # -- check 4: a near-silent lane spends no compute. The owner's log shows

@@ -91,24 +91,20 @@ SR = 16_000
 MAX_BUFFER = 60 * SR          # cap utterance buffer at 60 s
 PARTIAL_EVERY = int(1.5 * SR)  # emit a partial every 1.5 s of new audio
 
-# How much trailing audio a PARTIAL transcribes. Finals still use the whole
-# buffer, so the committed text is unaffected.
+# A partial transcribes the WHOLE buffer, so the live caption shows the full
+# growing utterance — not just its tail. An earlier version capped the partial
+# to the last 10 s to bound cost; that made the caption freeze mid-sentence and
+# drop older words, which is worse than the cost it saved. (This model runs at
+# ~13x realtime the way the sidecar uses it, so a full re-transcribe of a long
+# buffer is not free — a 30 s buffer takes ~2.3 s.)
 #
-# Measured on the M4, not assumed: this model runs at ~13x realtime the way
-# this sidecar uses it (a full re-transcribe per call), NOT the 112x quoted
-# for its streaming chunk mode. Without a cap, a partial re-transcribes the
-# ENTIRE buffer every 1.5 s, so cost grows quadratically across an utterance:
-# a 20 s buffer already takes ~1.5 s per lane, which eats the whole 1.5 s
-# cadence with ONE lane and blows it three times over with two. Observed
-# directly — partials that started 0.5 s apart drifted to 3 s apart for 1.5 s
-# of audio, i.e. slower than realtime.
-#
-# Capping the partial window makes that cost CONSTANT regardless of how long
-# someone talks: ~0.8 s per lane at 10 s. The trade is that a live caption
-# shows only the recent tail of a long sentence rather than the whole of it —
-# acceptable, because partials are transient previews that the chunked pass
-# overwrites anyway, and losing the live text entirely to lag is worse.
-PARTIAL_WINDOW = 10 * SR
+# Cost is bounded instead by SLOWING the cadence as the buffer grows: emit a
+# partial once per `max(PARTIAL_EVERY, buffer * PARTIAL_DUTY)` of new audio. At
+# a short buffer that is the responsive 1.5 s floor; at 30 s it stretches to
+# ~4.5 s, keeping per-second compute roughly constant (~1/(13·DUTY) per lane)
+# regardless of utterance length, while the caption still updates and still
+# shows the whole sentence. Finals always use the whole buffer, unchanged.
+PARTIAL_DUTY = 0.15
 
 # A lane whose trailing window is this quiet emits no partial at all. Same
 # threshold as the chunked path's remote silence gate.
@@ -159,8 +155,10 @@ class Lane:
         self.samples_since_partial += samples.size
 
     def wants_partial(self) -> bool:
-        return (self.samples_since_partial >= PARTIAL_EVERY
-                and self.buffer.size > SR // 2)
+        # Cadence stretches with buffer length so a full re-transcribe of a long
+        # utterance does not fall behind realtime (see PARTIAL_DUTY).
+        needed = max(PARTIAL_EVERY, int(self.buffer.size * PARTIAL_DUTY))
+        return self.samples_since_partial >= needed and self.buffer.size > SR // 2
 
 
 def main() -> None:
@@ -230,17 +228,15 @@ def main() -> None:
     last_generate_end = [_time.time()]
 
     def timed_transcribe(lane: "Lane", kind: str) -> str:
-        # Partials see only the trailing window (bounded cost); finals see the
-        # whole buffer, so the text that actually gets committed is unchanged.
-        audio = lane.buffer if kind == "final" else lane.buffer[-PARTIAL_WINDOW:]
-        secs = audio.size / SR
+        # Both partial and final transcribe the whole buffer, so the live caption
+        # shows the full utterance; cadence (wants_partial) is what bounds cost.
+        secs = lane.buffer.size / SR
         started = _time.time()
         wait = started - last_generate_end[0]
-        text = transcribe(audio).strip()
+        text = transcribe(lane.buffer).strip()
         took = _time.time() - started
         last_generate_end[0] = _time.time()
-        log(f"{lane.stream or 'office'} {kind} buf={lane.buffer.size / SR:.1f}s "
-            f"sent={secs:.1f}s took={took:.3f}s "
+        log(f"{lane.stream or 'office'} {kind} buf={secs:.1f}s took={took:.3f}s "
             f"({secs / max(took, 1e-6):.0f}x) wait={wait:.3f}s")
         return text
 
@@ -258,9 +254,11 @@ def main() -> None:
         lane.samples_since_partial = 0
         # Don't spend a generate() on a silent lane. The counter is reset
         # above either way, so a quiet lane retries on the next cadence tick
-        # rather than firing the moment it is asked again.
-        window = lane.buffer[-PARTIAL_WINDOW:]
-        rms = float(np.sqrt(np.mean(window * window))) if window.size else 0.0
+        # rather than firing the moment it is asked again. Silence is judged on
+        # the recent tail (last ~4 s), not the whole buffer, so a lane that has
+        # gone quiet stops emitting even while its buffer still holds old speech.
+        tail = lane.buffer[-4 * SR:]
+        rms = float(np.sqrt(np.mean(tail * tail))) if tail.size else 0.0
         if rms < PARTIAL_SILENCE_RMS:
             return
         emit("partial", timed_transcribe(lane, "partial"), lane.stream)
