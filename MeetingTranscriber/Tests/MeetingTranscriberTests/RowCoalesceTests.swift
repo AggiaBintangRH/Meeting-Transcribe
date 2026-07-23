@@ -85,3 +85,66 @@ final class TailAttributionTests: XCTestCase {
         XCTAssertEqual(nearest?.id, 1, "1 second away beats 8 seconds away")
     }
 }
+
+/// `absorbShortSpeakerIslands` — a sub-second wrong-speaker word between two
+/// same-speaker rows is relabelled; genuine turns are left alone.
+final class SpeakerIslandTests: XCTestCase {
+    private func row(_ speaker: Int?, _ text: String, _ s: Double, _ e: Double,
+                     remote: Bool = false, confirmed: Bool = true) -> AudioRecorder.SpeakerUtterance {
+        AudioRecorder.SpeakerUtterance(
+            id: "\(text)-\(s)", speaker: speaker.map { "S\($0)" }, speakerID: speaker,
+            start: s, end: e, text: text, confirmed: confirmed, isRemote: remote)
+    }
+    private func absorbThenCoalesce(_ r: [AudioRecorder.SpeakerUtterance]) -> [AudioRecorder.SpeakerUtterance] {
+        AudioRecorder.coalesceAdjacentSameSpeaker(AudioRecorder.absorbShortSpeakerIslands(r))
+    }
+
+    func testTheToBugFromTheLog() {
+        // Speaker 2 "...speech" / Speaker 1 "to" (0.2s) / Speaker 2 "deliver..."
+        let out = absorbThenCoalesce([
+            row(2, "If we have a one minute speech", 88, 94.0),
+            row(1, "to", 94.0, 94.2),
+            row(2, "deliver, the main challenge", 94.2, 100),
+        ])
+        XCTAssertEqual(out.count, 1, "the flicker word rejoins Speaker 2's sentence")
+        XCTAssertEqual(out[0].speakerID, 2)
+        XCTAssertEqual(out[0].text, "If we have a one minute speech to deliver, the main challenge")
+    }
+
+    func testLongIslandIsNotAbsorbed() {
+        // A 2s Speaker-1 turn between Speaker-2 rows is a real interjection.
+        let out = AudioRecorder.absorbShortSpeakerIslands([
+            row(2, "so anyway", 0, 5),
+            row(1, "no I disagree completely", 5, 7),
+            row(2, "well okay", 7, 10),
+        ])
+        XCTAssertEqual(out[1].speakerID, 1, "2s is too long to be a flicker")
+    }
+
+    func testDifferentFlankingSpeakersNotAbsorbed() {
+        let out = AudioRecorder.absorbShortSpeakerIslands([
+            row(1, "hello", 0, 3),
+            row(3, "hi", 3, 3.2),
+            row(2, "hey", 3.2, 6),
+        ])
+        XCTAssertEqual(out[1].speakerID, 3, "flanks differ (1 vs 2) — not an island")
+    }
+
+    func testRemoteIslandNotMergedIntoOffice() {
+        let out = AudioRecorder.absorbShortSpeakerIslands([
+            row(2, "room speech", 0, 5),
+            row(10001, "to", 5, 5.2, remote: true),
+            row(2, "continues", 5.2, 8),
+        ])
+        XCTAssertEqual(out[1].speakerID, 10001, "a remote word is not an office flicker")
+    }
+
+    func testUnknownFlanksDoNotAbsorb() {
+        let out = AudioRecorder.absorbShortSpeakerIslands([
+            row(nil, "one", 0, 3),
+            row(1, "two", 3, 3.2),
+            row(nil, "three", 3.2, 6),
+        ])
+        XCTAssertEqual(out[1].speakerID, 1, "nil-id flanks are not a known same speaker")
+    }
+}

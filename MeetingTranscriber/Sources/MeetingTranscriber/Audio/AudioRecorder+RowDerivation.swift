@@ -24,7 +24,48 @@ extension AudioRecorder {
         let merged = Self.mergeRowsByStartTime(
             office: rows,
             remote: Self.remoteRows(remoteSegments, turns: remoteLiveTurns))
-        displayRows = Self.coalesceAdjacentSameSpeaker(merged)
+        // Relabel sub-second speaker "islands" first (an ATND beam flicker that
+        // caught one word), THEN coalesce — because relabeling restores the
+        // adjacency that lets the surrounding rows merge.
+        displayRows = Self.coalesceAdjacentSameSpeaker(
+            Self.absorbShortSpeakerIslands(merged))
+    }
+
+    /// Longest a mislabelled "island" row may be to get absorbed. An ATND beam
+    /// flicker onto a neighbour's seat catches a word or two (~0.2 s here); a
+    /// genuine mid-sentence interjection is rarely this brief, and never labelled
+    /// by a zero-width position span the way a flicker is.
+    nonisolated static let islandMaxDurationSec = 0.8
+
+    /// Reassign a very short row to its neighbours when the rows on BOTH sides
+    /// are the same *other* speaker.
+    ///
+    /// The word-attribution log showed `Speaker 2@92.6 Speaker 1@94.120
+    /// Speaker 2@94.120` — a Speaker-1 span starting at the same instant the next
+    /// Speaker-2 span does, i.e. essentially zero width, that captured the single
+    /// word "to" in the middle of one Speaker-2 sentence. The word is real and
+    /// correctly placed in time; only its speaker is wrong. Handing it to the
+    /// speaker surrounding it on both sides fixes the label and lets the sentence
+    /// rejoin. Guarded tightly so a genuine short interjection is not swallowed:
+    /// the island must be shorter than `islandMaxDurationSec`, confirmed, same
+    /// stream, and flanked by the SAME speaker with a non-nil id on each side.
+    nonisolated static func absorbShortSpeakerIslands(
+        _ rows: [SpeakerUtterance]) -> [SpeakerUtterance] {
+        guard rows.count >= 3 else { return rows }
+        var out = rows
+        for i in 1..<(out.count - 1) {
+            let island = out[i], before = out[i - 1], after = out[i + 1]
+            guard let flank = before.speakerID, after.speakerID == flank,
+                  island.speakerID != flank,
+                  island.confirmed, before.confirmed, after.confirmed,
+                  island.isRemote == before.isRemote, island.isRemote == after.isRemote,
+                  let s = island.start, let e = island.end,
+                  e - s < islandMaxDurationSec
+            else { continue }
+            out[i].speaker = before.speaker
+            out[i].speakerID = flank
+        }
+        return out
     }
 
     /// Join consecutive rows that belong to the same speaker into one.
