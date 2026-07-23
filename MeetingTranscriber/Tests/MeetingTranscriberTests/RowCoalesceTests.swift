@@ -60,3 +60,28 @@ final class RowCoalesceTests: XCTestCase {
         XCTAssertTrue(out[0].overlapped)
     }
 }
+
+/// `timeDistance` and the nearest-talker tail fallback.
+final class TailAttributionTests: XCTestCase {
+    private func turn(_ id: Int, _ s: Double, _ e: Double) -> DiarizationService.Turn {
+        DiarizationService.Turn(start: s, end: e, id: id, name: "S\(id)")
+    }
+    func testOverlapIsZeroDistance() {
+        XCTAssertEqual(AudioRecorder.timeDistance(from: turn(1, 0, 10), to: 5...8), 0)
+    }
+    func testDistanceToTurnBefore() {
+        XCTAssertEqual(AudioRecorder.timeDistance(from: turn(1, 0, 10), to: 12...15), 2, accuracy: 1e-9)
+    }
+    func testDistanceToTurnAfter() {
+        XCTAssertEqual(AudioRecorder.timeDistance(from: turn(1, 20, 30), to: 12...15), 5, accuracy: 1e-9)
+    }
+    func testNearestPicksTheCloserTurn() {
+        // A tail window 16..17 sits between a turn ending at 15 and one starting at 25.
+        let turns = [turn(1, 0, 15), turn(2, 25, 40)]
+        let win = 16.0...17.0
+        let nearest = turns.min {
+            AudioRecorder.timeDistance(from: $0, to: win) < AudioRecorder.timeDistance(from: $1, to: win)
+        }
+        XCTAssertEqual(nearest?.id, 1, "1 second away beats 8 seconds away")
+    }
+}

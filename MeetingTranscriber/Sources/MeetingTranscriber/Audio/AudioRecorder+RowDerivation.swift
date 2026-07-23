@@ -47,6 +47,15 @@ extension AudioRecorder {
     /// overlap flag is OR-ed. This is display-only — `derivedRows` (what overlap
     /// repair reads) is untouched, and `anchorText` joins per-speaker text with
     /// a space anyway, so its result is byte-identical before and after.
+    /// Seconds between a turn and a window: 0 if they overlap, else the gap to
+    /// the nearer edge. Used to attribute an uncovered tail to the nearest talker.
+    nonisolated static func timeDistance(from turn: DiarizationService.Turn,
+                                         to window: ClosedRange<Double>) -> Double {
+        if turn.end < window.lowerBound { return window.lowerBound - turn.end }
+        if turn.start > window.upperBound { return turn.start - window.upperBound }
+        return 0
+    }
+
     nonisolated static func coalesceAdjacentSameSpeaker(
         _ rows: [SpeakerUtterance]) -> [SpeakerUtterance] {
         var out: [SpeakerUtterance] = []
@@ -147,8 +156,19 @@ extension AudioRecorder {
         }
 
         if filled.isEmpty {
-            return [SpeakerUtterance(id: seg.id.uuidString, speaker: nil,
-                                     speakerID: nil, start: window.lowerBound,
+            // No pyannote turn overlaps this window and ATND left no span — a
+            // short tail at Stop is the usual case: the final stretch of speech
+            // is too brief for its own diarization turn, and position skips runs
+            // under 0.75 s. Rather than drop it to UNKNOWN, hand it to whoever
+            // was speaking NEAREST in time. In a single-speaker recording that
+            // is simply that speaker; across speakers it is the last/next turn,
+            // which is a better guess than "unknown" for a sub-second seam.
+            // Only a recording with NO turns at all stays UNKNOWN.
+            let nearest = liveTurns.min { a, b in
+                Self.timeDistance(from: a, to: window) < Self.timeDistance(from: b, to: window)
+            }
+            return [SpeakerUtterance(id: seg.id.uuidString, speaker: nearest?.name,
+                                     speakerID: nearest?.id, start: window.lowerBound,
                                      end: window.upperBound, text: seg.text,
                                      confirmed: true)]
         }
