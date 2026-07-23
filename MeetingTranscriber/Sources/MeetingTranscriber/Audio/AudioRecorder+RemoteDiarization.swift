@@ -20,7 +20,7 @@ extension AudioRecorder {
             // audio must be KEPT. (Before the 2026-07-22 tail change this always
             // cleared, because the remote stop pass was always a full re-diarization
             // of the remote WAV — see `startRemoteDiarization`.)
-            let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? true
+            let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? false
             if !(continueOnStop && !liveOn) { remoteDiarAudio = [] }
             return
         }
@@ -101,7 +101,7 @@ extension AudioRecorder {
     func startRemoteDiarization() -> Bool {
         let d = UserDefaults.standard
         let finalOn = d.object(forKey: "diarization.finalPass") as? Bool ?? true
-        let continueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? true
+        let continueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? false
         let mode = Self.remoteStopMode(finalPass: finalOn,
                                        continueOnStop: continueOnStop,
                                        remoteStreamActive: remoteStreamActive,

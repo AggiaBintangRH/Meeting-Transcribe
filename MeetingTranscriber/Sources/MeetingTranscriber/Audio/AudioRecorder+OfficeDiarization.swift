@@ -114,7 +114,7 @@ extension AudioRecorder {
             // When live labels are off but "continue from live labels (tail only)"
             // is on, DON'T clear the accumulated audio: the whole recording then
             // becomes the single tail diarized at stop (matches the UI caption).
-            let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? true
+            let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? false
             if !(continueOnStop && !liveOn) { chunkAudio = [] }
             return
         }

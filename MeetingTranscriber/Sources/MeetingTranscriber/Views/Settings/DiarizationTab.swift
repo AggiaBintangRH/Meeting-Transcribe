@@ -5,7 +5,7 @@ struct DiarizationTab: View {
     @AppStorage("diarization.enabled")     private var enabled = true
     @AppStorage("diarization.live")        private var live = true
     @AppStorage("diarization.finalPass")   private var finalPass = true
-    @AppStorage("diarization.continueOnStop") private var continueOnStop = true
+    @AppStorage("diarization.continueOnStop") private var continueOnStop = false
     @AppStorage("diarization.intervalSec") private var intervalSec = 30
     @AppStorage("diarization.resetOnStart") private var resetOnStart = true
     @AppStorage("diarization.detectOverlap") private var detectOverlap = true
