@@ -145,14 +145,41 @@ def main() -> None:
             fail(f"mlx-whisper import failed: {brief_traceback()} — "
                  "run download-best-models.sh")
 
+        # Whisper hallucinates canned text ("Thank you", "Thanks for watching")
+        # on silence — it was trained on subtitled video where quiet stretches
+        # carry closing captions. Its own no_speech/logprob rule does NOT catch
+        # this, because it is CONFIDENT about the hallucination (measured on real
+        # silence: no_speech=0.67, logprob=-0.26, so the "high no_speech AND low
+        # logprob" gate keeps it). But no_speech_prob alone separates cleanly:
+        # real speech on the owner's recordings sat at 0.001-0.121, the "Thank
+        # you." hallucination at 0.672. So drop any segment above this on its own.
+        # compression_ratio catches the separate repetition-loop failure.
+        # This is Whisper-only; the mlx-audio models never hallucinate this way.
+        WHISPER_NO_SPEECH_MAX = 0.5
+        WHISPER_COMPRESSION_MAX = 2.4   # Whisper's own repetition-loop threshold
+
         def transcribe_path(path: str) -> str:
             # Keep Whisper's default decoding — condition_on_previous_text stays
             # ON so the model has sentence context (recovers connective phrases).
-            # The earlier "loops" were a repeating source clip, not model drift.
             result = mlx_whisper.transcribe(
                 path, path_or_hf_repo=args.model, language=language
             )
-            return (result.get("text") or "").strip()
+            segments = result.get("segments")
+            if not segments:
+                return (result.get("text") or "").strip()
+            kept = []
+            for s in segments:
+                ns = s.get("no_speech_prob", 0.0)
+                cr = s.get("compression_ratio", 0.0)
+                text = (s.get("text") or "").strip()
+                if ns > WHISPER_NO_SPEECH_MAX:
+                    log(f"drop hallucination (no_speech={ns:.2f}): {text!r}")
+                    continue
+                if cr > WHISPER_COMPRESSION_MAX:
+                    log(f"drop repetition (compression={cr:.2f}): {text!r}")
+                    continue
+                kept.append(text)
+            return " ".join(kept).strip()
 
         # Warmup with 0.5s silence — forces the model to load NOW so the
         # loading overlay reflects reality and the first chunk is fast.
