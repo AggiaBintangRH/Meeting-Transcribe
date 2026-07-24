@@ -101,7 +101,21 @@ else
   rm -rf "$PBS_DIR"
   mkdir -p "$PBS_DIR"
   tar -xzf "$ASSET_PATH" -C "$PBS_DIR" --strip-components=1
-  "$PBS_DIR/bin/python3" -m pip install --no-compile -r "$FROZEN"
+  # Install all 126 packages in ONE command → pip prints one enormous
+  # "Installing collected packages: …" line via its rich console. On some Macs
+  # the terminal fd is non-blocking and that write dies with
+  # "OSError: [Errno 35] write could not complete without blocking", aborting
+  # the build. Redirecting pip to a file removes the non-blocking terminal from
+  # its output path entirely (file writes always block), and -q/--progress-bar
+  # off keep the log small; on failure we surface the tail so nothing is hidden.
+  PIP_LOG="$(dirname "$FROZEN")/build-pip-install.log"
+  if ! "$PBS_DIR/bin/python3" -m pip install --no-compile --progress-bar off -q \
+        -r "$FROZEN" >"$PIP_LOG" 2>&1; then
+    echo "    pip install FAILED — last 30 lines of $PIP_LOG:"
+    tail -30 "$PIP_LOG"
+    exit 1
+  fi
+  echo "    Installed $(grep -c . "$FROZEN") packages."
   echo "$NEW_SHA" > "$SHA_FILE"
 fi
 
