@@ -98,14 +98,23 @@ final class DiarizationService: @unchecked Sendable {
     func diarizeChunk(audio: URL, windowStart: Double, exclusive: Bool = false,
                       stream: Stream = .office) {
         send(["cmd": "chunk", "audio": audio.path,
-              "window_start": windowStart, "exclusive": exclusive], stream: stream)
+              "window_start": windowStart, "exclusive": exclusive,
+              "cluster_threshold": Self.clusterThreshold()], stream: stream)
     }
 
     /// Batch refinement over the full recording. numSpeakers 0 = auto.
     func diarizeFinal(audio: URL, numSpeakers: Int = 0, exclusive: Bool = false,
                       stream: Stream = .office) {
         send(["cmd": "final", "audio": audio.path,
-              "num_speakers": numSpeakers, "exclusive": exclusive], stream: stream)
+              "num_speakers": numSpeakers, "exclusive": exclusive,
+              "cluster_threshold": Self.clusterThreshold()], stream: stream)
+    }
+
+    /// pyannote clustering threshold — absent/0 falls back to its default 0.6.
+    /// Exposed for per-room calibration; see DiarizationTab.
+    private static func clusterThreshold() -> Double {
+        let v = UserDefaults.standard.double(forKey: "diarization.clusterThreshold")
+        return v > 0 ? v : 0.6
     }
 
     /// Wipe all saved voice profiles — call to start a recording fresh.

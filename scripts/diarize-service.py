@@ -273,6 +273,29 @@ def main() -> None:
         fail(f"Pipeline load failed: {brief_traceback()} — "
              "run download-best-models.sh (pyannote is a gated repo)")
 
+    # pyannote's clustering threshold decides how readily two turns are called
+    # the same speaker: LOWER merges more (fewer speakers), HIGHER splits more.
+    # 0.6 is community-1's own default and is robust for distinct voices (a
+    # sweep on real 1- and 2-person recordings gave the correct count across
+    # 0.4-0.8), so it stays the default. It is exposed only so a specific room
+    # with unusually similar voices can be calibrated, exactly like the ATND
+    # tauDeg. Fa/Fb and min_duration_off are pyannote's own tuned constants and
+    # are carried through unchanged; only the threshold is caller-controlled.
+    DEFAULT_CLUSTER_THRESHOLD = 0.6
+    current_threshold = [None]  # boxed so set_threshold can mutate it
+
+    def set_threshold(th: float) -> None:
+        if current_threshold[0] is not None and abs(th - current_threshold[0]) < 1e-9:
+            return  # already instantiated at this value — instantiate is not free
+        pipeline.instantiate({
+            "segmentation": {"min_duration_off": 0.0},
+            "clustering": {"threshold": th, "Fa": 0.07, "Fb": 0.8},
+        })
+        current_threshold[0] = th
+        log(f"clustering threshold set to {th}")
+
+    set_threshold(DEFAULT_CLUSTER_THRESHOLD)
+
     log(f"loading embedding model {EMBEDDING_MODEL}")
     try:
         embedder = PretrainedSpeakerEmbedding(EMBEDDING_MODEL, device=device)
@@ -426,6 +449,9 @@ def main() -> None:
         for s in stores:
             s.reload_names()
         exclusive = bool(job.get("exclusive", False))
+        # Per-room calibration (absent = pyannote's default). Re-instantiating
+        # only when the value actually changes keeps the common case free.
+        set_threshold(float(job.get("cluster_threshold", DEFAULT_CLUSTER_THRESHOLD)))
         started = time.time()
         try:
             if cmd == "chunk":

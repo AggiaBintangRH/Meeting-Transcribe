@@ -10,6 +10,7 @@ struct DiarizationTab: View {
     @AppStorage("diarization.resetOnStart") private var resetOnStart = true
     @AppStorage("diarization.detectOverlap") private var detectOverlap = true
     @AppStorage("diarization.numSpeakers") private var numSpeakers = 0
+    @AppStorage("diarization.clusterThreshold") private var clusterThreshold = 0.6
 
     var body: some View {
         Group {
@@ -94,6 +95,14 @@ struct DiarizationTab: View {
                      : "Fixed at \(numSpeakers) — more accurate when you know the participant count.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
+            }
+
+            SettingBlock(title: "Voice-separation threshold — \(String(format: "%.2f", clusterThreshold))") {
+                Slider(value: $clusterThreshold, in: 0.4...0.8, step: 0.05)
+                Text("How readily two turns are judged the same voice. Lower merges more (fewer speakers); higher splits more (more speakers). The default 0.60 is robust for distinct voices — leave it there unless a specific room's voices are so alike they get merged, then nudge it up. Per-room calibration only, like the ATND merge threshold.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Text("The pipeline and voice-embedding model load up front (visible in the loading overlay). Speaker profiles are saved locally under models/speaker-profiles and reused across meetings — rename a speaker in the transcript and it's remembered next time.")
