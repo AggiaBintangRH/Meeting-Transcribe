@@ -134,6 +134,26 @@ def main() -> None:
             w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
         return path
 
+    def load_audio_16k(path: str) -> "np.ndarray":
+        """Decode a WAV to mono float32 at 16 kHz WITHOUT ffmpeg.
+
+        mlx_whisper.transcribe() shells out to ffmpeg ONLY when handed a string
+        path; given a numpy array it does no external decode. Clean dev machines
+        and the packaged .app have no ffmpeg (it is not a pip package and we do
+        not bundle it), so we decode with soundfile — which ships its own
+        libsndfile — and resample here instead of relying on a system binary.
+        """
+        import soundfile as sf
+        audio, sr = sf.read(path, dtype="float32", always_2d=False)
+        if audio.ndim > 1:                       # collapse any stereo to mono
+            audio = audio.mean(axis=1)
+        if sr != SR:
+            from math import gcd
+            from scipy.signal import resample_poly
+            g = gcd(int(sr), SR)
+            audio = resample_poly(audio, SR // g, int(sr) // g)
+        return np.ascontiguousarray(audio, dtype=np.float32)
+
     # ---- runtime dispatch: one runtime per model family --------------------
     if "whisper" in args.model.lower():
         # Whisper → mlx-whisper (Apple's official MLX runtime; made for the
@@ -171,8 +191,10 @@ def main() -> None:
         def transcribe_path(path: str) -> str:
             # Keep Whisper's default decoding — condition_on_previous_text stays
             # ON so the model has sentence context (recovers connective phrases).
+            # Hand mlx_whisper a decoded array, never the path, so it never calls
+            # ffmpeg (absent on clean Macs and in the bundle — see load_audio_16k).
             result = mlx_whisper.transcribe(
-                path, path_or_hf_repo=args.model, language=language
+                load_audio_16k(path), path_or_hf_repo=args.model, language=language
             )
             segments = result.get("segments")
             if not segments:
