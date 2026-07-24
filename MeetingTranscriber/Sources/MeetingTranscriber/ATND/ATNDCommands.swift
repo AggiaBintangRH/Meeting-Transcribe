@@ -33,9 +33,16 @@ enum ATNDCommands {
     /// spec — they are the literal strings `0000` and `00`, not this array's
     /// device ID. Only the array's *replies* carry a real device ID.
     static func action(command: String, handshake: Handshake, params: String = "") -> String {
-        // The trailing space is present in every one of the spec's own examples,
-        // including the ones with no parameters (`g_network␣O␣0000␣00␣NC␣↲`).
-        "\(command) \(handshake.rawValue) 0000 00 NC \(params)"
+        // EVERY example in the spec ends with a space before the CR, whether or
+        // not there is a parameter: `GDID␣O␣0000␣00␣NC␣↲` (none) and
+        // `MUTE␣S␣0000␣00␣NC␣1␣↲` (a param, then a space, then CR). The old form
+        // `...NC \(params)` produced that trailing space ONLY when params was
+        // empty; a Set carrying a parameter lost it, and the real ATND1061
+        // rejects such a line with NAK 04 "parameter out of range" (the
+        // simulator masked it by stripping). So the trailing space is always
+        // present now.
+        let tail = params.isEmpty ? " " : " \(params) "
+        return "\(command) \(handshake.rawValue) 0000 00 NC" + tail
     }
 
     static func frame(_ line: String) -> Data {

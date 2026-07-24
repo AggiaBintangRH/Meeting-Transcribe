@@ -380,10 +380,23 @@ class Handler(socketserver.BaseRequestHandler):
                     continue
                 while CR in buf:
                     line, buf = buf.split(CR, 1)
-                    text = line.decode("utf-8", "replace").strip()
-                    log("rx", text)
+                    raw = line.decode("utf-8", "replace")
+                    log("rx", repr(raw))
                     if self.server.opts.silent:
                         continue
+                    # The spec's wire format ALWAYS ends with a space before the
+                    # CR — every example does, parameter or not (GDID␣O␣0000␣00␣
+                    # NC␣↲ and MUTE␣S␣0000␣00␣NC␣1␣↲). A real ATND1061 rejects a
+                    # line missing it with NAK 04; mirror that here so this double
+                    # is FAITHFUL. The old .strip() hid exactly this: a Set that
+                    # dropped its trailing parameter space passed the simulator
+                    # but the real device NAK 04'd it.
+                    if not raw.endswith(" "):
+                        cmd = raw.split(" ", 1)[0]
+                        log("tx", "NAK 04 (missing trailing space before CR)")
+                        self.request.sendall(nak(cmd, "04"))
+                        continue
+                    text = raw[:-1]   # drop exactly the one protocol trailing space
                     reply = handle_message(text, self.server.opts)
                     if reply is None:
                         continue
