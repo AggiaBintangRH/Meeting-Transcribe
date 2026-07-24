@@ -25,6 +25,24 @@ enum PythonRuntime {
         if isBundled {
             return Bundle.main.bundleURL.appendingPathComponent("Contents/Resources")
         }
+        // Dev: find the repo root by walking up from the working directory,
+        // looking for download-best-models.sh (the unambiguous project marker).
+        // swift run and RUN-APP.command both set the working directory inside
+        // the repo, so this makes the app work no matter WHERE the repo was
+        // cloned — not only at the one legacy ~/Documents/AI/Meeting Transcribe
+        // path, which broke on a second Mac where `git clone` put it elsewhere
+        // (and named it "Meeting-Transcribe" with a hyphen).
+        let fm = FileManager.default
+        var dir = URL(fileURLWithPath: fm.currentDirectoryPath)
+        for _ in 0..<8 {
+            if fm.fileExists(atPath: dir.appendingPathComponent("download-best-models.sh").path) {
+                return dir
+            }
+            let parent = dir.deletingLastPathComponent()
+            if parent == dir { break }   // reached the filesystem root
+            dir = parent
+        }
+        // Legacy fallback — the original hardcoded location.
         return URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Documents/AI/Meeting Transcribe")
     }()

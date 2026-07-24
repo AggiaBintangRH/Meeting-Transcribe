@@ -101,9 +101,10 @@ enum ModelCatalog {
         overlapEngines.first { $0.id == id } ?? overlapSeparation
     }
 
-    /// Project models folder (HF_HOME used by download-best-models.sh)
-    static let modelsDir = URL(fileURLWithPath: NSHomeDirectory())
-        .appendingPathComponent("Documents/AI/Meeting Transcribe/models")
+    /// Project models folder (HF_HOME used by download-best-models.sh). Derived
+    /// from PythonRuntime.projectDir so it tracks wherever the repo actually is
+    /// — not a hardcoded ~/Documents path that only matched the first machine.
+    static let modelsDir = PythonRuntime.projectDir.appendingPathComponent("models")
 
     static func isInstalled(_ model: ModelInfo) -> Bool {
         let fm = FileManager.default
