@@ -173,7 +173,13 @@ echo "==> Python:   $("$PY" -c 'import sys, platform; print(sys.executable, plat
 "$PIP" install --quiet --upgrade pip wheel || true
 
 pipi() { # pipi <package-spec...>
-  "$PIP" install --upgrade "$@"
+  # --progress-bar off is not cosmetic: this whole script's stdout is piped to
+  # tee (see the exec redirect above), and pip's animated download/progress
+  # bars flood that pipe. On some Macs the pipe is non-blocking and the flood
+  # overruns its buffer, so pip aborts with "OSError: [Errno 35] write could
+  # not complete without blocking" mid-install. Turning the bars off keeps the
+  # output to a few lines per package and avoids it entirely.
+  "$PIP" install --progress-bar off --upgrade "$@"
 }
 
 echo "==> Installing huggingface_hub CLI into venv..."
@@ -240,7 +246,7 @@ fi
 # Only reinstall from git if the nemotron files are actually absent
 if ! nemotron_files_present; then
   echo "==> Installed mlx-audio lacks nemotron_asr files — installing from upstream main..."
-  retry 3 "$PIP" install --upgrade --force-reinstall --no-deps \
+  retry 3 "$PIP" install --progress-bar off --upgrade --force-reinstall --no-deps \
     "git+https://github.com/Blaizzy/mlx-audio.git" || true
 fi
 
