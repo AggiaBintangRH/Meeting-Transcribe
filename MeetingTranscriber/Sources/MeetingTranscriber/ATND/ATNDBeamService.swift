@@ -368,6 +368,32 @@ final class ATNDBeamService: ObservableObject {
         return String(cString: buf)
     }
 
+    /// True when `address` is an IPv4 address currently assigned to one of this
+    /// Mac's own interfaces. Used to notice a pinned Interface value that has
+    /// gone stale (DHCP moved this Mac, the array changed subnet) — a stale
+    /// value joins a group on an interface that no longer exists and receives
+    /// nothing, silently, which is the failure this whole feature exists to stop.
+    static func isLocalAddress(_ address: String) -> Bool {
+        let wanted = address.trimmingCharacters(in: .whitespaces)
+        guard !wanted.isEmpty else { return false }
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return false }
+        defer { freeifaddrs(head) }
+        var found = false
+        for ifa in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let sa = ifa.pointee.ifa_addr,
+                  sa.pointee.sa_family == sa_family_t(AF_INET) else { continue }
+            var buf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(sa, socklen_t(sa.pointee.sa_len), &buf,
+                           socklen_t(NI_MAXHOST), nil, 0, NI_NUMERICHOST) == 0,
+               String(cString: buf) == wanted {
+                found = true
+                break
+            }
+        }
+        return found
+    }
+
     private func errnoText() -> String {
         String(cString: strerror(errno))
     }
