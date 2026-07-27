@@ -69,6 +69,26 @@ final class PositionDiarizer: ObservableObject {
     private var lastNoticeElapsed: Double?
     private let gapResetSec: Double = 1.0
 
+    /// Only collect direction while OUR OWN VAD says someone is speaking.
+    ///
+    /// The array's beam follows any sound, not only speech: measured on device,
+    /// piano through the room speakers still produced angle/rotation notices
+    /// with the ATND's own VAD (`SVAD`) switched ON — that setting does not gate
+    /// camera tracking. Ungated, a slammed door or music builds direction
+    /// clusters for positions where nobody ever spoke.
+    ///
+    /// Silero is the right gate because it is the same voice decision the rest
+    /// of the pipeline already trusts for chunk boundaries. When VAD is off in
+    /// Settings there is no verdict to gate on, so the gate is disabled outright
+    /// rather than silently discarding every notice.
+    private var gateOnSpeech = false
+    private var lastSpeechElapsed: Double?
+    /// Speech verdicts arrive per audio buffer and beam notices at 10 Hz, so the
+    /// two are never exactly aligned. Holding the gate open briefly after the
+    /// last speech keeps a normal utterance continuous instead of punching
+    /// holes in it on every inter-word pause.
+    private let speechHoldSec: Double = 1.0
+
     private var cancellable: AnyCancellable?
 
     // MARK: - Lifecycle
@@ -79,9 +99,12 @@ final class PositionDiarizer: ObservableObject {
     /// The subscription is to the SHARED `ATNDBeamService` singleton's subject,
     /// which lives on the service, not the socket — so a control-link flap that
     /// tears down and rebuilds the UDP socket does NOT require re-subscription.
-    func start(tauDeg: Double, smoothingSec: Double, mode: Mode, now: @escaping () -> Double) {
+    func start(tauDeg: Double, smoothingSec: Double, mode: Mode,
+               gateOnSpeech: Bool = false, now: @escaping () -> Double) {
         self.mode = mode
         self.nowFn = now
+        self.gateOnSpeech = gateOnSpeech
+        self.lastSpeechElapsed = nil
         self.smoother = DirectionSmoother(windowSec: smoothingSec)
         self.clusterer = PositionClusterer(tauDeg: tauDeg)
         self.changeDetector = ClusterChangeDetector()
@@ -106,6 +129,20 @@ final class PositionDiarizer: ObservableObject {
         isActive = false
     }
 
+    /// Our own VAD's verdict for the buffer that just ended, on the shared audio
+    /// clock. Called from the capture tap; a no-op unless the gate is on.
+    func noteSpeech(_ speaking: Bool, at elapsed: Double) {
+        guard gateOnSpeech, speaking else { return }
+        lastSpeechElapsed = elapsed
+    }
+
+    /// Whether direction may be collected at `t`.
+    private func speechAllows(_ t: Double) -> Bool {
+        guard gateOnSpeech else { return true }
+        guard let last = lastSpeechElapsed else { return false }
+        return t - last <= speechHoldSec
+    }
+
     // MARK: - Ingest
 
     private func ingest(_ notice: ATNDBeamService.ParsedNotice) {
@@ -121,6 +158,13 @@ final class PositionDiarizer: ObservableObject {
         case .silence:
             smoother.reset()
         case .talking(let talker):
+            // The array is tracking SOMETHING, but only speech may become a
+            // speaker position. Reset the smoother so non-speech direction never
+            // averages into the next real utterance's samples.
+            guard speechAllows(t) else {
+                smoother.reset()
+                return
+            }
             let vector = PositionMath.unitVector(rotateDeg: Double(talker.rotation),
                                                  angleDeg: Double(talker.elevation))
             guard let sample = smoother.push(t: t, vector: vector) else { return }

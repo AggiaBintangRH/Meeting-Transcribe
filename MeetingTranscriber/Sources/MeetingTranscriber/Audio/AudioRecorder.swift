@@ -603,6 +603,9 @@ final class AudioRecorder: ObservableObject {
                     asr?.flush()
                 }
                 self.isSpeaking = speaking
+                // Same verdict, same clock: the ATND beam follows any sound, so
+                // position only collects direction while this says speech.
+                self.positionDiarizer?.noteSpeech(speaking, at: self.recordingElapsed)
 
                 // Chunk boundary: interval elapsed AND we're in silence
                 // (avoids cutting mid-word). Hard cap at 1.5x interval if

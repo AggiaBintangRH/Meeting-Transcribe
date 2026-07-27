@@ -36,9 +36,15 @@ extension AudioRecorder {
         positionSource = PositionSource.current(d)
 
         let diarizer = PositionDiarizer()
+        // Gate direction collection on our own VAD — the array's beam follows any
+        // sound (piano still moved it with the ATND's own SVAD on), so without
+        // this a noise source becomes a speaker position. Only possible when VAD
+        // is on; with it off there is no verdict, so the gate stays open.
+        let gateOnSpeech = d.object(forKey: "vad.enabled") as? Bool ?? true
         diarizer.start(tauDeg: tauDeg,
                        smoothingSec: smoothingMs / 1000,
                        mode: mode,
+                       gateOnSpeech: gateOnSpeech,
                        now: { [weak self] in self?.recordingElapsed ?? 0 })
         positionDiarizer = diarizer
     }
