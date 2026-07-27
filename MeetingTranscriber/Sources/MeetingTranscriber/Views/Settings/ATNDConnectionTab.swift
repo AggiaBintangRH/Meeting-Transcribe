@@ -22,7 +22,16 @@ struct ATNDConnectionTab: View {
 
     @ObservedObject private var control = ATNDControlService.shared
 
+    /// What Auto currently resolves to, shown so the field is not a blank box
+    /// the user has to guess at. Recomputed when the device IP changes, since
+    /// that is what the routing lookup is based on.
+    @State private var detectedInterface: String?
+
     private var tcpConnected: Bool { control.isConnected }
+
+    private func refreshDetectedInterface() {
+        detectedInterface = ATNDBeamService.localAddressRouting(toDeviceAt: deviceIP)
+    }
 
     var body: some View {
         Group {
@@ -62,8 +71,21 @@ struct ATNDConnectionTab: View {
                 }
                 .disabled(!tcpConnected)
 
-                field("Interface", text: $interfaceIP, width: 150, placeholder: "Auto")
-                    .disabled(!enabled)
+                HStack(spacing: 8) {
+                    // Placeholder carries the resolved address, so leaving the
+                    // field empty still SHOWS which interface will be used —
+                    // an empty box gave no way to tell Auto from broken.
+                    field("Interface", text: $interfaceIP, width: 150,
+                          placeholder: detectedInterface.map { "Auto — \($0)" } ?? "Auto")
+                        .disabled(!enabled)
+
+                    if interfaceIP.isEmpty, let detected = detectedInterface {
+                        Button("Use \(detected)") { interfaceIP = detected }
+                            .buttonStyle(.link)
+                            .font(.system(size: 11))
+                            .disabled(!enabled)
+                    }
+                }
 
                 Text(tcpConnected
                      ? "The group and port belong to the array, not to this app — these must match what the array is set to, or nothing arrives. Shown are the factory defaults, 239.0.0.100 : 17000 — these two are still typed in by hand, not read back from the array. What the Command tab does read from the array (g_network) are the three notification switches that decide whether it broadcasts at all."
@@ -72,7 +94,11 @@ struct ATNDConnectionTab: View {
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Interface is THIS MAC's address, not the array's — do not put the Device IP here. On Auto the app asks the routing table which of this Mac's interfaces reaches the array and joins the multicast group there, which is what you want in almost every case. Type an address only to override that.")
+                Text(interfaceIP.isEmpty
+                     ? (detectedInterface.map {
+                          "Interface is THIS MAC's address, not the array's — do not put the Device IP here. Auto resolved it to \($0) by asking the routing table which interface reaches the array, and the multicast group is joined there. Type an address only to override that."
+                       } ?? "Interface is THIS MAC's address, not the array's — do not put the Device IP here. Auto cannot resolve it yet: enter the array's Device IP above and it will appear. Until then the app binds every interface, which can silently receive nothing on a Mac with more than one network.")
+                     : "Overriding Auto with \(interfaceIP). This must be THIS MAC's own address on the array's network — never the array's Device IP. Clear the field to go back to automatic detection.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -90,6 +116,11 @@ struct ATNDConnectionTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .onAppear { refreshDetectedInterface() }
+        // The lookup is derived from the device address, so re-resolve whenever
+        // it is edited — including while it is still being typed and is not yet
+        // a valid address, which simply yields nil.
+        .onChange(of: deviceIP) { refreshDetectedInterface() }
     }
 
     // MARK: - Components
