@@ -72,7 +72,7 @@ struct ATNDConnectionTab: View {
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Interface stays editable because it is this Mac's side of the connection: leave it empty to bind every network interface, or set it to this Mac's IP on the array's network if multicast arrives on the wrong one.")
+                Text("Interface is THIS MAC's address, not the array's — do not put the Device IP here. On Auto the app asks the routing table which of this Mac's interfaces reaches the array and joins the multicast group there, which is what you want in almost every case. Type an address only to override that.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)

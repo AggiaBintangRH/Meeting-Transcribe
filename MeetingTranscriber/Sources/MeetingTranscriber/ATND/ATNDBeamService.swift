@@ -104,8 +104,13 @@ final class ATNDBeamService: ObservableObject {
             .trimmingCharacters(in: .whitespaces)
 
         let controlUp = ATNDControlService.shared.isConnected
+        // The device IP is part of the snapshot because Auto resolves the join
+        // interface FROM it — point the app at an array on another subnet and
+        // the interface must be resolved again.
+        let deviceIP = (d.string(forKey: "atnd.deviceIP") ?? "")
+            .trimmingCharacters(in: .whitespaces)
 
-        let snapshot = "\(enabled)|\(controlUp)|\(group)|\(port)|\(interfaceIP)"
+        let snapshot = "\(enabled)|\(controlUp)|\(group)|\(port)|\(interfaceIP)|\(deviceIP)"
         guard snapshot != currentSnapshot else { return }
         currentSnapshot = snapshot
 
@@ -163,9 +168,21 @@ final class ATNDBeamService: ObservableObject {
             return
         }
 
+        // Which interface to join on. INADDR_ANY lets the kernel pick, and on a
+        // multi-homed Mac it can pick the wrong one — the socket then stays open
+        // and silent forever, which is exactly how this failed on the owner's
+        // network (tcpdump saw the packets, the app never did). So when the
+        // field is left on Auto we resolve this Mac's own address on the
+        // interface that routes to the array and join explicitly there.
+        let resolvedInterface = interfaceIP.isEmpty
+            ? Self.localAddressRouting(toDeviceAt: UserDefaults.standard.string(forKey: "atnd.deviceIP") ?? "")
+            : interfaceIP
+        if interfaceIP.isEmpty {
+            log("interface Auto → \(resolvedInterface ?? "INADDR_ANY (could not resolve)")")
+        }
         var mreq = ip_mreq(
             imr_multiaddr: in_addr(s_addr: inet_addr(group)),
-            imr_interface: in_addr(s_addr: interfaceIP.isEmpty ? INADDR_ANY : inet_addr(interfaceIP)))
+            imr_interface: in_addr(s_addr: resolvedInterface.map { inet_addr($0) } ?? INADDR_ANY))
 
         // macOS clones the multicast route lazily, so the very first join right
         // after launch can fail with EHOSTUNREACH even though the interface is
@@ -297,6 +314,58 @@ final class ATNDBeamService: ObservableObject {
                 }
             }
         }
+    }
+
+    private func log(_ message: String) {
+        #if DEBUG
+        print("[ATND] \(message)")
+        #endif
+    }
+
+    /// This Mac's own IPv4 address on the interface the routing table would use
+    /// to reach `deviceIP` — the right `imr_interface` for the multicast join.
+    ///
+    /// Asks the kernel instead of guessing: a UDP socket is connected to the
+    /// array's address, which sends NOTHING (UDP connect only fixes the peer and
+    /// picks a route), then `getsockname` reports the local address the kernel
+    /// chose. That follows the real routing table, so it stays correct on a
+    /// multi-homed Mac and after the array moves subnets.
+    ///
+    /// Returns nil when the address is unusable (no device IP configured yet,
+    /// unparseable, or no route) — the caller then falls back to INADDR_ANY,
+    /// which is the previous behaviour rather than a hard failure.
+    static func localAddressRouting(toDeviceAt deviceIP: String) -> String? {
+        let host = deviceIP.trimmingCharacters(in: .whitespaces)
+        guard !host.isEmpty, inet_addr(host) != INADDR_NONE else { return nil }
+
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var peer = sockaddr_in()
+        peer.sin_family = sa_family_t(AF_INET)
+        peer.sin_port = UInt16(9).bigEndian      // discard port; nothing is sent
+        peer.sin_addr = in_addr(s_addr: inet_addr(host))
+        let connected = withUnsafePointer(to: &peer) { raw in
+            raw.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return nil }
+
+        var local = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &local) { raw in
+            raw.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &len)
+            }
+        }
+        guard named == 0, local.sin_addr.s_addr != INADDR_ANY else { return nil }
+
+        var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        guard inet_ntop(AF_INET, &local.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil
+        else { return nil }
+        return String(cString: buf)
     }
 
     private func errnoText() -> String {
