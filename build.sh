@@ -1,21 +1,47 @@
 #!/bin/bash
 # Build a fully self-contained, portable Meeting Transcriber.app:
 #   • release Swift build + themed icon (via package-app.sh)
-#   • a standalone python-build-standalone interpreter with every pip package
+#   • TWO standalone python-build-standalone interpreters:
+#       - Resources/python       — the main MLX stack (every model but DiCoW)
+#       - Resources/.venv-dicow  — DiCoW only; it pins transformers 4.55 while
+#                                  the MLX stack needs 5.x (hard conflict, so
+#                                  they can never share one interpreter)
 #   • scripts/ and models/ bundled as siblings under Contents/Resources
 #   • ad-hoc signed and verified
 #
 # Output: dist/Meeting Transcriber.app  (+ dist/README-INSTALL.txt)
 #
 # Env:
-#   MT_SKIP_MODELS=1   skip the ~16GB models copy (fast pipeline test); the
-#                      portable Python + pip reinstall + import gate still run.
+#   MT_SKIP_MODELS=1   skip the ~16GB models copy (fast pipeline test); BOTH
+#                      portable Pythons + pip installs + import gates still run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 CACHE="$ROOT/.build-cache"
 PBS_DIR="$CACHE/python-runtime"
+PBS_DICOW_DIR="$CACHE/python-runtime-dicow"
 APP_NAME="Meeting Transcriber"
+
+# Fail the build if any bundled native lib loads from Homebrew/local paths —
+# those do not exist on a client Mac. Used once per bundled interpreter.
+check_relocatable() {
+  local root="$1" label="$2" site spot_libs bad=0
+  site="$(find "$root/lib" -maxdepth 2 -type d -name site-packages | head -1)"
+  spot_libs="$(find "$site" \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null | head -25 || true)"
+  while IFS= read -r lib; do
+    [[ -z "$lib" ]] && continue
+    if otool -L "$lib" 2>/dev/null | grep -qE '/opt/homebrew|/usr/local'; then
+      echo "    NON-RELOCATABLE: $lib" >&2
+      otool -L "$lib" | grep -E '/opt/homebrew|/usr/local' >&2
+      bad=1
+    fi
+  done <<< "$spot_libs"
+  if [[ "$bad" == "1" ]]; then
+    echo "ERROR: $label libs reference Homebrew/local paths — not portable." >&2
+    exit 1
+  fi
+  echo "    Relocatability OK ($label — no /opt/homebrew or /usr/local load commands)."
+}
 
 echo "==> Project root: $ROOT"
 mkdir -p "$CACHE"
@@ -130,22 +156,74 @@ echo "    Import gate..."
 
 # --- relocatability spot-check ---------------------------------------------
 echo "    Relocatability spot-check (otool -L)..."
-SITE="$(find "$RES/python/lib" -maxdepth 2 -type d -name site-packages | head -1)"
-SPOT_LIBS="$(find "$SITE" \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null | head -25 || true)"
-BAD=0
-while IFS= read -r lib; do
-  [[ -z "$lib" ]] && continue
-  if otool -L "$lib" 2>/dev/null | grep -qE '/opt/homebrew|/usr/local'; then
-    echo "    NON-RELOCATABLE: $lib" >&2
-    otool -L "$lib" | grep -E '/opt/homebrew|/usr/local' >&2
-    BAD=1
-  fi
-done <<< "$SPOT_LIBS"
-if [[ "$BAD" == "1" ]]; then
-  echo "ERROR: bundled libs reference Homebrew/local paths — not portable." >&2
+check_relocatable "$RES/python" "main runtime"
+
+# ===========================================================================
+# B2b — SECOND portable interpreter for DiCoW (.venv-dicow)
+#
+# DiCoW's remote code only runs on transformers 4.55; the MLX stack in the main
+# runtime needs 5.x. They cannot share an interpreter, so the app ships two.
+# DicowService probes exactly Resources/.venv-dicow/bin/python3 (bundled
+# projectDir == Resources), which is why the copy target below is that path.
+# Reuses the PBS tarball B2 already downloaded — no second download.
+# ===========================================================================
+echo ""
+echo "==> [B2b] Provisioning portable Python for DiCoW..."
+
+if [[ ! -x "$ROOT/.venv-dicow/bin/pip" ]]; then
+  echo "ERROR: .venv-dicow is missing — cannot bundle the DiCoW runtime." >&2
+  echo "       Run ./download-best-models.sh (section 4d) first, then rebuild." >&2
   exit 1
 fi
-echo "    Relocatability OK (no /opt/homebrew or /usr/local load commands)."
+
+FROZEN_DICOW="$CACHE/requirements-frozen-dicow.txt"
+echo "    Freezing .venv-dicow packages..."
+"$ROOT/.venv-dicow/bin/pip" freeze --exclude-editable > "$FROZEN_DICOW.raw"
+grep -vE '^pip==|file://|@ file://|git\+' "$FROZEN_DICOW.raw" > "$FROZEN_DICOW" || true
+if grep -qE 'file://|git\+' "$FROZEN_DICOW"; then
+  echo "ERROR: local (file://) or VCS (git+) requirements remain after strip:" >&2
+  grep -nE 'file://|git\+' "$FROZEN_DICOW" >&2
+  exit 1
+fi
+echo "    $(wc -l < "$FROZEN_DICOW" | tr -d ' ') packages to install."
+
+NEW_SHA_DICOW="$(shasum "$FROZEN_DICOW" | awk '{print $1}')"
+SHA_FILE_DICOW="$CACHE/requirements-dicow.sha"
+OLD_SHA_DICOW="$(cat "$SHA_FILE_DICOW" 2>/dev/null || echo "")"
+
+if [[ "$NEW_SHA_DICOW" == "$OLD_SHA_DICOW" && -x "$PBS_DICOW_DIR/bin/python3" ]]; then
+  echo "    Requirements unchanged and runtime present — skipping reinstall."
+else
+  echo "    (Re)extracting interpreter + installing packages..."
+  rm -rf "$PBS_DICOW_DIR"
+  mkdir -p "$PBS_DICOW_DIR"
+  tar -xzf "$ASSET_PATH" -C "$PBS_DICOW_DIR" --strip-components=1
+  # Same non-blocking-terminal protection as B2: pip's output goes to a file,
+  # never to a terminal fd that can raise OSError [Errno 35].
+  PIP_LOG_DICOW="$CACHE/build-pip-install-dicow.log"
+  if ! "$PBS_DICOW_DIR/bin/python3" -m pip install --no-compile --progress-bar off -q \
+        -r "$FROZEN_DICOW" >"$PIP_LOG_DICOW" 2>&1; then
+    echo "    pip install FAILED — last 30 lines of $PIP_LOG_DICOW:"
+    tail -30 "$PIP_LOG_DICOW"
+    exit 1
+  fi
+  echo "    Installed $(grep -c . "$FROZEN_DICOW") packages."
+  echo "$NEW_SHA_DICOW" > "$SHA_FILE_DICOW"
+fi
+
+echo "    Copying DiCoW interpreter into bundle..."
+rm -rf "$RES/.venv-dicow"
+cp -Rc "$PBS_DICOW_DIR" "$RES/.venv-dicow"
+
+# Import gate (mandatory). The version assert is the build-time guard for
+# DiCoW's #1 runtime gotcha: on transformers 5.x generate() dies with
+# AttributeError: '_get_initial_cache_position'. pandas is DiCoW's required
+# but undocumented import.
+echo "    Import gate (DiCoW)..."
+"$RES/.venv-dicow/bin/python3" -c "import transformers, torch, pandas; assert transformers.__version__.startswith('4.55.'), 'expected transformers 4.55.x, got ' + transformers.__version__; print('DICOW IMPORTS OK', transformers.__version__)"
+
+echo "    Relocatability spot-check (otool -L)..."
+check_relocatable "$RES/.venv-dicow" "DiCoW runtime"
 
 # ===========================================================================
 # B3 — scripts + models (siblings under Resources/)
@@ -185,6 +263,11 @@ echo "==> [B5] Signing nested Mach-Os + bundle..."
 find "$RES/python" \( -name '*.so' -o -name '*.dylib' \) -print0 \
   | xargs -0 -n 50 -P 8 codesign --force --sign - 2>/dev/null || true
 codesign --force --sign - "$RES/python/bin/"python3* 2>/dev/null || true
+# Same treatment for the DiCoW interpreter — unsigned nested Mach-Os get the
+# app killed at launch on a client Mac.
+find "$RES/.venv-dicow" \( -name '*.so' -o -name '*.dylib' \) -print0 \
+  | xargs -0 -n 50 -P 8 codesign --force --sign - 2>/dev/null || true
+codesign --force --sign - "$RES/.venv-dicow/bin/"python3* 2>/dev/null || true
 codesign --force --deep --sign - "$APP"
 
 echo "    Verifying signature..."
@@ -240,7 +323,7 @@ echo "    dist/README-INSTALL.txt written."
 
 echo ""
 echo "==> Manifest:"
-for d in python models scripts; do
+for d in python .venv-dicow models scripts; do
   if [[ -d "$RES/$d" ]]; then
     printf "    %-10s %s\n" "$d" "$(du -sh "$RES/$d" | awk '{print $1}')"
   else
