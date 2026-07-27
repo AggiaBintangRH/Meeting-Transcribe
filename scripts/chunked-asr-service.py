@@ -142,6 +142,46 @@ WHISPER_MIN_DENSITY_DURATION = 4.0
 WHISPER_MIN_WORDS_PER_SEC = 0.5
 
 
+# --- canned-phrase gate (every model) ---------------------------------------
+# The note that "only Whisper hallucinates this way" was wrong: the owner hit
+# 'Thank you.' on Granite too, intermittently, on the same kind of near-silent
+# chunk. Granite and Qwen3 run through mlx-audio, which reports no no_speech or
+# compression_ratio, so the Whisper gate above cannot be reused at all — the
+# only signals available are the text and how long the audio was.
+#
+# Density alone is NOT safe here: a real one-word reply in an otherwise quiet
+# 30 s chunk looks identical to a hallucination by that measure, and deleting it
+# would repeat the mistake that cost real sentences earlier. So this gate is
+# deliberately narrow — it fires only on text that is BOTH a known canned
+# caption AND implausibly sparse for its duration. A genuine "Okay." survives
+# because it is not in this set; 'Thank you.' across 30 s of silence does not.
+#
+# These are the closing captions of subtitled video, which is what the whole
+# model family is trained on. Matching ignores case and trailing punctuation.
+CANNED_HALLUCINATIONS = {
+    "thank you", "thanks", "thank you very much", "thank you so much",
+    "thanks for watching", "thank you for watching", "thanks for listening",
+    "please subscribe", "subscribe", "you", "bye", "bye bye", "goodbye",
+    "see you next time", "the end", "music", "applause", "silence",
+}
+
+
+def canned_drop_reason(text: str, duration: float):
+    """Why this whole-chunk text is a canned hallucination, or None to keep it.
+
+    Model-agnostic: uses only the text and the audio duration, so it works for
+    the mlx-audio models that expose no confidence numbers.
+    """
+    stripped = text.strip().strip(".!?,;:").lower()
+    if not stripped or stripped not in CANNED_HALLUCINATIONS:
+        return None
+    words = len(stripped.split())
+    if duration >= WHISPER_MIN_DENSITY_DURATION and words < duration * WHISPER_MIN_WORDS_PER_SEC:
+        return (f"canned hallucination ({words}w in {duration:.0f}s = "
+                f"{words / duration:.2f}/s)")
+    return None
+
+
 def whisper_drop_reason(text: str, no_speech: float, compression: float,
                         duration: float):
     """Why this Whisper segment should be discarded, or None to keep it."""
@@ -270,7 +310,17 @@ def main() -> None:
                 result = model.generate(path, **kwargs)
             except TypeError:  # model doesn't take a language kwarg
                 result = model.generate(path)
-            return (result.text or "").strip()
+            text = (result.text or "").strip()
+            # These models expose no confidence numbers, so the canned-phrase
+            # gate is the only hallucination check available to them. Observed
+            # on Granite: an occasional 'Thank you.' on a near-silent chunk.
+            import soundfile as sf
+            duration = sf.info(path).duration
+            reason = canned_drop_reason(text, duration)
+            if reason:
+                log(f"drop {reason}: {text!r}")
+                return ""
+            return text
 
     def transcribe(audio: "np.ndarray") -> str:
         path = write_temp_wav(audio)

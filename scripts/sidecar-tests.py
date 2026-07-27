@@ -596,6 +596,7 @@ def run_nemotron(rep: Report, ctx):
 # ============================================================= chunked group
 CHUNKED_CHECKS = [
     "chunked/whisper-gate-keeps-real-speech",
+    "chunked/canned-gate-spares-real-short-replies",
     "chunked/final-shape-without-aligner",
     "chunked/src-indices-skip-punctuation",
     "chunked/words-never-past-chunk",
@@ -649,6 +650,40 @@ def run_chunked(rep: Report, ctx):
                        "; ".join(wrong))
         except Exception as exc:  # noqa: BLE001
             rep.fail(cid, f"could not evaluate the gate: {exc}")
+
+    # -- the model-agnostic canned-phrase gate. Granite/Qwen3 expose no
+    #    confidence numbers, so this is their only hallucination check — and the
+    #    thing it must never do is eat a real short reply.
+    if ctx.wants("chunked/canned-gate-spares-real-short-replies"):
+        cid = "chunked/canned-gate-spares-real-short-replies"
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "chunked_asr_service_canned", SCRIPTS / "chunked-asr-service.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            cases = [
+                # (text, duration, keep?)
+                ("Thank you.", 30.0, False),          # observed on Granite
+                ("thank you", 30.0, False),           # Granite writes lowercase
+                ("you", 20.0, False),
+                ("Okay.", 30.0, True),                # real reply, must survive
+                ("Yes.", 30.0, True),
+                ("Thank you.", 2.0, True),            # short chunk: plausibly real
+                ("Thank you for joining the meeting today.", 30.0, True),
+                ("thanks, I agree with that point", 30.0, True),
+            ]
+            wrong = []
+            for text, dur, want_keep in cases:
+                reason = mod.canned_drop_reason(text, dur)
+                if (reason is None) != want_keep:
+                    verdict = "kept" if reason is None else f"dropped as {reason}"
+                    wrong.append(f"{text!r} ({dur:.0f}s) was {verdict}")
+            rep.expect(cid, not wrong,
+                       f"all {len(cases)} canned/real cases judged correctly",
+                       "; ".join(wrong))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the canned gate: {exc}")
 
 
     # -- check 5: with no --align-model, a final carries EXACTLY type and text.
