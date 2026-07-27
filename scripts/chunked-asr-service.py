@@ -109,6 +109,53 @@ def brief_traceback() -> str:
     return " | ".join(lines[-3:])
 
 
+# --- Whisper hallucination gate --------------------------------------------
+# Whisper invents canned text ("Thank you", "Thanks for watching") on silence:
+# it was trained on subtitled video, where quiet stretches carry closing
+# captions. Whisper's own no_speech+logprob rule does not catch it, because the
+# model is CONFIDENT about the hallucination (measured on real silence:
+# no_speech 0.67, logprob -0.26). Whisper-only — the mlx-audio models do not
+# fail this way.
+#
+# Kept as a pure function so the rule can be tested against transcript captured
+# from real meetings instead of being re-guessed. It has cost transcript twice
+# already, in both directions: first hallucinations got through, then the fix
+# for them deleted real speech.
+WHISPER_NO_SPEECH_MAX = 0.5
+# The no_speech rule applies ONLY at or below this word count. Gating on
+# no_speech alone was wrong and silently deleted real sentences — measured on
+# the owner's recordings:
+#   0.86  "If we have a one-minute speech to deliver,"
+#   0.55  "into the picture this framework will not only help us speak..."
+#   0.55  "yeah amazon prime also serves into that needs based um..."
+# So no_speech does NOT separate hallucination from speech; LENGTH does. The
+# canned hallucinations are short ("Thank you.", "you"); a 13-word sentence
+# about Whole Foods never is. Long text is now kept even when Whisper is unsure
+# anyone spoke.
+WHISPER_HALLUCINATION_MAX_WORDS = 4
+WHISPER_COMPRESSION_MAX = 2.4       # Whisper's own repetition-loop threshold
+# Words/second floor for a segment longer than the duration floor: a
+# hallucination regardless of Whisper's confidence. Real speech runs ~2-3
+# words/s; the classic failure is 30 s of silence read as "Thank you."
+# (0.07 words/s). The 4 s floor protects a genuine short reply ("Okay.").
+WHISPER_MIN_DENSITY_DURATION = 4.0
+WHISPER_MIN_WORDS_PER_SEC = 0.5
+
+
+def whisper_drop_reason(text: str, no_speech: float, compression: float,
+                        duration: float):
+    """Why this Whisper segment should be discarded, or None to keep it."""
+    words = len(text.split())
+    if no_speech > WHISPER_NO_SPEECH_MAX and words <= WHISPER_HALLUCINATION_MAX_WORDS:
+        return f"hallucination (no_speech={no_speech:.2f}, {words}w)"
+    if compression > WHISPER_COMPRESSION_MAX:
+        return f"repetition (compression={compression:.2f})"
+    if duration >= WHISPER_MIN_DENSITY_DURATION and words < duration * WHISPER_MIN_WORDS_PER_SEC:
+        return (f"hallucination ({words} words in {duration:.0f}s = "
+                f"{words / duration:.2f}/s)")
+    return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
@@ -165,29 +212,6 @@ def main() -> None:
             fail(f"mlx-whisper import failed: {brief_traceback()} — "
                  "run download-best-models.sh")
 
-        # Whisper hallucinates canned text ("Thank you", "Thanks for watching")
-        # on silence — it was trained on subtitled video where quiet stretches
-        # carry closing captions. Its own no_speech/logprob rule does NOT catch
-        # this, because it is CONFIDENT about the hallucination (measured on real
-        # silence: no_speech=0.67, logprob=-0.26, so the "high no_speech AND low
-        # logprob" gate keeps it). But no_speech_prob alone separates cleanly:
-        # real speech on the owner's recordings sat at 0.001-0.121, the "Thank
-        # you." hallucination at 0.672. So drop any segment above this on its own.
-        # compression_ratio catches the separate repetition-loop failure.
-        # This is Whisper-only; the mlx-audio models never hallucinate this way.
-        WHISPER_NO_SPEECH_MAX = 0.5
-        WHISPER_COMPRESSION_MAX = 2.4   # Whisper's own repetition-loop threshold
-        # A segment longer than this holding fewer than DENSITY words/second is a
-        # hallucination regardless of what Whisper's own confidence says. Real
-        # speech runs ~2-3 words/s; the classic failure is a 30 s stretch of
-        # silence transcribed as the two words "Thank you." (0.07 words/s). The
-        # no_speech gate above misses it when Whisper is confident (seen at
-        # no_speech 0.88 on a 30 s chunk), so density is the backstop that does
-        # not depend on Whisper's confidence at all. The 4 s floor protects a
-        # genuine short reply ("Okay.") from being judged on density.
-        WHISPER_MIN_DENSITY_DURATION = 4.0
-        WHISPER_MIN_WORDS_PER_SEC = 0.5
-
         def transcribe_path(path: str) -> str:
             # Keep Whisper's default decoding — condition_on_previous_text stays
             # ON so the model has sentence context (recovers connective phrases).
@@ -201,21 +225,15 @@ def main() -> None:
                 return (result.get("text") or "").strip()
             kept = []
             for s in segments:
-                ns = s.get("no_speech_prob", 0.0)
-                cr = s.get("compression_ratio", 0.0)
                 text = (s.get("text") or "").strip()
                 dur = float(s.get("end", 0.0)) - float(s.get("start", 0.0))
-                words = len(text.split())
-                if ns > WHISPER_NO_SPEECH_MAX:
-                    log(f"drop hallucination (no_speech={ns:.2f}): {text!r}")
-                    continue
-                if cr > WHISPER_COMPRESSION_MAX:
-                    log(f"drop repetition (compression={cr:.2f}): {text!r}")
-                    continue
-                if (dur >= WHISPER_MIN_DENSITY_DURATION
-                        and words < dur * WHISPER_MIN_WORDS_PER_SEC):
-                    log(f"drop hallucination ({words} words in {dur:.0f}s = "
-                        f"{words / dur:.2f}/s): {text!r}")
+                reason = whisper_drop_reason(
+                    text,
+                    no_speech=s.get("no_speech_prob", 0.0),
+                    compression=s.get("compression_ratio", 0.0),
+                    duration=dur)
+                if reason:
+                    log(f"drop {reason}: {text!r}")
                     continue
                 kept.append(text)
             return " ".join(kept).strip()

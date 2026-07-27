@@ -595,13 +595,62 @@ def run_nemotron(rep: Report, ctx):
 
 # ============================================================= chunked group
 CHUNKED_CHECKS = [
+    "chunked/whisper-gate-keeps-real-speech",
     "chunked/final-shape-without-aligner",
     "chunked/src-indices-skip-punctuation",
     "chunked/words-never-past-chunk",
 ]
 
+# Segments captured from the owner's real meetings, with the verdict each one
+# must get. The dropped rows are Whisper's silence hallucinations; the kept rows
+# are real sentences that an earlier no_speech-only gate deleted from the
+# transcript. Both failure directions are represented on purpose — this rule has
+# been wrong in each of them, so a test that only proved hallucinations die
+# would have passed while real speech was being thrown away.
+WHISPER_GATE_CASES = [
+    # (text, no_speech, compression, duration, keep?)
+    ("Thank you.", 0.89, 1.0, 30.0, False),
+    ("Thank you.", 0.67, 1.0, 5.0, False),
+    ("you", 0.72, 1.0, 10.0, False),
+    ("If we have a one-minute speech to deliver,", 0.86, 1.6, 3.0, True),
+    ("into the picture this framework will not only help us speak in a concise manner",
+     0.55, 1.8, 5.0, True),
+    ("while making sure all the important points are in place but the", 0.55, 1.8, 4.0, True),
+    ("words for their um if you're a prime membership you get delivery faster i guess",
+     0.55, 1.8, 5.0, True),
+    ("yeah amazon prime also serves into that needs based um or their partnership with whole foods",
+     0.55, 1.8, 6.0, True),
+    ("four or five or six or seven or eight or 10 or 20 or 20 or 20 or 20", 0.2, 13.12, 10.0, False),
+    ("Okay.", 0.1, 1.0, 1.0, True),
+]
+
 
 def run_chunked(rep: Report, ctx):
+    # -- the hallucination gate, as a pure rule. No model load: it imports the
+    #    sidecar module and replays real captured segments, so it runs in
+    #    milliseconds and cannot be skipped for want of a fixture.
+    if ctx.wants("chunked/whisper-gate-keeps-real-speech"):
+        cid = "chunked/whisper-gate-keeps-real-speech"
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location(
+                "chunked_asr_service", SCRIPTS / "chunked-asr-service.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            wrong = []
+            for text, ns, cr, dur, want_keep in WHISPER_GATE_CASES:
+                reason = mod.whisper_drop_reason(text, no_speech=ns,
+                                                 compression=cr, duration=dur)
+                if (reason is None) != want_keep:
+                    verdict = "kept" if reason is None else f"dropped as {reason}"
+                    wrong.append(f"{text[:45]!r} was {verdict}")
+            rep.expect(cid, not wrong,
+                       f"all {len(WHISPER_GATE_CASES)} real segments judged correctly",
+                       "; ".join(wrong))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the gate: {exc}")
+
+
     # -- check 5: with no --align-model, a final carries EXACTLY type and text.
     #    This is what keeps the single-stream wire format byte-identical; a
     #    stray "words"/"dur" here would be a silent protocol change.
