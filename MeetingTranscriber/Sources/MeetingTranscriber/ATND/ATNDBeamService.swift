@@ -261,7 +261,15 @@ final class ATNDBeamService: ObservableObject {
     /// `nonisolated` because the class is `@MainActor`: parsing must run on the
     /// socket queue, and it is pure — only the immutable result crosses over.
     nonisolated static func parse(_ line: String) -> ParsedNotice? {
-        let tokens = line.split(separator: " ", omittingEmptySubsequences: false)
+        // The real array puts a SPACE before the CR, exactly as it does on the
+        // command link (see ATNDCommands.action). Measured on device: the
+        // silence notice is 44 bytes on the wire for 42 bytes of text — one
+        // space, one CR. Without this trim the trailing space becomes a 7th
+        // empty token, the count check below rejects it, and EVERY notice is
+        // dropped in silence — which is exactly how this failed on the owner's
+        // array while a strip()-ing Python receiver on the same wire worked.
+        let tokens = line.trimmingCharacters(in: .whitespaces)
+            .split(separator: " ", omittingEmptySubsequences: false)
         guard tokens.count == 6, tokens[0] == "MD", tokens[4] == "NC" else { return nil }
         guard tokens[1] == "camera_control_notice" else { return nil }
 

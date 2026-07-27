@@ -138,7 +138,12 @@ def camera_notice(active: list[Beam], jitter: bool = False) -> bytes:
         angle = clamp(b.angle + random.randint(-a_amp, a_amp), 0, 90)
         rotate = (b.rotate + random.randint(-r_amp, r_amp)) % 360
         payload = f"1,{b.channel},{angle},{rotate},{b.camera}"
-    return f"MD camera_control_notice 0000 00 NC {payload}".encode() + CR
+    # Trailing SPACE before the CR — the real array sends it (measured: the
+    # silence notice is 44 bytes for 42 bytes of text). The simulator omitted it
+    # and so agreed with a parser that the device did not, hiding a total
+    # receive failure. Keep it: a faithful simulator is the only thing that
+    # makes these tests mean anything.
+    return f"MD camera_control_notice 0000 00 NC {payload} ".encode() + CR
 
 
 def level_notice(active: list[Beam]) -> bytes:
@@ -161,7 +166,7 @@ def level_notice(active: list[Beam]) -> bytes:
     fields[ANALOG_IN_SLOT] = str(max(beam_levels))
     fields[AUTO_MIX_SLOT] = str(max(beam_levels))  # the mixed-down channel
 
-    return f"MD level_meter_notice 0000 00 NC {','.join(fields)}".encode() + CR
+    return f"MD level_meter_notice 0000 00 NC {','.join(fields)} ".encode() + CR
 
 
 def send(sock: socket.socket, payload: bytes, destination, state: dict) -> None:
