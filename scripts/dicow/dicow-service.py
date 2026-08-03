@@ -38,7 +38,10 @@ import sys
 import time
 import traceback
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file lives at scripts/<service>/<file>.py (one folder per service,
+# owner 2026-07-29), so the project root — which owns models/ — is THREE levels
+# up, not two. Bundled, that root is Contents/Resources.
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Must be set BEFORE transformers is imported. The app normally passes these in
 # (PythonRuntime.sidecarEnvironment); the defaults keep a hand-run sidecar

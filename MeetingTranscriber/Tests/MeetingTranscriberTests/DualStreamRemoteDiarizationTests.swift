@@ -16,8 +16,8 @@ final class DualStreamRemoteDiarizationTests: XCTestCase {
     // MARK: - Helpers
 
     private func turn(_ start: Double, _ end: Double, _ id: Int, _ name: String)
-        -> DiarizationService.Turn {
-        DiarizationService.Turn(start: start, end: end, id: id, name: name)
+        -> SpeakerTurn {
+        SpeakerTurn(start: start, end: end, id: id, name: name)
     }
 
     private func remoteSegment(_ start: Double, _ end: Double, _ text: String)

@@ -270,7 +270,8 @@ echo "==> Installing mlx-whisper (Whisper MLX runtime)..."
 pipi "mlx-whisper" || FAILED+=("mlx-whisper install")
 # Voxtral: Transcribe 2 batch model is API-only; open weights = 4B Realtime 2602
 dl "mlx-community/Voxtral-Mini-4B-Realtime-2602-fp16" "Voxtral Mini 4B Realtime 2602 (MLX fp16)"
-# Granite Speech 4.1 2B NAR: EN/FR/DE/ES/PT ONLY — no Indonesian (English A/B option)
+# Granite Speech 4.1 2B NAR: EN/FR/DE/ES/PT/JA ONLY — no Indonesian (English A/B option).
+# Six, not five: the card lists Japanese too (rechecked 2026-07-29).
 dl "mlx-community/granite-speech-4.1-2b-nar-mlx" "Granite Speech 4.1 2B NAR (MLX bf16)"
 
 # -------------------------------------------------------------
@@ -283,6 +284,65 @@ dl "mlx-community/granite-speech-4.1-2b-nar-mlx" "Granite Speech 4.1 2B NAR (MLX
 #     model_type=qwen3_forced_aligner — no extra pip package needed.
 # -------------------------------------------------------------
 dl "mlx-community/Qwen3-ForcedAligner-0.6B-bf16" "Qwen3-ForcedAligner 0.6B (MLX bf16, word timestamps)"
+
+# -------------------------------------------------------------
+# 2c. SPEAKER-ATTRIBUTED ASR — MOSS-Transcribe-Diarize 0.9B (PyTorch MPS)
+#     One model returns the words, the SPEAKER LABELS and the timestamps
+#     together. Selectable in two independent roles: as a chunked ASR model
+#     (Settings -> Models -> Chunked) and as the diarization engine
+#     (Settings -> Models -> Diarization, diarization.engine=moss). With both
+#     set to MOSS it is ONE process doing one forward pass.
+#     Public repo — no token gate, unlike pyannote below.
+#     Runs in the MAIN .venv: it needs Python >= 3.12 and transformers 5.x,
+#     which is exactly what the MLX stack already pins, so it needs no
+#     interpreter of its own (unlike DiCoW, which is stuck on 4.55).
+# -------------------------------------------------------------
+dl "OpenMOSS-Team/MOSS-Transcribe-Diarize" "MOSS-Transcribe-Diarize 0.9B (speaker-attributed ASR)"
+
+# The upstream helper package (prompt construction, generate wrapper and the
+# [start][Sxx]text[end] transcript parser). Installable only from git.
+#
+# IMPORTANT — this install is PROVENANCE, not the runtime import path.
+# Each MOSS service imports the VENDORED copy under its OWN
+# scripts/<service>/vendor/moss_transcribe_diarize instead — two services since
+# 2026-07-31: scripts/moss-asr/ (chunked-ASR role) and scripts/moss-diar/
+# (diarization role) — because build.sh strips every
+# VCS requirement out of the frozen list before provisioning the bundled
+# interpreter:
+#     build.sh:110   grep -vE '^pip==|file://|@ file://|git\+'
+# so a `git+` freeze line silently disappears and the packaged .app would ship
+# without the package — the DiCoW-missing-from-the-bundle failure of 2026-07-27.
+# scripts/ (each service's vendor/ included) is copied into the bundle by build.sh [B3], so the
+# vendored copy makes dev and the .app run the same code with no build change.
+# Keep this install anyway: it is how the vendored files are refreshed, and it
+# records upstream's version.
+echo ""
+echo "==> Installing moss_transcribe_diarize (MOSS inference helper)..."
+moss_helper_present() {
+  "$PY" -c "import moss_transcribe_diarize" 2>/dev/null
+}
+if moss_helper_present; then
+  echo "    already installed — skipping"
+else
+  # --no-deps deliberately: every dependency it declares (torch, transformers,
+  # librosa, numpy) is already in this venv at the versions the MLX stack needs,
+  # and letting pip resolve them again risks moving transformers off 5.x.
+  "$PIP" install --progress-bar off --no-deps \
+    "git+https://github.com/OpenMOSS/MOSS-Transcribe-Diarize" \
+    || { echo "!! could not install moss_transcribe_diarize"; FAILED+=("moss_transcribe_diarize"); }
+fi
+# The vendored copies are what actually run — fail loudly here rather than at the
+# first meeting if one is missing. BOTH are checked: the two MOSS roles can run as
+# two processes at once, so a tree missing from either one is a broken role.
+# This ONE list is the only place the set of MOSS services is named here.
+for moss_svc in moss-asr moss-diar; do
+  if "$PY" -c "import sys; sys.path.insert(0, 'scripts/$moss_svc/vendor'); import moss_transcribe_diarize" 2>/dev/null; then
+    echo "    vendored copy OK (scripts/$moss_svc/vendor/moss_transcribe_diarize)"
+  else
+    echo "!! scripts/$moss_svc/vendor/moss_transcribe_diarize is missing or broken — MOSS will not run"
+    FAILED+=("scripts/$moss_svc/vendor/moss_transcribe_diarize")
+  fi
+done
 
 # -------------------------------------------------------------
 # 3. DIARIZATION — pyannote community-1 (PyTorch MPS)
@@ -305,7 +365,12 @@ pipi "pyannote.audio" || FAILED+=("pyannote.audio install")
 # pyannote pulls its own deps — re-pin numpy afterwards (numba needs <2.5)
 pipi "numpy<2.5" || true
 
-# Speaker embedding model for profile matching (WeSpeaker, ~26MB, public)
+# Speaker embedding model for profile matching (WeSpeaker, ~26MB, public).
+# Its OWN sidecar since 2026-07-30 (scripts/wespeaker/wespeaker-service.py) — the
+# weights and this line are unchanged, only the process that loads them moved out
+# of the pyannote pipeline. Both run in the main .venv on pyannote.audio installed
+# just above: the identity service imports PretrainedSpeakerEmbedding only and
+# never instantiates the Pipeline.
 dl "pyannote/wespeaker-voxceleb-resnet34-LM" "WeSpeaker embeddings (speaker profiles)"
 
 # -------------------------------------------------------------
@@ -346,7 +411,7 @@ EOF
 # 4b. OVERLAP REPAIR — MossFormer2 (librimix-2spk) standalone
 #     Overlap attempt #3 (2026-07-14). Uses the STANDALONE
 #     alibabasglab/MossFormer2 GitHub repo's vendored PyTorch code
-#     (scripts/vendor/mossformer2/) with the mossformer2-librimix-2spk
+#     (scripts/mossformer2/vendor/mossformer2/) with the mossformer2-librimix-2spk
 #     8 kHz / 2-speaker checkpoint. This is NOT the earlier-removed
 #     clearvoice / MossFormer2_SS_16K attempt — different repo + weights.
 #     Off by default in the app (Settings → Models → Overlap).
@@ -600,7 +665,7 @@ EOF
 
 # DiCoW lives in .venv-dicow, so it must be verified with THAT interpreter.
 # Import check + offline snapshot resolve only — a full 6 GB model load would
-# add minutes here; scripts/dicow-service.py does the real load at session start.
+# add minutes here; scripts/dicow/dicow-service.py does the real load at session start.
 echo ""
 echo "==> Verifying the DiCoW runtime (.venv-dicow)..."
 if [ -x "$DICOW_PY" ]; then

@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
-"""
-Hybrid speaker diarization sidecar for MeetingTranscriber (persistent).
+"""Speaker IDENTITY sidecar for MeetingTranscriber (persistent).
 
-Two modes over one loaded pipeline (pyannote community-1 on MPS):
-  • chunk  — diarize a ~30s chunk live, embed each voice (WeSpeaker) and
-             match against the speaker-profile store → stable names now
-  • final  — batch diarization of the full recording at stop (best DER),
-             clusters matched against the same store → refined labels
+ONE SERVICE PER MODEL (owner, 2026-07-29). This half of the former
+`diarize-service.py` owns the WeSpeaker embedder and BOTH persistent profile
+stores. It is named for the model, not the role — `wespeaker`, like every other
+service in the split.
+
+It never diarizes. It is handed time spans that somebody else found — today the
+pyannote pipeline in `scripts/pyannote/pyannote-service.py` — embeds each span's
+speech, and answers WHO those people are against the saved profiles.
 
 Speaker profiles persist in models/speaker-profiles/:
   profiles.json   [{"id":1,"name":"Speaker 1","count":12}]  (names editable by app)
   embeddings.npz  {"1": centroid vector}
 
-Dual-stream (Office + Remote): ONE pipeline, TWO profile stores.
+WHY THIS IS ITS OWN PROCESS, and what that does NOT mean
+-------------------------------------------------------
+Identity used to be reachable only through the pyannote pipeline, because both
+lived in one process. Split, attaching saved identities to time spans is
+*structurally available* to any diarizer that can produce spans. That is the
+whole claim, and it is deliberately not cashed in anywhere yet: MOSS still labels
+speakers per chunk with no cross-chunk stitching (the owner deferred that — "nanti
+saja"), and the ATND position layer still owns its own cluster ids and has no
+embeddings. Neither reaches this service.
+
+It also starts FAST for what it does: this process needs `pyannote.audio` only
+for `PretrainedSpeakerEmbedding` — ~26 MB of weights — and never instantiates the
+Pipeline at all. It runs in the main `.venv`.
+
+Dual-stream (Office + Remote): TWO profile stores in one process.
   The Office array and the conferencing (Remote) channel are different rooms of
   people, so their identities must not be comparable. `ProfileStore.assign()`
   scores an incoming embedding against EVERY stored centroid, so a single shared
@@ -22,9 +38,9 @@ Dual-stream (Office + Remote): ONE pipeline, TWO profile stores.
       office  profiles.json         embeddings.npz         names "Speaker N"
       remote  profiles-remote.json  embeddings-remote.npz  names "RN"
   A SECOND PROCESS would also be structurally safe, but would mean a second
-  pyannote pipeline + WeSpeaker embedder resident (~2 GB) and a second long
-  startup for nothing: the one loaded pipeline serves both streams, and job
-  ordering on a single stdin gives deterministic interleaving.
+  WeSpeaker embedder resident and a second startup for nothing: job ordering on a
+  single stdin gives deterministic interleaving, and the app's client serializes
+  its requests so store-mutation order matches the order the jobs were made.
   Remote ids go on the wire as REMOTE_ID_BASE + local_id, mirroring the app's
   proven position-id split (pyannote < 10_000 <= remote < 100_000 <= position),
   so a downstream consumer tells the spaces apart with one integer comparison.
@@ -33,19 +49,41 @@ Dual-stream (Office + Remote): ONE pipeline, TWO profile stores.
 
 Protocol:
   stdout: {"type":"status","text":"LOADED"}
-          {"type":"chunk_result","window_start":s,"segments":[{start,end,id,name}]}
-          {"type":"result","segments":[{start,end,id,name}]}
-          {"type":"error","text":...}
-          result/error messages carry "stream":"remote" for remote jobs; the
-          field is OMITTED for office jobs, so the single-stream wire format is
-          byte-identical to what it was before dual-stream existed.
+          {"type":"identify_result","id":7,"speakers":{
+              "SPEAKER_00":{"id":1,"name":"Speaker 1","conf":0.874},
+              "SPEAKER_01":{"id":2,"name":"Speaker 2"},
+              "SPEAKER_02":null}}
+          {"type":"status","text":"RESET"}
+          {"type":"error","id":7,"text":...}   (+ "stream" echoed if sent)
+          THREE encodings of "no value", and they mean different things:
+            "conf" PRESENT — the winning cosine similarity that matched this voice
+                             to its saved profile.
+            "conf" ABSENT  — this call minted a brand-new profile. It was never
+                             scored against anything, so there is no number. NOT
+                             zero: a displayed 0.00 would read as "we are sure
+                             this is the wrong person".
+            null identity  — the voice could not be identified at all (under
+                             MIN_EMBED_SEC of speech, or a degenerate embedding).
+                             The caller DROPS those spans, exactly as the old
+                             single service dropped them before emitting.
+          A success reply carries no "stream": the request `id` correlates it, and
+          the wire ids already have REMOTE_ID_BASE applied. Errors echo the stream
+          so the app can fail only that stream's gate.
   stdin (one JSON per line):
-          {"cmd":"chunk","audio":path,"window_start":seconds}
-          {"cmd":"final","audio":path,"num_speakers":0}
-          any job may carry "stream":"office"|"remote" — ABSENT MEANS OFFICE.
-          EOF exits.
+          {"cmd":"identify","id":7,"audio":path,
+           "turns":[{"start":…,"end":…,"label":"SPEAKER_00"},…]}
+          {"cmd":"reset"}
+          an identify job may carry "stream":"office"|"remote" — ABSENT MEANS
+          OFFICE. EOF exits.
 
-Fully offline: HF_HOME points at the project models/ folder.
+  ONE `identify` PER DIARIZATION RUN, carrying that whole run's turns.
+  `assign()`'s one-to-one guarantee (two distinct voices in the same run can
+  never collapse onto one profile) is defined PER RUN, so splitting a run across
+  several calls would silently weaken it. This is the shape that preserves it.
+
+Fully offline: HF_HOME points at the project models/ folder, PYANNOTE_METRICS_ENABLED
+turns off pyannote 4.x's default-on telemetry, and audio is decoded with soundfile
+rather than `torchaudio.load` (a torchcodec wrapper needing Homebrew ffmpeg).
 """
 import json
 import os
@@ -53,15 +91,43 @@ import sys
 import time
 import traceback
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file lives at scripts/<service>/<file>.py (one folder per service,
+# owner 2026-07-29), so the project root — which owns models/ — is THREE levels
+# up, not two. Bundled, that root is Contents/Resources. Getting this wrong is
+# silent: PROFILE_DIR would become scripts/models/speaker-profiles and a SECOND,
+# empty profile store would appear while the real one went untouched.
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("HF_HOME", os.path.join(BASE, "models"))
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-MODEL = "pyannote/speaker-diarization-community-1"
+# pyannote.audio 4.x ships OpenTelemetry tracing that is ON BY DEFAULT and posts
+# to https://otel.pyannote.ai/v1/traces. This process never calls a Pipeline, so
+# only `track_model_init` fires here (once, at embedder load) rather than the
+# per-`apply()` span `pyannote-service.py` gets — but one call still breaks client
+# hard requirement #1 (100 % offline, nothing leaves the machine), and
+# `HF_HUB_OFFLINE` does not cover it. See the longer note in
+# `scripts/pyannote/pyannote-service.py` for the measurement that found it.
+# Assigned, not `setdefault`: an inherited environment must not turn it back on.
+os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
+
 EMBEDDING_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
 PROFILE_DIR = os.environ.get("MT_PROFILE_DIR", os.path.join(BASE, "models", "speaker-profiles"))
 EMBED_SR = 16_000            # WeSpeaker's training rate — see resolve_speakers
 SIM_THRESHOLD = 0.5          # cosine similarity to accept a profile match
+
+# Hard ceiling on this process's GPU allocation, in GB — armed in main().
+#
+# The same fuse the two MOSS sidecars and pyannote carry, and for the same
+# measured reason: PyTorch's MPS allocator grows to macOS's "recommended max"
+# (51.8 GB on the owner's 64 GB M4) WITHOUT EVER RAISING, and MOSS proved on
+# 2026-07-31 that one oversized call really can take ~50 GB and the machine with
+# it. This service holds a whole recording in memory for a final pass (~710 MB
+# for 67 minutes at 44.1 kHz) and embeds every speaker's spliced spans, so its
+# appetite scales with meeting length too.
+#
+# 32 GB = half the machine. Normal passes sit far below it; exceeding it fails
+# ONE request loudly instead of swapping the Mac.
+MPS_MEMORY_CAP_GB = 32.0
 MIN_EMBED_SEC = 1.5          # need this much speech to embed a voice
 MAX_CENTROID_COUNT = 50      # cap running-mean weight so voices can drift
 # Offset added to a REMOTE profile id before it leaves this process. Mirrors the
@@ -161,6 +227,21 @@ class ProfileStore:
 
     def _create(self, embedding) -> int:
         new_id = max([p["id"] for p in self.profiles], default=0) + 1
+        # A LOCAL id must stay below REMOTE_ID_BASE. The offset is applied once,
+        # at the process boundary (`speaker_identities`), so a local id that
+        # reached 10 000 would leave here indistinguishable from a remote id —
+        # and the app routes renames and store writes on that comparison alone,
+        # so an office voice would start being written into profiles-remote.json.
+        # Nothing enforced this before; it was merely true because nobody has had
+        # 10 000 speakers. RAISED, not asserted: `assert` is stripped under -O,
+        # and this is exactly the failure that must never be optimised away. The
+        # job handler turns it into an error reply and does NOT save the store, so
+        # the bad id never reaches disk.
+        if new_id >= REMOTE_ID_BASE:
+            raise RuntimeError(
+                f"refusing to mint local profile id {new_id}: ids must stay below "
+                f"REMOTE_ID_BASE ({REMOTE_ID_BASE}) or the office and remote "
+                f"identity spaces collide on the wire")
         self.profiles.append({"id": new_id,
                               "name": self.name_template.format(n=new_id),
                               "count": 1})
@@ -181,7 +262,14 @@ class ProfileStore:
         one-to-one: two distinct voices in the SAME run can never collapse onto
         the same profile. Unmatched voices become new distinct profiles.
 
-        embeddings: {local_label: vector}  ->  {local_label: profile_id}
+        embeddings: {local_label: vector}  ->  {local_label: (profile_id, conf)}
+
+        `conf` is the WINNING COSINE SIMILARITY when the voice matched a stored
+        centroid, and None when this call minted a brand-new profile. None means
+        "no measurement", NOT low confidence: a first appearance was never scored
+        against anything, so any number here would be invented. The caller omits
+        the field entirely in that case rather than sending 0 — a displayed 0.00
+        would read as "we are sure this is the wrong person".
         """
         # Score every (local voice, existing profile) pair, best first.
         existing = list(self.centroids.items())          # snapshot (don't mutate mid-run)
@@ -197,7 +285,7 @@ class ProfileStore:
             if label in mapping or pid in used_profiles:
                 continue
             if sim >= SIM_THRESHOLD:
-                mapping[label] = pid
+                mapping[label] = (pid, sim)
                 used_profiles.add(pid)
                 log(f"matched {label} -> profile {pid} (sim={sim:.2f})")
 
@@ -224,7 +312,8 @@ class ProfileStore:
         for label, emb in embeddings.items():
             if label not in mapping:
                 new_id = self._create(emb)
-                mapping[label] = new_id
+                # No conf: nothing was matched, so there is no similarity to report.
+                mapping[label] = (new_id, None)
                 used_profiles.add(new_id)
                 if label not in best_any:
                     log(f"new profile {new_id} for {label} (no existing profiles)")
@@ -244,7 +333,7 @@ class ProfileStore:
                         f"below {SIM_THRESHOLD})")
 
         # Now fold each voice into its profile's running-mean centroid.
-        for label, pid in mapping.items():
+        for label, (pid, _conf) in mapping.items():
             self._update(pid, embeddings[label])
         return mapping
 
@@ -253,9 +342,9 @@ class ProfileStore:
 def main() -> None:
     try:
         import numpy as np
+        import soundfile as sf
         import torch
-        import torchaudio
-        from pyannote.audio import Pipeline
+        import torchaudio          # for functional.resample only — see resolve_speakers
         from pyannote.audio.pipelines.speaker_verification import (
             PretrainedSpeakerEmbedding,
         )
@@ -265,36 +354,21 @@ def main() -> None:
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-    log(f"loading pipeline {MODEL}")
-    try:
-        pipeline = Pipeline.from_pretrained(MODEL)
-        pipeline.to(device)
-    except Exception:  # noqa: BLE001
-        fail(f"Pipeline load failed: {brief_traceback()} — "
-             "run download-best-models.sh (pyannote is a gated repo)")
-
-    # pyannote's clustering threshold decides how readily two turns are called
-    # the same speaker: LOWER merges more (fewer speakers), HIGHER splits more.
-    # 0.6 is community-1's own default and is robust for distinct voices (a
-    # sweep on real 1- and 2-person recordings gave the correct count across
-    # 0.4-0.8), so it stays the default. It is exposed only so a specific room
-    # with unusually similar voices can be calibrated, exactly like the ATND
-    # tauDeg. Fa/Fb and min_duration_off are pyannote's own tuned constants and
-    # are carried through unchanged; only the threshold is caller-controlled.
-    DEFAULT_CLUSTER_THRESHOLD = 0.6
-    current_threshold = [None]  # boxed so set_threshold can mutate it
-
-    def set_threshold(th: float) -> None:
-        if current_threshold[0] is not None and abs(th - current_threshold[0]) < 1e-9:
-            return  # already instantiated at this value — instantiate is not free
-        pipeline.instantiate({
-            "segmentation": {"min_duration_off": 0.0},
-            "clustering": {"threshold": th, "Fa": 0.07, "Fb": 0.8},
-        })
-        current_threshold[0] = th
-        log(f"clustering threshold set to {th}")
-
-    set_threshold(DEFAULT_CLUSTER_THRESHOLD)
+    # Armed before any weights load, so even a bad load cannot run away. Wrapped
+    # because these APIs are version-dependent and a missing one must not cost us
+    # speaker identity: uncapped is what we always had, so failing to cap is a
+    # warning, never fatal.
+    if device.type == "mps":
+        try:
+            ceiling_gb = torch.mps.recommended_max_memory() / (1024 ** 3)
+            if ceiling_gb > 0:
+                torch.mps.set_per_process_memory_fraction(
+                    min(MPS_MEMORY_CAP_GB / ceiling_gb, 1.0))
+                log(f"MPS memory capped at {MPS_MEMORY_CAP_GB:.0f} GB "
+                    f"of the {ceiling_gb:.1f} GB macOS reports as available")
+        except Exception:  # noqa: BLE001
+            log("WARNING could not cap MPS memory — a very long pass could "
+                "allocate without bound")
 
     log(f"loading embedding model {EMBEDDING_MODEL}")
     try:
@@ -303,39 +377,52 @@ def main() -> None:
         fail(f"Embedding model load failed: {brief_traceback()} — "
              "run download-best-models.sh")
 
-    # Two disjoint identity spaces over one pipeline — see the module docstring.
+    # Two disjoint identity spaces in one process — see the module docstring.
     # Creating the remote store does NOT create its files (load() only reads what
     # exists, save() only runs for the store a job actually used), so a
     # single-stream session leaves models/speaker-profiles/ exactly as it was.
     office_store = ProfileStore(np)
     remote_store = ProfileStore(np, "profiles-remote.json", "embeddings-remote.npz", "R{n}")
     stores = (office_store, remote_store)
-    log(f"pipeline + embedder on {device}, {len(office_store.profiles)} saved profiles "
+    log(f"embedder on {device}, {len(office_store.profiles)} saved profiles "
         f"({len(remote_store.profiles)} remote)")
+    # See the same note in pyannote-service.py: torchcodec is pruned from the
+    # packaged .app, so pyannote warns at import that built-in decoding will fail.
+    # Expected — this process decodes with soundfile in resolve_speakers.
+    log("note: pyannote's torchcodec warning above is expected — audio is decoded "
+        "in this process with soundfile (resolve_speakers)")
     emit({"type": "status", "text": "LOADED"})
 
-    def local_turns(audio_path, num_speakers=0, exclusive=False):
-        kwargs = {"num_speakers": num_speakers} if num_speakers > 0 else {}
-        output = pipeline(audio_path, **kwargs)
-        # exclusive=True  → one speaker per instant (clean, no overlaps).
-        # exclusive=False → overlap-aware: two speakers can be active at once,
-        #                   so people talking over each other both show up.
-        annotation = None
-        if exclusive:
-            annotation = getattr(output, "exclusive_speaker_diarization", None)
-        if annotation is None:
-            annotation = getattr(output, "speaker_diarization", output)
-        return [(t.start, t.end, label)
-                for t, _, label in annotation.itertracks(yield_label=True)]
-
     def resolve_speakers(audio_path, turns, store):
-        """Embed each local speaker's speech, map local label → profile id.
+        """Embed each local speaker's speech, map local label → (profile id, conf).
 
         `store` is the ONLY place this stream's voices are ever compared: the
         caller picks it from the job's stream, so an office embedding is never
         scored against a remote centroid or vice versa.
+
+        Two distinct "no value" cases share this mapping and must not be
+        conflated: a value of None means the voice could not be identified AT ALL
+        (too little speech, degenerate embedding) and its turns are dropped
+        downstream; a `(pid, None)` tuple means the voice WAS identified, as a
+        brand-new profile that had nothing to be scored against.
         """
-        waveform, sr = torchaudio.load(audio_path)
+        # soundfile, NOT `torchaudio.load` — the same ffmpeg trap as Whisper
+        # (37c16bac9) and as `pyannote-service.py`'s `load_waveform`. From
+        # TorchAudio 2.9 `torchaudio.load` is documented as a thin wrapper over
+        # **torchcodec's AudioDecoder** (its own docstring says so, and `normalize`
+        # / `backend` are ignored), and torchcodec's dylibs resolve
+        # `libavcodec`/`libavformat`/`libavutil` through one `LC_RPATH` of
+        # `/opt/homebrew/opt/ffmpeg/lib`. There are ZERO `libav*` in the packaged
+        # `.app`, so on a client Mac without Homebrew ffmpeg this line raised and
+        # took speaker identity — and therefore the whole session, since both
+        # sidecars must load — down with it. soundfile carries its own libsndfile.
+        # Verified bit-identical to torchcodec on these recordings (max abs sample
+        # diff 0.000e+00 over 177 608 340 samples). Do not "restore" torchaudio here.
+        #
+        # `torchaudio.functional.resample` below is pure torch — no codec, no
+        # ffmpeg — so it stays.
+        data, sr = sf.read(audio_path, dtype="float32", always_2d=True)
+        waveform = torch.from_numpy(data.T.copy())  # (time, channel) -> (channel, time)
         if waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
 
@@ -395,18 +482,32 @@ def main() -> None:
             mapping.update(store.assign(embeddings))
         return mapping
 
-    def labeled_segments(turns, mapping, store, id_base):
-        """Emit turns with WIRE ids: local id + id_base. The offset is applied
-        here, at the process boundary, so every id inside this file stays local
-        to its store and the two spaces can never be indexed by the same int."""
-        result = []
-        for start, end, label in turns:
-            pid = mapping.get(label)
-            if pid is None:
-                continue  # unidentifiable blip
-            result.append({"start": round(start, 3), "end": round(end, 3),
-                           "id": pid + id_base, "name": store.name(pid)})
-        return result
+    def speaker_identities(mapping, store, id_base):
+        """Local label → identity, with WIRE ids: local id + id_base. The offset is
+        applied here, at the process boundary, so every id inside this file stays
+        local to its store and the two spaces can never be indexed by the same int.
+
+        A label whose voice could not be identified maps to `null`, and the caller
+        drops those spans — the same drop the single service used to perform
+        itself, just moved to the side that owns the spans.
+
+        "conf" (the winning cosine similarity) is present only when the voice
+        matched an existing profile. A brand-new profile carries no key at all —
+        an absent field is the only honest encoding of "not measured", and a
+        consumer that reads a missing key as 0 would be showing certainty about a
+        number nobody computed.
+        """
+        identities = {}
+        for label, entry in mapping.items():
+            if entry is None:
+                identities[label] = None   # unidentifiable blip
+                continue
+            pid, conf = entry
+            identity = {"id": pid + id_base, "name": store.name(pid)}
+            if conf is not None:
+                identity["conf"] = round(float(conf), 3)
+            identities[label] = identity
+        return identities
 
     for line in sys.stdin:
         line = line.strip()
@@ -414,20 +515,18 @@ def main() -> None:
             continue
         try:
             job = json.loads(line)
-            cmd = job.get("cmd", "final")
+            cmd = job.get("cmd", "identify")
         except Exception:  # noqa: BLE001
             emit({"type": "error", "text": f"Bad job line: {line[:120]}"})
             continue
 
-        # Which identity space this job belongs to. ABSENT MEANS OFFICE, so a
-        # single-stream app (or an older one) drives this sidecar exactly as it
-        # always did. `echo` is spliced into every reply for this job and is
-        # empty for office — keeping the single-stream wire bytes unchanged.
+        # Which identity space this job belongs to. ABSENT MEANS OFFICE.
         stream = job.get("stream")
         is_remote = stream == "remote"
         store = remote_store if is_remote else office_store
         id_base = REMOTE_ID_BASE if is_remote else 0
         echo = {"stream": stream} if stream else {}
+        request_id = job.get("id")
 
         if cmd == "reset":
             # A fresh session resets BOTH spaces: the setting is "start this
@@ -441,43 +540,37 @@ def main() -> None:
 
         audio = job.get("audio", "")
         if not os.path.exists(audio):
-            emit({"type": "error", "text": f"Audio not found: {audio}", **echo})
+            emit({"type": "error", "id": request_id,
+                  "text": f"Audio not found: {audio}", **echo})
             continue
 
         # Renames land in either file, and a job of one stream may follow a
         # rename of the other, so refresh both (a missing file is a no-op).
         for s in stores:
             s.reload_names()
-        exclusive = bool(job.get("exclusive", False))
-        # Per-room calibration (absent = pyannote's default). Re-instantiating
-        # only when the value actually changes keeps the common case free.
-        set_threshold(float(job.get("cluster_threshold", DEFAULT_CLUSTER_THRESHOLD)))
+        # The spans come off the wire as objects; resolve_speakers takes the same
+        # (start, end, label) tuples the pipeline used to hand it directly.
+        turns = [(float(t["start"]), float(t["end"]), t["label"])
+                 for t in job.get("turns", [])]
         started = time.time()
         try:
-            if cmd == "chunk":
-                turns = local_turns(audio, exclusive=exclusive)
-                mapping = resolve_speakers(audio, turns, store)
-                store.save()
-                segments = labeled_segments(turns, mapping, store, id_base)
-                log(f"chunk done in {time.time() - started:.1f}s — "
-                    f"{len(segments)} turns, {len({s['id'] for s in segments})} voices"
-                    f"{' [remote]' if is_remote else ''}")
-                emit({"type": "chunk_result",
-                      "window_start": job.get("window_start", 0.0),
-                      "segments": segments, **echo})
-            else:  # final
-                turns = local_turns(audio, int(job.get("num_speakers", 0)), exclusive=exclusive)
-                mapping = resolve_speakers(audio, turns, store)
-                store.save()
-                segments = labeled_segments(turns, mapping, store, id_base)
-                log(f"final done in {time.time() - started:.1f}s — "
-                    f"{len(segments)} turns, {len({s['id'] for s in segments})} speakers"
-                    f"{' [remote]' if is_remote else ''}")
-                emit({"type": "result", "segments": segments, **echo})
+            mapping = resolve_speakers(audio, turns, store)
+            store.save()
+            identities = speaker_identities(mapping, store, id_base)
+            named = sum(1 for v in identities.values() if v is not None)
+            log(f"identify done in {time.time() - started:.1f}s — "
+                f"{len(turns)} turns, {named}/{len(identities)} voices identified"
+                f"{' [remote]' if is_remote else ''}")
+            emit({"type": "identify_result", "id": request_id,
+                  "speakers": identities})
         except Exception:  # noqa: BLE001 — job error: report, keep serving
             # The stream is echoed so the app fails only THAT stream's gate —
-            # a remote failure must never abort the office transcript.
-            emit({"type": "error", "text": f"Diarization failed: {brief_traceback()}", **echo})
+            # a remote failure must never abort the office transcript. Note the
+            # store was NOT saved on this path: a job that raised leaves disk
+            # exactly as it was.
+            emit({"type": "error", "id": request_id,
+                  "text": f"Speaker identification failed: {brief_traceback()}",
+                  **echo})
 
 
 if __name__ == "__main__":

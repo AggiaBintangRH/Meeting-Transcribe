@@ -46,7 +46,10 @@ import os
 import struct
 import sys
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# This file lives at scripts/<service>/<file>.py (one folder per service,
+# owner 2026-07-29), so the project root — which owns models/ — is THREE levels
+# up, not two. Bundled, that root is Contents/Resources.
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("HF_HOME", os.path.join(BASE, "models"))
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
@@ -65,7 +68,7 @@ def _emit_raw(kind: str, text: str, stream: str = None) -> None:
 
 
 def log(message: str) -> None:
-    """Timing/diagnostic line → logs/nemotron-asr.log via stderr.
+    """Timing/diagnostic line → logs/nemotron.log via stderr.
 
     Kept off stdout deliberately: stdout is the app's JSON-lines protocol and
     an extra line there would be a parse error, not a log entry.

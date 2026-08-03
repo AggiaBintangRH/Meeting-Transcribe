@@ -6,11 +6,12 @@ import XCTest
 final class RowCoalesceTests: XCTestCase {
     private func row(_ speaker: Int?, _ text: String, _ s: Double, _ e: Double,
                      remote: Bool = false, confirmed: Bool = true,
-                     overlapped: Bool = false) -> AudioRecorder.SpeakerUtterance {
+                     overlapped: Bool = false,
+                     asrConf: Double? = nil) -> AudioRecorder.SpeakerUtterance {
         AudioRecorder.SpeakerUtterance(
             id: "\(text)", speaker: speaker.map { "S\($0)" }, speakerID: speaker,
             start: s, end: e, text: text, confirmed: confirmed,
-            overlapped: overlapped, isRemote: remote)
+            overlapped: overlapped, isRemote: remote, asrConf: asrConf)
     }
     private func fn(_ r: [AudioRecorder.SpeakerUtterance]) -> [AudioRecorder.SpeakerUtterance] {
         AudioRecorder.coalesceAdjacentSameSpeaker(r)
@@ -59,12 +60,49 @@ final class RowCoalesceTests: XCTestCase {
         XCTAssertEqual(out[0].text, "a b c")
         XCTAssertTrue(out[0].overlapped)
     }
+
+    // MARK: - asr confidence across the merge
+
+    /// A merged row covers both chunks, so it is worth no more than the worse of
+    /// them. Averaging would let a good chunk vouch for a bad one.
+    func testAsrConfTakesTheMinimumOfMergedChunks() {
+        let out = fn([row(1, "a", 0, 3, asrConf: 0.94),
+                      row(1, "b", 3, 6, asrConf: 0.62),
+                      row(1, "c", 6, 9, asrConf: 0.81)])
+        XCTAssertEqual(out.count, 1)
+        XCTAssertEqual(out[0].asrConf ?? -1, 0.62, accuracy: 1e-9)
+    }
+
+    /// nil means "this model reports nothing", not "zero" — it must neither win
+    /// the minimum nor erase the measurement beside it.
+    func testNilAsrConfIsIgnoredRatherThanTreatedAsZero() {
+        let out = fn([row(1, "a", 0, 3, asrConf: 0.7), row(1, "b", 3, 6)])
+        XCTAssertEqual(out[0].asrConf ?? -1, 0.7, accuracy: 1e-9)
+
+        let reversed = fn([row(1, "a", 0, 3), row(1, "b", 3, 6, asrConf: 0.7)])
+        XCTAssertEqual(reversed[0].asrConf ?? -1, 0.7, accuracy: 1e-9)
+    }
+
+    func testAllNilStaysNil() {
+        let out = fn([row(1, "a", 0, 3), row(1, "b", 3, 6)])
+        XCTAssertNil(out[0].asrConf, "Qwen3/Granite rows show no asr number at all")
+    }
+
+    /// Rows that do NOT merge keep their own numbers — no leakage across a
+    /// speaker change.
+    func testUnmergedRowsKeepTheirOwnConfidence() {
+        let out = fn([row(1, "a", 0, 3, asrConf: 0.9),
+                      row(2, "b", 3, 6, asrConf: 0.4)])
+        XCTAssertEqual(out.count, 2)
+        XCTAssertEqual(out[0].asrConf ?? -1, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(out[1].asrConf ?? -1, 0.4, accuracy: 1e-9)
+    }
 }
 
 /// `timeDistance` and the nearest-talker tail fallback.
 final class TailAttributionTests: XCTestCase {
-    private func turn(_ id: Int, _ s: Double, _ e: Double) -> DiarizationService.Turn {
-        DiarizationService.Turn(start: s, end: e, id: id, name: "S\(id)")
+    private func turn(_ id: Int, _ s: Double, _ e: Double) -> SpeakerTurn {
+        SpeakerTurn(start: s, end: e, id: id, name: "S\(id)")
     }
     func testOverlapIsZeroDistance() {
         XCTAssertEqual(AudioRecorder.timeDistance(from: turn(1, 0, 10), to: 5...8), 0)
@@ -90,10 +128,12 @@ final class TailAttributionTests: XCTestCase {
 /// same-speaker rows is relabelled; genuine turns are left alone.
 final class SpeakerIslandTests: XCTestCase {
     private func row(_ speaker: Int?, _ text: String, _ s: Double, _ e: Double,
-                     remote: Bool = false, confirmed: Bool = true) -> AudioRecorder.SpeakerUtterance {
+                     remote: Bool = false, confirmed: Bool = true,
+                     speakerConf: Double? = nil) -> AudioRecorder.SpeakerUtterance {
         AudioRecorder.SpeakerUtterance(
             id: "\(text)-\(s)", speaker: speaker.map { "S\($0)" }, speakerID: speaker,
-            start: s, end: e, text: text, confirmed: confirmed, isRemote: remote)
+            start: s, end: e, text: text, confirmed: confirmed, isRemote: remote,
+            speakerConf: speakerConf)
     }
     private func absorbThenCoalesce(_ r: [AudioRecorder.SpeakerUtterance]) -> [AudioRecorder.SpeakerUtterance] {
         AudioRecorder.coalesceAdjacentSameSpeaker(AudioRecorder.absorbShortSpeakerIslands(r))
@@ -109,6 +149,59 @@ final class SpeakerIslandTests: XCTestCase {
         XCTAssertEqual(out.count, 1, "the flicker word rejoins Speaker 2's sentence")
         XCTAssertEqual(out[0].speakerID, 2)
         XCTAssertEqual(out[0].text, "If we have a one minute speech to deliver, the main challenge")
+    }
+
+    /// The measured A-B-A-B sliver pattern, with the real durations from
+    /// `recordings/meeting-2026-07-28T03-13-37Z.wav`: pyannote emitted
+    /// 1.735..18.863 S1, then an 0.237s S2 and an 0.287s S1, then 19.387.. S2.
+    ///
+    /// This pins the claim that boundary snapping deliberately does NOT touch
+    /// slivers (they are shorter than its 0.5s minimum turn): absorb + coalesce
+    /// already resolve them, and the net output is the correct two rows. The
+    /// FIRST island fires (both flanks are S1) and the second then has differing
+    /// flanks — but it is itself S1, so the coalesce sweeps all three together.
+    func testMeasuredSliverPatternCollapsesToTwoRowsWithoutSnapping() {
+        let out = absorbThenCoalesce([
+            row(1, "one", 1.735, 18.863),
+            row(2, "two", 18.863, 19.100),     // 0.237s
+            row(1, "three", 19.100, 19.387),   // 0.287s
+            row(2, "four", 19.387, 39.923),
+        ])
+        XCTAssertEqual(out.count, 2, "net A, B — the two slivers are absorbed, not snapped")
+        XCTAssertEqual(out[0].speakerID, 1)
+        XCTAssertEqual(out[0].text, "one two three")
+        XCTAssertEqual(out[1].speakerID, 2)
+        XCTAssertEqual(out[1].text, "four")
+    }
+
+    /// MOSS ids are exempt from the absorber, and this is a behaviour fix rather
+    /// than defensive tidiness — it was caught by an actual failing case during
+    /// integration. Absorbing is an ATND beam-FLICKER heuristic: it assumes a
+    /// sub-second wrong-speaker row is a timing artefact. MOSS is not a timing
+    /// source; it attributes the words itself, so a short MOSS row is a short
+    /// utterance, not a glitch. Without the exemption a genuine 0.8s "Hi." was
+    /// relabelled onto its neighbours and coalesce then merged all three rows
+    /// into one — silently discarding the model's own attribution, which is
+    /// exactly what routing MOSS through the pinned-row path exists to avoid.
+    func testMossIslandsAreNeverAbsorbed() {
+        let base = AudioRecorder.mossIDBase
+        let out = absorbThenCoalesce([
+            row(base + 1, "Hello there.", 0, 4.0),
+            row(base + 2, "Hi.", 4.0, 4.8),        // 0.8s — well under the absorb limit
+            row(base + 1, "How are you?", 4.8, 9.0),
+        ])
+        XCTAssertEqual(out.count, 3, "MOSS attributed these itself; nothing may be merged away")
+        XCTAssertEqual(out.map(\.speakerID), [base + 1, base + 2, base + 1])
+        XCTAssertEqual(out[1].text, "Hi.")
+
+        // The identical shape with pyannote ids still absorbs — the exemption
+        // must be scoped to MOSS, not a weakening of the rule itself.
+        let pyannote = absorbThenCoalesce([
+            row(1, "Hello there.", 0, 4.0),
+            row(2, "Hi.", 4.0, 4.8),
+            row(1, "How are you?", 4.8, 9.0),
+        ])
+        XCTAssertEqual(pyannote.count, 1, "pyannote path unchanged: the island is still absorbed")
     }
 
     func testLongIslandIsNotAbsorbed() {
@@ -146,5 +239,29 @@ final class SpeakerIslandTests: XCTestCase {
             row(nil, "three", 3.2, 6),
         ])
         XCTAssertEqual(out[1].speakerID, 1, "nil-id flanks are not a known same speaker")
+    }
+
+    /// An absorbed island's identity comes from a HEURISTIC (flanked on both
+    /// sides), not from a voice matched against a profile — so whatever
+    /// confidence it carried described the speaker it no longer claims to be,
+    /// and must not follow the new label.
+    func testAbsorbedIslandLosesItsSpeakerConfidence() {
+        let out = AudioRecorder.absorbShortSpeakerIslands([
+            row(2, "speech", 88, 94.0, speakerConf: 0.90),
+            row(1, "to", 94.0, 94.2, speakerConf: 0.51),
+            row(2, "deliver", 94.2, 100, speakerConf: 0.90),
+        ])
+        XCTAssertEqual(out[1].speakerID, 2)
+        XCTAssertNil(out[1].speakerConf, "0.51 was Speaker 1's score, not Speaker 2's")
+    }
+
+    /// A row that is NOT absorbed keeps everything it had.
+    func testUnabsorbedRowKeepsItsSpeakerConfidence() {
+        let out = AudioRecorder.absorbShortSpeakerIslands([
+            row(2, "so anyway", 0, 5, speakerConf: 0.9),
+            row(1, "no I disagree completely", 5, 7, speakerConf: 0.77),
+            row(2, "well okay", 7, 10, speakerConf: 0.9),
+        ])
+        XCTAssertEqual(out[1].speakerConf ?? -1, 0.77, accuracy: 1e-9)
     }
 }

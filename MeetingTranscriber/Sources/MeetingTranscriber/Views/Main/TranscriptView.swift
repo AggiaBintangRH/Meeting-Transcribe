@@ -104,7 +104,17 @@ struct TranscriptView: View {
     private func rowView(_ row: AudioRecorder.SpeakerUtterance) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                if let speaker = row.speaker, let id = row.speakerID {
+                // MOSS ids are excluded from the renameable branch: a MOSS label
+                // ("Speaker 1" since 2026-07-31, formerly "S1 · #7") is the model's
+                // own name for a speaker inside ONE chunk, backed by no voice
+                // profile and no cluster, so there is nothing a new name could be
+                // saved to and nothing it would apply to in the next chunk.
+                // `renameSpeaker` refuses these ids anyway; this is what stops the
+                // app offering an action it will not take. Note the label now LOOKS
+                // exactly like a pyannote one — this id check is the only thing
+                // distinguishing them here, so do not relax it to a name test.
+                if let speaker = row.speaker, let id = row.speakerID,
+                   id < AudioRecorder.mossIDBase {
                     Button {
                         // Remote rows are renameable too, but what is stored is the
                         // PROFILE name ("R1"), not the composed row label — strip
@@ -161,6 +171,20 @@ struct TranscriptView: View {
                     .foregroundColor(Theme.overlapTagText)
                     .help("Spoken over another speaker — text here is approximate")
                 }
+
+                // Confidence, deliberately quiet: smaller and fainter than
+                // everything beside it, so a row reads as speech first and as
+                // measurement second. LAST in the row so it is what gives way
+                // when the overlap tag and a long speaker name compete for width.
+                // Absent entirely when neither number was measured — an empty
+                // slot says "not measured", which a "0.00" would contradict.
+                if let confidence = confidenceText(row) {
+                    Text(confidence)
+                        .font(.system(size: 11, weight: .regular).monospacedDigit())
+                        .foregroundColor(Theme.textFaint)
+                        .lineLimit(1)
+                        .help(Self.confidenceHelp)
+                }
             }
 
             Text(row.text)
@@ -201,6 +225,44 @@ struct TranscriptView: View {
                 .foregroundColor(Theme.textFaint)
         }
     }
+
+    // MARK: - Confidence
+
+    /// `spk 0.87 · asr 0.92` — whichever parts were actually measured, or nil
+    /// when neither was. Two decimals: the numbers are for comparing rows at a
+    /// glance, and more digits would suggest a precision neither measure has.
+    private func confidenceText(_ row: AudioRecorder.SpeakerUtterance) -> String? {
+        var parts: [String] = []
+        if let speaker = row.speakerConf {
+            parts.append(String(format: "spk %.2f", speaker))
+        }
+        if let asr = row.asrConf {
+            parts.append(String(format: "asr %.2f", asr))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// Says what each number is, what it is NOT, and why either can be missing.
+    /// The last part matters most: a missing number is a normal, meaningful
+    /// state here, and without this the user has no way to tell it from a bug.
+    private static let confidenceHelp = """
+    spk — how strongly this voice matched its saved speaker profile \
+    (cosine similarity, 0.50–1.00; below 0.50 never matches). Where a row spans \
+    several turns, the lowest of them is shown.
+
+    asr — how confident the transcription model was in these words: the average \
+    per-token probability. It is NOT a percent-correct — a fluent mishearing can \
+    still score high.
+
+    A number is left out when it was never measured, which is normal:
+    • asr is missing unless the chunked model is Whisper — Qwen3, Granite and \
+    Voxtral report no confidence at all.
+    • spk is missing on a speaker's first appearance (a new profile matched \
+    nothing), on speakers identified by ATND beam position, on live \
+    (not yet confirmed) text, and on rows relabelled by the short-island rule.
+    • Both are missing on rows produced by overlap repair, whose text comes from \
+    separated audio rather than the original recording.
+    """
 
     private func timeRange(_ row: AudioRecorder.SpeakerUtterance) -> String? {
         guard let start = row.start, let end = row.end else { return nil }

@@ -120,10 +120,33 @@ enum PythonRuntime {
 
     /// File handle for a sidecar's stderr log (logs/<name>.log under the data dir).
     /// Crucial for debugging — Python tracebacks land here instead of vanishing.
+    /// Roll a log over at this size, keeping ONE previous generation as
+    /// `<name>.log.1`. Sidecar logs are append-only and were never bounded:
+    /// `position-diarization.log` had reached 13 MB by 2026-07-31 and nothing
+    /// would ever have stopped it. They are the project's primary evidence when
+    /// something goes wrong — every dropped chunk, every gate decision, every
+    /// truncation warning is only there — so they are ROLLED rather than
+    /// truncated: rolling loses the oldest generation, truncating loses the
+    /// evidence you are currently reading.
+    ///
+    /// 16 MB holds many meetings of ordinary logging (a full session writes tens
+    /// of KB), so a roll is rare and the previous generation is almost always
+    /// still the run before this one.
+    static let logRollBytes: UInt64 = 16 * 1024 * 1024
+
     static func logHandle(name: String) -> FileHandle {
         let dir = dataDir.appendingPathComponent("logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("\(name).log")
+        // Rolled at OPEN time, not per write: this is the one place every sidecar
+        // log is created, and checking a file size once per process start costs
+        // nothing, while checking per line would cost a stat on every log call.
+        if let size = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size])
+                        as? NSNumber, size.uint64Value >= logRollBytes {
+            let previous = dir.appendingPathComponent("\(name).log.1")
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: file, to: previous)
+        }
         if !FileManager.default.fileExists(atPath: file.path) {
             FileManager.default.createFile(atPath: file.path, contents: nil)
         }

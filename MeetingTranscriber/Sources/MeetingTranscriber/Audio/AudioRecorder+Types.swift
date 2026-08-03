@@ -28,6 +28,11 @@ extension AudioRecorder {
         // against `window`. Consumed by `WordAttribution` in `derivedRows`.
         var words: [ChunkedASRService.AlignedWord]? = nil
         var alignedChunkDuration: Double? = nil
+        // The chunked model's confidence in THIS chunk's text (0…1, pooled
+        // per-token probability). nil when the model reports none — Whisper is
+        // the only runtime that does — and nil on repaired/debug segments, whose
+        // text came from a separated track rather than this chunk's audio.
+        var asrConf: Double? = nil
     }
 
     /// One transcribed Remote (conferencing) chunk. Deliberately NOT a
@@ -38,15 +43,19 @@ extension AudioRecorder {
     /// path — so it is a separate collection that only meets office rows at the
     /// final sort in `rebuildDisplayRows`.
     ///
-    /// Text only, by design: the transcript comes from the sidecar's `-2`
-    /// file-transcribe frame, which calls `transcribe_path()` directly and never
-    /// runs the forced aligner — so there are no `words`/`dur` and remote
-    /// attribution stays sentence-level. Acceptable: word-exact timing matters
-    /// where ATND and pyannote boundaries compete, which is Office-only.
+    /// Text and its ASR confidence, by design — no word timings: the transcript
+    /// comes from the sidecar's `-2` file-transcribe frame, which calls
+    /// `transcribe_path()` directly and never runs the forced aligner, so there
+    /// are no `words`/`dur` and remote attribution stays sentence-level.
+    /// Acceptable: word-exact timing matters where ATND and pyannote boundaries
+    /// compete, which is Office-only. The confidence, unlike the timings, DOES
+    /// come back on that frame (same model, same pooling), so remote rows show
+    /// the same `asr` number office rows do.
     struct RemoteSegment: Identifiable, Equatable {
         let id = UUID()
         var text: String
         var window: ClosedRange<Double>   // recording-time span (shared clock)
+        var conf: Double? = nil           // chunked-ASR confidence (Whisper only)
     }
 
     /// The live Remote caption — what the Remote realtime engine has produced
@@ -95,6 +104,25 @@ extension AudioRecorder {
         /// "Remote Speaker - …" label. The id range, not this flag, is what routes
         /// a rename to the right store.
         var isRemote: Bool = false
+        /// How confident the identification of THIS speaker is: the cosine
+        /// similarity that matched the voice to its saved profile, taken as the
+        /// MINIMUM over the turns this row spans (the weakest evidence behind the
+        /// label is what the label is worth). Filled by
+        /// `annotateSpeakerConfidence` as the last step of the row build.
+        ///
+        /// nil = no measurement, which happens legitimately: a speaker's first
+        /// appearance (a brand-new profile matched nothing), an ATND position
+        /// row (positions come from the beam, not from a voice embedding), an
+        /// unconfirmed realtime row, or a row whose label came from
+        /// `absorbShortSpeakerIslands` (a heuristic relabel, not a cosine).
+        var speakerConf: Double? = nil
+        /// The chunked model's confidence in this row's TEXT, carried down from
+        /// the segment it came from. When rows from different chunks coalesce it
+        /// is the MINIMUM of the non-nil values — overstating confidence is the
+        /// invisible, harmful direction, the same asymmetry the hallucination
+        /// gates are tuned around. nil for models that report none (everything
+        /// but Whisper) and for repaired/debug rows.
+        var asrConf: Double? = nil
     }
 
     /// One line in the processing overlay — a leg of the post-stop work.
@@ -102,7 +130,10 @@ extension AudioRecorder {
     /// fit here (its `loadAll` runs one item at a time, these run concurrently).
     struct StopStep: Identifiable, Equatable {
         let id: String            // "chunk" | "diarize" | "repair"
-        let name: String
+        /// `var` since the stop-time full re-transcription: `ItemState` has no
+        /// progress payload, so a leg that runs for minutes counts its windows in
+        /// its name (`setStopStepName`). The id, not the name, identifies a step.
+        var name: String
         var state: ModelLoader.ItemState
     }
 }

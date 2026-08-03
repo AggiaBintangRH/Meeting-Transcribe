@@ -1,27 +1,47 @@
 import Foundation
 
-/// Client for the hybrid pyannote diarization sidecar (scripts/diarize-service.py).
+/// Client for the pyannote DIARIZATION sidecar (`scripts/pyannote/pyannote-service.py`).
 ///
-/// Pipeline + WeSpeaker embedder load once at session start (loading overlay).
-/// During the meeting, each audio chunk is diarized live and matched against
-/// the speaker-profile store (stable names). At stop, a batch pass over the
-/// full recording refines everything (best DER).
-final class DiarizationService: @unchecked Sendable {
+/// ONE SERVICE PER MODEL (owner, 2026-07-29). This used to be
+/// `DiarizationService`, talking to one sidecar that both diarized and identified.
+/// It now speaks only to the pipeline half: it answers WHO-SPOKE-WHEN with
+/// pipeline-local labels (`SPEAKER_00`, `SPEAKER_01`, …) and knows nothing about
+/// who those people are. Identity comes from `WeSpeakerService`, and the two are
+/// composed by `AudioRecorder.composeTurns`.
+///
+/// The pipeline loads once at session start (loading overlay). During the meeting
+/// each audio chunk is diarized live; at stop, a batch pass over the full
+/// recording refines everything (best DER).
+///
+/// This client has NO `resetProfiles`. There are no profiles on this side of the
+/// split — the stores belong entirely to `WeSpeakerService`, and so does their
+/// reset. `clusterThreshold` stays here, because that is a pipeline parameter.
+final class PyannoteService: @unchecked Sendable {
 
-    struct Turn: Decodable, Sendable {
+    /// One turn as the PIPELINE sees it: a span and a run-local label. No id, no
+    /// name, no confidence — those are identity, and identity is the other
+    /// service's job. Keeping the type this narrow is what makes it impossible
+    /// for the pipeline stage to write a voice into a profile store.
+    ///
+    /// `start`/`end` arrive UNROUNDED, deliberately. The identity stage slices
+    /// the waveform with these numbers, so rounding them on the wire would move
+    /// each slice by up to ~8 samples and change the embedding. Rounding to 3 dp
+    /// happens once, where it always did: in `composeTurns`, on the way to the
+    /// app-visible `SpeakerTurn`.
+    struct LocalTurn: Decodable, Sendable {
         let start: Double
         let end: Double
-        let id: Int          // persistent profile id
-        let name: String     // profile display name (renameable)
+        let label: String
     }
 
     /// Which identity space a job (and its result) belongs to.
     ///
-    /// The sidecar keeps ONE pyannote pipeline but TWO profile stores, so an
-    /// office voice can never be cosine-matched onto a remote profile or vice
-    /// versa. `office` is the default everywhere and is sent as an ABSENT field:
-    /// a single-stream session's wire bytes are exactly what they were before
-    /// dual-stream existed, which is the regression bar for this phase.
+    /// Office and Remote are two separate identity spaces, so an office voice can
+    /// never be cosine-matched onto a remote profile or vice versa — the
+    /// separation lives in `WeSpeakerService`'s two stores. Here the value is
+    /// PURE ROUTING: this sidecar has no per-stream state at all. `office` is the
+    /// default everywhere and is sent as an ABSENT field, so a single-stream
+    /// session's job lines are exactly what they were before dual-stream existed.
     enum Stream: String, Sendable {
         case office
         case remote
@@ -35,19 +55,26 @@ final class DiarizationService: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .scriptMissing:
-                return "scripts/diarize-service.py not found in the project folder."
+                return "scripts/pyannote/pyannote-service.py not found in the project folder."
             case .launchFailed(let reason):
-                return "Could not launch diarization sidecar: \(reason)"
+                return "Could not launch the pyannote diarization sidecar: \(reason)"
             case .startupFailed(let reason):
                 return reason
             }
         }
     }
 
-    /// Live chunk result: (windowStart, turns with chunk-local times, stream).
-    var onChunkResult: ((Double, [Turn], Stream) -> Void)?
-    /// Final batch result over the full recording, for one stream.
-    var onFinalResult: (([Turn], Stream) -> Void)?
+    /// Live chunk result: (windowStart, the audio file that was diarized,
+    /// chunk-local turns, stream).
+    ///
+    /// The AUDIO PATH IS LOAD-BEARING, not a convenience: it is what the caller
+    /// hands the identity stage next. Echoing it means there is no second
+    /// bookkeeping map to keep in step, and it works identically for a chunk's
+    /// temp WAV and for the recording file at stop.
+    var onChunkResult: ((Double, String, [LocalTurn], Stream) -> Void)?
+    /// Final batch result over the full recording, for one stream:
+    /// (the audio file, turns, stream).
+    var onFinalResult: ((String, [LocalTurn], Stream) -> Void)?
     /// Job error, tagged with the stream it belongs to so one stream's failure
     /// never settles the other's gate. Startup errors carry no stream → office.
     var onError: ((String, Stream) -> Void)?
@@ -55,10 +82,15 @@ final class DiarizationService: @unchecked Sendable {
     private let process = Process()
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
-    private let writeQueue = DispatchQueue(label: "diarize.write", qos: .utility)
+    private let writeQueue = DispatchQueue(label: "pyannote.write", qos: .utility)
+
+    /// The sidecar and its OWN stderr log — two writers on one file is the
+    /// 2026-07-15 mistake, and splitting the services makes it live again.
+    static let scriptName = "pyannote/pyannote-service.py"
+    static let logName = "pyannote"
 
     init() throws {
-        let script = PythonRuntime.scriptsDir.appendingPathComponent("diarize-service.py")
+        let script = PythonRuntime.scriptsDir.appendingPathComponent(Self.scriptName)
         guard FileManager.default.fileExists(atPath: script.path) else {
             throw ServiceError.scriptMissing
         }
@@ -68,7 +100,7 @@ final class DiarizationService: @unchecked Sendable {
         process.arguments = command.arguments
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = PythonRuntime.logHandle(name: "diarize")
+        process.standardError = PythonRuntime.logHandle(name: Self.logName)
 
         process.environment = PythonRuntime.sidecarEnvironment()
 
@@ -76,11 +108,11 @@ final class DiarizationService: @unchecked Sendable {
             throw ServiceError.launchFailed(error.localizedDescription)
         }
 
-        let startup = waitUntilLoaded(timeout: 300) // torch + pipeline + embedder
+        let startup = waitUntilLoaded(timeout: 300) // torch + pipeline
         guard startup.ready else {
             process.terminate()
             throw ServiceError.startupFailed(
-                startup.errorReason ?? "Diarization sidecar did not become ready (timeout)."
+                startup.errorReason ?? "The pyannote sidecar did not become ready (timeout)."
             )
         }
         startResultReader()
@@ -111,21 +143,17 @@ final class DiarizationService: @unchecked Sendable {
     }
 
     /// pyannote clustering threshold — absent/0 falls back to its default 0.6.
-    /// Exposed for per-room calibration; see DiarizationTab.
+    /// Exposed for per-room calibration; see DiarizationTab. A PIPELINE
+    /// parameter, which is why it stayed on this side of the split.
     private static func clusterThreshold() -> Double {
         let v = UserDefaults.standard.double(forKey: "diarization.clusterThreshold")
         return v > 0 ? v : 0.6
     }
 
-    /// Wipe all saved voice profiles — call to start a recording fresh.
-    func resetProfiles() {
-        send(["cmd": "reset"])
-    }
-
     private func send(_ job: [String: Any], stream: Stream = .office) {
         guard process.isRunning else {
-            onError?("Diarization sidecar is not running — restart the recording session.",
-                     stream)
+            onError?("The pyannote diarization sidecar is not running — "
+                     + "restart the recording session.", stream)
             return
         }
         // Office is sent as an absent key, not as "office": the sidecar reads a
@@ -151,8 +179,11 @@ final class DiarizationService: @unchecked Sendable {
     private struct Message: Decodable {
         let type: String
         let text: String?
-        let segments: [Turn]?
+        let segments: [LocalTurn]?
         let window_start: Double?
+        /// The file this reply is about — echoed straight back, so the caller can
+        /// hand it to the identity stage without a lookup.
+        let audio: String?
         /// Echoed back only for remote jobs; absent ⇒ office (see `Stream`).
         let stream: String?
     }
@@ -167,7 +198,9 @@ final class DiarizationService: @unchecked Sendable {
         reader.readabilityHandler = { handle in
             let data = handle.availableData
             if data.isEmpty {
-                if errorReason == nil { errorReason = "Diarization sidecar exited during startup." }
+                if errorReason == nil {
+                    errorReason = "The pyannote sidecar exited during startup."
+                }
                 semaphore.signal()
                 return
             }
@@ -210,9 +243,10 @@ final class DiarizationService: @unchecked Sendable {
                 let stream = message.stream.flatMap(Stream.init(rawValue:)) ?? .office
                 switch message.type {
                 case "chunk_result":
-                    self.onChunkResult?(message.window_start ?? 0, message.segments ?? [], stream)
+                    self.onChunkResult?(message.window_start ?? 0, message.audio ?? "",
+                                        message.segments ?? [], stream)
                 case "result":
-                    self.onFinalResult?(message.segments ?? [], stream)
+                    self.onFinalResult?(message.audio ?? "", message.segments ?? [], stream)
                 case "error":
                     self.onError?(message.text ?? "unknown diarization error", stream)
                 default: break

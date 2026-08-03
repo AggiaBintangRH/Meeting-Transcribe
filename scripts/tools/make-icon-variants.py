@@ -7,14 +7,16 @@ Output (written next to the input):
   1024-dark.png    full-color, darkened background, glyph/border/canvas untouched.
   1024-tinted.png  pure grayscale luminance (system colorizes it), alpha preserved.
 
-Run with the project venv: .venv/bin/python3 scripts/make-icon-variants.py
+Run with the project venv: .venv/bin/python3 scripts/tools/make-icon-variants.py
 """
 import sys
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
-ROOT = Path(__file__).resolve().parent.parent
+# scripts/tools/ — the project root is THREE levels up (owner, 2026-07-29:
+# one folder per service).
+ROOT = Path(__file__).resolve().parent.parent.parent
 ICONSET = (
     ROOT
     / "MeetingTranscriber"

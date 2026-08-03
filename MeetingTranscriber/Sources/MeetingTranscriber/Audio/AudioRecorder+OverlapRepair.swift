@@ -28,6 +28,17 @@ extension AudioRecorder {
     func maybeStartOverlapRepair() {
         let d = UserDefaults.standard
         guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? false else { return }
+        // Deliberate skip, not a failure. Under the MOSS diarization engine there
+        // are no pyannote turns to find overlap windows in, and `ModelLoader`
+        // skips loading either repair engine — so without this the code below
+        // would fall through to `.failed("engine unavailable")` and report a
+        // missing model as the reason for something we chose not to do.
+        guard !mossDiarizationActive else {
+            overlapLog("skipped — diarization engine is MOSS, so there are no pyannote "
+                       + "turns to locate overlap windows in")
+            finishRepairStep(.done)
+            return
+        }
         guard stopped, finalDiarDone, lastChunkDone else { return }
         guard repairTask == nil, !overlapRepairing else { return }
         guard let recording = lastRecordingURL else { finishRepairStep(.done); return }
@@ -172,8 +183,12 @@ extension AudioRecorder {
                     overlapLog("SKIP — chunked ASR not available for re-transcription")
                     cleanup(tmpDir); break
                 }
-                let text1 = (try? await chunked.transcribeFile(path: tracks[0].path)) ?? ""
-                let text2 = (try? await chunked.transcribeFile(path: tracks[1].path)) ?? ""
+                // The confidence is deliberately DISCARDED here: it describes the
+                // re-ASR of a SEPARATED track, not the original mixed audio the
+                // row's words came from, so showing it against a repaired row
+                // would attach a number to the wrong thing.
+                let text1 = (try? await chunked.transcribeFile(path: tracks[0].path).text) ?? ""
+                let text2 = (try? await chunked.transcribeFile(path: tracks[1].path).text) ?? ""
                 processRepair(window: w, tracks: tracks, text1: text1, text2: text2)
             } catch {
                 overlapLog("SKIP [\(fmt(w.start))-\(fmt(w.end))] separation failed: \(error.localizedDescription)")
@@ -233,7 +248,8 @@ extension AudioRecorder {
                         + "\n    existing: \(anchor)\n    track: \(trackText)")
                 case .combine:
                     decisions[speakerID] = r.text
-                    overlapLog("  speaker \(speakerID): COMBINE (run=\(r.longestRun))"
+                    overlapLog("  speaker \(speakerID): COMBINE (run=\(r.longestRun), "
+                        + "inserted=\(r.inserted)/\(trackTokenCount(trackText)) track tokens)"
                         + "\n    before: \(anchor)\n    track: \(trackText)\n    after: \(r.text)")
                 case .replace:
                     decisions[speakerID] = r.text
@@ -271,7 +287,13 @@ extension AudioRecorder {
                                 service: DicowService,
                                 recording: URL) async {
         // Same language the chunked pass uses; "auto" → let DiCoW detect.
-        let code = UserDefaults.standard.string(forKey: "chunked.language") ?? "auto"
+        // Resolved through the SELECTED chunked model exactly as
+        // `ChunkedASRService.Config.fromSettings` does — otherwise "same as the
+        // chunked pass" quietly stops being true whenever the stored code is one
+        // that model cannot take (it runs on auto, DiCoW would not).
+        let code = Languages.resolve(
+            language: UserDefaults.standard.string(forKey: "chunked.language") ?? "auto",
+            forModel: ChunkedASRModelFactory.fromSettings().info.id)
         let language: String? = code == "auto" ? nil : code
 
         let n = windows.count
@@ -367,7 +389,8 @@ extension AudioRecorder {
                         + "\n    existing: \(anchor)\n    dicow: \(txt)")
                 case .combine:
                     decisions[id] = r.text
-                    overlapLog("  speaker \(id): COMBINE (run=\(r.longestRun))"
+                    overlapLog("  speaker \(id): COMBINE (run=\(r.longestRun), "
+                        + "inserted=\(r.inserted)/\(trackTokenCount(txt)) track tokens)"
                         + "\n    before: \(anchor)\n    dicow: \(txt)\n    after: \(r.text)")
                 case .replace:
                     decisions[id] = r.text
@@ -492,6 +515,14 @@ extension AudioRecorder {
         return uni == 0 ? 0.0 : Double(ta.intersection(tb).count) / Double(uni)
     }
 
+    /// Whitespace-split token count — the denominator of a COMBINE's
+    /// `inserted=N/M`. N/M says how much of the track actually landed in the
+    /// transcript, which is the number that tells a genuine one-word recovery
+    /// apart from a wholesale re-wording.
+    private func trackTokenCount(_ s: String) -> Int {
+        s.split(whereSeparator: { $0.isWhitespace }).count
+    }
+
     func fmt(_ s: Double) -> String { String(format: "%.1f", s) }
     func fmt3(_ x: Double) -> String { String(format: "%.3f", x) }
 
@@ -500,8 +531,11 @@ extension AudioRecorder {
     }
 
     /// Append a line to logs/overlap-repair-decisions.log (mandatory decision logging).
-    /// Kept separate from the sidecar's own stderr log (overlap-repair-sidecar.log) —
-    /// they used to share one file with no coordination between writers.
+    /// Kept separate from each engine's own sidecar stderr log (logs/mossformer2.log,
+    /// logs/dicow.log) — they used to share one file with no coordination between
+    /// writers. This one is SWIFT-owned and deliberately SHARED by both engines, so
+    /// it is NOT a `scripts/<name>/ → logs/<name>.log` service log and is exempt from
+    /// that rule (which `layout/*` in sidecar-tests.py pins for the 13 that are).
     private func overlapLog(_ message: String) {
         let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

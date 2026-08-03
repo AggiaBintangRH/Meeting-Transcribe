@@ -19,11 +19,11 @@ asymmetry rather than hiding it.
 Keys 1-6 TOGGLE each beam, so holding two on is genuine simultaneous speech.
 
 Usage:
-    python3 scripts/atnd1061-multicast-simulator.py
-    python3 scripts/atnd1061-multicast-simulator.py --group 239.0.0.100 --port 17000
-    python3 scripts/atnd1061-multicast-simulator.py --source-ip 192.168.1.50
-    python3 scripts/atnd1061-multicast-simulator.py --switch-jitter 8   # settle after switch
-    python3 scripts/atnd1061-multicast-simulator.py --beam-override 2:33:200  # move a beam
+    python3 scripts/atnd/atnd1061-multicast-simulator.py
+    python3 scripts/atnd/atnd1061-multicast-simulator.py --group 239.0.0.100 --port 17000
+    python3 scripts/atnd/atnd1061-multicast-simulator.py --source-ip 192.168.1.50
+    python3 scripts/atnd/atnd1061-multicast-simulator.py --switch-jitter 8   # settle after switch
+    python3 scripts/atnd/atnd1061-multicast-simulator.py --beam-override 2:33:200  # move a beam
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 import Foundation
 
 /// Client for the persistent DiCoW v3.3 target-speaker ASR sidecar
-/// (scripts/dicow-service.py). Overlap attempt #4 (2026-07-16).
+/// (scripts/dicow/dicow-service.py). Overlap attempt #4 (2026-07-16).
 ///
 /// DiCoW is a diarization-conditioned Whisper: given one speaker's mask over a
 /// window it transcribes only THAT speaker, so overlaps are resolved inside the
@@ -30,7 +30,7 @@ final class DicowService: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .scriptMissing:
-                return "scripts/dicow-service.py not found in the project folder."
+                return "scripts/dicow/dicow-service.py not found in the project folder."
             case .venvMissing:
                 return "The DiCoW runtime (.venv-dicow) is missing. "
                      + "Run download-best-models.sh, then retry."
@@ -61,7 +61,7 @@ final class DicowService: @unchecked Sendable {
     }
 
     init() throws {
-        let script = PythonRuntime.scriptsDir.appendingPathComponent("dicow-service.py")
+        let script = PythonRuntime.scriptsDir.appendingPathComponent("dicow/dicow-service.py")
         guard FileManager.default.fileExists(atPath: script.path) else {
             throw ServiceError.scriptMissing
         }
@@ -73,7 +73,10 @@ final class DicowService: @unchecked Sendable {
         process.arguments = command.arguments
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = PythonRuntime.logHandle(name: "dicow-sidecar")
+        // logs/dicow.log — one service, one folder, one log (2026-07-31). NOT
+        // logs/overlap-repair-decisions.log, which is Swift's own decision log
+        // and is SHARED with the MossFormer2 engine.
+        process.standardError = PythonRuntime.logHandle(name: "dicow")
 
         process.environment = PythonRuntime.sidecarEnvironment()
 
@@ -133,7 +136,7 @@ final class DicowService: @unchecked Sendable {
             guard let self else { return }
             let cont = self.withStateLock { self.continuations.removeValue(forKey: id) }
             cont?.resume(throwing: ServiceError.requestFailed(
-                "DiCoW transcription timed out (180s) — see logs/dicow-sidecar.log"))
+                "DiCoW transcription timed out (180s) — see logs/dicow.log"))
         }
 
         return try await withCheckedThrowingContinuation { cont in

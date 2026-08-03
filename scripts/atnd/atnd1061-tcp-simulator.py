@@ -26,12 +26,12 @@ Deliberately NOT implemented: s_network_dante and s_powersave — the spec says
 they reboot the device, so they are out of scope for this app.
 
 Usage:
-    python3 scripts/atnd1061-tcp-simulator.py                 # 127.0.0.1:17300
-    python3 scripts/atnd1061-tcp-simulator.py --port 17300 --host 0.0.0.0
-    python3 scripts/atnd1061-tcp-simulator.py --reject        # refuse commands
-    python3 scripts/atnd1061-tcp-simulator.py --silent        # accept, never reply
-    python3 scripts/atnd1061-tcp-simulator.py --delay-ms 4000 # late replies
-    python3 scripts/atnd1061-tcp-simulator.py --aec-odd       # spec's own broken AEC example
+    python3 scripts/atnd/atnd1061-tcp-simulator.py                 # 127.0.0.1:17300
+    python3 scripts/atnd/atnd1061-tcp-simulator.py --port 17300 --host 0.0.0.0
+    python3 scripts/atnd/atnd1061-tcp-simulator.py --reject        # refuse commands
+    python3 scripts/atnd/atnd1061-tcp-simulator.py --silent        # accept, never reply
+    python3 scripts/atnd/atnd1061-tcp-simulator.py --delay-ms 4000 # late replies
+    python3 scripts/atnd/atnd1061-tcp-simulator.py --aec-odd       # spec's own broken AEC example
 """
 from __future__ import annotations
 

@@ -99,7 +99,7 @@ diarization); Swift owns capture, timing, the transcript model and the UI.
 
 ```
 MeetingTranscriber/   SwiftPM app (not an Xcode project)
-scripts/              Python sidecars, one per model family
+scripts/              Python sidecars, one folder per service (vendor/ inside it)
 models/               HF_HOME — downloaded weights, never committed
 recordings/           your audio, never committed
 logs/                 per-sidecar logs, never committed

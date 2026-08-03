@@ -8,11 +8,22 @@ extension AudioRecorder {
 
     /// Rename a speaker profile and refresh all its rows in the transcript.
     ///
-    /// THREE-WAY on the id range alone — the whole point of the disjoint bases
-    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position). A position id must
-    /// never reach the Python-owned profile stores at all; a remote id must
-    /// never reach profiles.json, and an office id never profiles-remote.json.
+    /// FOUR-WAY on the id range alone — the whole point of the disjoint bases
+    /// (pyannote < 10_000 ≤ remote < 100_000 ≤ position < 1_000_000 ≤ MOSS).
+    /// A position id must never reach the Python-owned profile stores at all;
+    /// a remote id must never reach profiles.json, and an office id never
+    /// profiles-remote.json.
     func renameSpeaker(id: Int, to name: String) {
+        // MOSS ids are checked FIRST and return immediately, because they are
+        // also `>= positionIDBase` and would otherwise fall into the position
+        // branch below and be renamed as `positionDiarizer` cluster
+        // `id - 100_000` — a cluster that either does not exist or belongs to
+        // somebody else. There is nothing to rename either: a MOSS label is the
+        // model's own per-chunk `S01`, backed by no profile and no cluster, and
+        // valid only inside that one chunk (see `AudioRecorder+Moss`). The view
+        // hides the rename affordance for these rows; this is the guard behind
+        // it, so a future caller cannot reintroduce the bug.
+        guard id < Self.mossIDBase else { return }
         if id >= PositionDiarizer.positionIDBase {
             positionDiarizer?.rename(clusterID: id - PositionDiarizer.positionIDBase, to: name)
         } else {
@@ -22,14 +33,18 @@ extension AudioRecorder {
         }
         // Only ONE of the two turn collections can contain this id (their ranges
         // are disjoint), so mapping both is safe and keeps the branch out.
+        // `conf` rides along: renaming a speaker changes the LABEL, never the
+        // evidence behind it, so the match confidence must survive verbatim.
         liveTurns = liveTurns.map {
             $0.id == id
-                ? DiarizationService.Turn(start: $0.start, end: $0.end, id: $0.id, name: name)
+                ? SpeakerTurn(start: $0.start, end: $0.end, id: $0.id,
+                                          name: name, conf: $0.conf)
                 : $0
         }
         remoteLiveTurns = remoteLiveTurns.map {
             $0.id == id
-                ? DiarizationService.Turn(start: $0.start, end: $0.end, id: $0.id, name: name)
+                ? SpeakerTurn(start: $0.start, end: $0.end, id: $0.id,
+                                          name: name, conf: $0.conf)
                 : $0
         }
         // Repaired/preserved pinned rows carry their own name copy — keep it in sync.
@@ -72,6 +87,20 @@ extension AudioRecorder {
     /// — see `renameSpeaker` and `SpeakerProfileStore.Space`.
     nonisolated static let remoteIDBase = 10_000
 
+    /// Base of the FOURTH and topmost id range: labels invented by the MOSS
+    /// speaker-attributed ASR engine (`diarization.engine == "moss"`), sitting
+    /// above the position range exactly as position sits above remote —
+    /// pyannote < 10_000 ≤ remote < 100_000 ≤ position < 1_000_000 ≤ MOSS.
+    ///
+    /// They are the odd one out and the range says so: a MOSS id names a speaker
+    /// the MODEL distinguished inside ONE chunk. It is backed by no voice profile,
+    /// no ATND cluster and no cross-chunk identity, so it must never reach either
+    /// profile store, the position diarizer, or `liveTurns` (MOSS turns live in
+    /// `mossTurns`, which is why every Office-only assert stays pure pyannote).
+    /// `SpeakerProfileStore.isProfileID` already rejects ids this large; the
+    /// early return at the top of `renameSpeaker` is the other half.
+    nonisolated static let mossIDBase = 1_000_000
+
     // MARK: Id-space guards (phase 5)
     //
     // The disjoint ranges above hold BY CONSTRUCTION today: office turns live in
@@ -88,14 +117,17 @@ extension AudioRecorder {
 
     /// Ids in `turns` that are NOT office (pyannote) ids, i.e. ≥ `remoteIDBase`.
     /// Empty is the invariant every Office-only consumer relies on.
-    nonisolated static func nonOfficeIDs(in turns: [DiarizationService.Turn]) -> [Int] {
+    nonisolated static func nonOfficeIDs(in turns: [SpeakerTurn]) -> [Int] {
         turns.map(\.id).filter { $0 >= remoteIDBase }
     }
 
-    /// Ids in `turns` that are NOT remote ids — office ids below `remoteIDBase`
-    /// or position ids at/above `PositionDiarizer.positionIDBase`. The mirror of
-    /// `nonOfficeIDs`: profiles-remote.json must never see an office id either.
-    nonisolated static func nonRemoteIDs(in turns: [DiarizationService.Turn]) -> [Int] {
+    /// Ids in `turns` that are NOT remote ids — office ids below `remoteIDBase`,
+    /// or position ids at/above `PositionDiarizer.positionIDBase`, which by the
+    /// same comparison also catches every MOSS id (`>= mossIDBase`, itself an
+    /// order of magnitude above the position base). The mirror of `nonOfficeIDs`:
+    /// profiles-remote.json must never see an office id either, and neither store
+    /// may ever see a label that no profile stands behind.
+    nonisolated static func nonRemoteIDs(in turns: [SpeakerTurn]) -> [Int] {
         turns.map(\.id).filter {
             $0 < remoteIDBase || $0 >= PositionDiarizer.positionIDBase
         }
@@ -105,9 +137,9 @@ extension AudioRecorder {
     /// `site` names the consumer so a tripped assertion points straight at the
     /// wrong-collection call rather than at this helper.
     @discardableResult
-    nonisolated static func officeTurnsOnly(_ turns: [DiarizationService.Turn],
+    nonisolated static func officeTurnsOnly(_ turns: [SpeakerTurn],
                                             _ site: @autoclosure () -> String)
-        -> [DiarizationService.Turn] {
+        -> [SpeakerTurn] {
         assert(nonOfficeIDs(in: turns).isEmpty,
                "\(site()) was given non-office speaker ids \(nonOfficeIDs(in: turns)) — "
                + "Office-only state must never see remote (≥ \(remoteIDBase)) or position "
@@ -117,9 +149,9 @@ extension AudioRecorder {
 
     /// The remote twin of `officeTurnsOnly`.
     @discardableResult
-    nonisolated static func remoteTurnsOnly(_ turns: [DiarizationService.Turn],
+    nonisolated static func remoteTurnsOnly(_ turns: [SpeakerTurn],
                                             _ site: @autoclosure () -> String)
-        -> [DiarizationService.Turn] {
+        -> [SpeakerTurn] {
         assert(nonRemoteIDs(in: turns).isEmpty,
                "\(site()) was given non-remote speaker ids \(nonRemoteIDs(in: turns)) — "
                + "remote state only holds ids in [\(remoteIDBase), "

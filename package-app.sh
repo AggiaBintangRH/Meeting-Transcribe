@@ -22,7 +22,7 @@ if [[ ! -f "$ICONSET/1024-dark.png" || ! -f "$ICONSET/1024-tinted.png" ]]; then
     echo "       Create the .venv and install Pillow before packaging." >&2
     exit 1
   fi
-  "$VENV_PY" "$ROOT/scripts/make-icon-variants.py"
+  "$VENV_PY" "$ROOT/scripts/tools/make-icon-variants.py"
 fi
 
 # --- Stage 2: release build ------------------------------------------------

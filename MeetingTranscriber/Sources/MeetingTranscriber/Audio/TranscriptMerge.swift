@@ -15,6 +15,12 @@ enum TranscriptMerge {
         let kind: Kind
         let text: String
         let longestRun: Int
+        /// How many TRACK tokens the merge actually inserted. Zero on `.noop` and
+        /// `.replace`. Logged as `inserted=N/M` so a COMBINE that added one word
+        /// and one that rewrote half the row are distinguishable in the decisions
+        /// log — the alternative (a post-merge inserted-fraction gate) would
+        /// silently discard genuine recovery and leave no trace in the transcript.
+        let inserted: Int
     }
 
     // MARK: - Public API
@@ -22,8 +28,9 @@ enum TranscriptMerge {
     /// Merge a separated `track` against the `existing` anchor text.
     /// - A significant shared run (≥ `minRunTokens` matched tokens) anchors the
     ///   two texts together:
-    ///   * track adds no new tokens → `.noop` (keep existing verbatim)
-    ///   * track adds new tokens    → `.combine` (weave, shared run emitted once)
+    ///   * track inserts no new tokens → `.noop` (keep existing verbatim)
+    ///   * track inserts new tokens    → `.combine` (existing text verbatim, plus
+    ///     the track's words at gaps where existing had nothing)
     /// - No significant shared run → `.replace` (track is verbatim new content).
     static func merge(existing: String, track: String, minRunTokens: Int = 4) -> Result {
         let e = tokenize(existing)
@@ -35,7 +42,7 @@ enum TranscriptMerge {
 
         // No anchoring run → the track is entirely new content; keep it verbatim.
         guard significant else {
-            return Result(kind: .replace, text: track, longestRun: longestRun)
+            return Result(kind: .replace, text: track, longestRun: longestRun, inserted: 0)
         }
 
         // Which TRACK token indices are covered by a matched block?
@@ -50,33 +57,56 @@ enum TranscriptMerge {
         }
 
         if !trackHasExtra {
-            return Result(kind: .noop, text: existing, longestRun: longestRun)
+            return Result(kind: .noop, text: existing, longestRun: longestRun, inserted: 0)
         }
 
-        // COMBINE: walk blocks in order, emitting each matched run once (from the
-        // track's originals) and filling gaps per the one-sided / both-sided rule.
+        // COMBINE: walk blocks in order, emitting the EXISTING text verbatim and
+        // adding the track's words ONLY where the existing side is silent.
         var out: [String] = []
         var ePrev = 0, tPrev = 0
+        var inserted = 0
 
-        // Gap rule: nothing is ever dropped. The existing text is emitted in full,
-        // and the track's un-matched words are added after it — combining, never
-        // replacing. Where both sides have a gap they were both heard, so both are
-        // kept (existing first, it is the confirmed chunked-ASR wording); the
-        // shared runs themselves are still emitted once, so nothing duplicates.
+        // Gap rule — ONE-SIDED. A gap that has words on BOTH sides is mechanically
+        // a SUBSTITUTION: the same audio rendered two ways ("didn't"/"did not",
+        // "parity"/"parody"). Emitting both produced real damage in the decisions
+        // log — "it didn't did not have this", "so that's that is where". So a
+        // both-sided gap keeps the EXISTING words alone: that is the confirmed
+        // chunked-ASR wording, and the track's job is to fill silence, not to
+        // re-word what was already heard. The track's words are inserted only
+        // where the existing side has nothing at all (`eLo == eHi`).
+        //
+        // Invariant: COMBINE output == the existing text verbatim, in order, plus
+        // inserted track runs at gaps where existing had nothing.
         func emitGap(_ eLo: Int, _ eHi: Int, _ tLo: Int, _ tHi: Int) {
-            if eLo < eHi { out.append(contentsOf: e[eLo..<eHi].map(\.original)) }
-            if tLo < tHi { out.append(contentsOf: t[tLo..<tHi].map(\.original)) }
+            if eLo < eHi {
+                out.append(contentsOf: e[eLo..<eHi].map(\.original))
+            } else if tLo < tHi {
+                out.append(contentsOf: t[tLo..<tHi].map(\.original))
+                inserted += tHi - tLo
+            }
         }
 
         for b in blocks {
             emitGap(ePrev, b.aStart, tPrev, b.bStart)
-            for k in b.bStart..<(b.bStart + b.length) { out.append(t[k].original) }
+            // The matched run is emitted from the EXISTING originals, not the
+            // track's: the norms are equal by construction, but casing and
+            // punctuation need not be, and existing is the trusted wording.
+            for k in b.aStart..<(b.aStart + b.length) { out.append(e[k].original) }
             ePrev = b.aStart + b.length
             tPrev = b.bStart + b.length
         }
         emitGap(ePrev, e.count, tPrev, t.count)
 
-        return Result(kind: .combine, text: out.joined(separator: " "), longestRun: longestRun)
+        // A pure-substitution track reaches here having inserted nothing, so the
+        // merged text is byte-identical to `existing`. Reporting that as COMBINE
+        // would make `applyRepair` perform real segment surgery for a no-change
+        // edit and print a misleading COMBINE in the decisions log.
+        guard inserted > 0 else {
+            return Result(kind: .noop, text: existing, longestRun: longestRun, inserted: 0)
+        }
+
+        return Result(kind: .combine, text: out.joined(separator: " "),
+                      longestRun: longestRun, inserted: inserted)
     }
 
     /// Jaccard similarity of the two texts' lowercased alnum word sets.

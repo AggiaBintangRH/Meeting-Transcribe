@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Integration test suite for the three Python sidecars.
+Integration test suite for the Python sidecars.
 
     .venv/bin/python3 scripts/sidecar-tests.py            # everything
     .venv/bin/python3 scripts/sidecar-tests.py --list
-    .venv/bin/python3 scripts/sidecar-tests.py --only diarize
+    .venv/bin/python3 scripts/sidecar-tests.py --only wespeaker
     .venv/bin/python3 scripts/sidecar-tests.py --only nemotron/lane-isolation
 
 WHY THIS EXISTS
@@ -25,10 +25,13 @@ run; a full run is minutes.
 
 SAFETY
 ------
-The diarization sidecar persists speaker profiles to models/speaker-profiles/.
+The WeSpeaker identity sidecar persists speaker profiles to models/speaker-profiles/.
 Those are the OWNER'S real voices and a test that corrupts them would be worse
 than no test at all, so:
-  * every diarization subprocess gets MT_PROFILE_DIR pointed at a temp dir,
+  * every diarization/identity subprocess gets MT_PROFILE_DIR pointed at a temp
+    dir — including the pyannote one, which cannot write a profile at all now,
+    because a fence that is only applied where it is currently needed stops being
+    applied at all the moment the code moves,
   * the four real profile files are SHA-256'd before and after the whole run
     and the suite fails loudly if a single byte moved,
   * nothing is ever written into recordings/ — fixtures are read-only inputs and
@@ -49,6 +52,7 @@ import json
 import os
 import pathlib
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -63,6 +67,52 @@ SCRIPTS = PROJECT / "scripts"
 VENV_PY = PROJECT / ".venv" / "bin" / "python3"
 REAL_PROFILE_DIR = PROJECT / "models" / "speaker-profiles"
 RECORDINGS = PROJECT / "recordings"
+SWIFT_SOURCES = PROJECT / "MeetingTranscriber" / "Sources"
+
+# Every service lives in its OWN folder under scripts/ (owner, 2026-07-29:
+# "pisahin folder foldernya jangan di satuin"), and each service's vendored
+# third-party code sits next to its owner rather than in a shared scripts/vendor.
+# Named here once so a future move is one edit, not fifteen. Both `Sidecar(...)`
+# and `load_sidecar_module(...)` resolve these with `SCRIPTS / name`, which takes
+# a relative path with slashes unchanged. This file itself stays at scripts/
+# root — it tests everything, so it belongs to no single service.
+NEMOTRON_SERVICE = "nemotron/nemotron-service.py"
+# ONE SERVICE PER ASR MODEL, finished 2026-07-30: the shared
+# chunked/chunked-asr-service.py is DELETED and each model has its own standalone
+# file. The three below are the mlx-audio ones — byte-identical extractions of that
+# file's mlx-audio branch, proven on real audio before it was removed. They are
+# listed individually rather than behind one name precisely because the protocol
+# now lives in four copies, and `whisper/protocol-matches-chunked` has to drive
+# every one of them.
+QWEN3_SERVICE = "qwen3/qwen3-service.py"
+GRANITE_SERVICE = "granite/granite-service.py"
+VOXTRAL_SERVICE = "voxtral/voxtral-service.py"
+MLX_SERVICES = [("qwen3", QWEN3_SERVICE), ("granite", GRANITE_SERVICE),
+                ("voxtral", VOXTRAL_SERVICE)]
+WHISPER_SERVICE = "whisper/whisper-service.py"
+ALIGNER_SERVICE = "aligner/aligner-service.py"
+# MOSS is TWO services since 2026-07-31 (ONE SERVICE PER ROLE): the same model is
+# selectable as the chunked ASR model AND as the diarization engine, and in "MOSS
+# as ASR + MOSS as diarizer" mode BOTH run at once. One script for two live
+# processes meant two writers on one log, so each role got its own service.
+# MOSS_ASR_SERVICE is the one `chunked.model = moss` starts; MOSS_SERVICE is the
+# DIARIZATION-role file that `diarization.engine = moss` starts.
+MOSS_ASR_SERVICE = "moss-asr/moss-asr-service.py"
+MOSS_SERVICE = "moss-diar/moss-diar-service.py"
+MOSS_ASR_VENDOR = SCRIPTS / "moss-asr" / "vendor"
+MOSS_VENDOR = SCRIPTS / "moss-diar" / "vendor"
+# Every MOSS copy, in the order the checks report them. Each entry is
+# (label, service, vendor dir) — the four rule checks below run against ALL of
+# them, the canned-gate-across-copies precedent, so a gate fixed in one file and
+# not the other fails here instead of mid-meeting in whichever role got missed.
+MOSS_COPIES = [("moss-asr", MOSS_ASR_SERVICE, MOSS_ASR_VENDOR),
+               ("moss-diar", MOSS_SERVICE, MOSS_VENDOR)]
+# Diarization is TWO services since 2026-07-30 (ONE SERVICE PER MODEL). The
+# pipeline half answers who-spoke-when with run-local labels and owns no profile
+# store at all; the WeSpeaker half owns the embedder and BOTH stores. That split is
+# why the identity checks below need no pipeline load and run in seconds.
+PYANNOTE_SERVICE = "pyannote/pyannote-service.py"
+WESPEAKER_SERVICE = "wespeaker/wespeaker-service.py"
 
 # Pin the model cache the same way every sidecar does, so the in-process
 # white-box checks (which import mlx_audio directly) resolve offline too.
@@ -292,11 +342,51 @@ def near_silence(seconds: float, seed=1):
     return (rng.standard_normal(int(seconds * SR)) * 0.0004).astype("float32")
 
 
-def load_clip(path, start=0.0, seconds=None):
-    """Read a fixture as float32 16 kHz mono, same loader the aligner probe uses."""
+def first_speech_offset(audio, block_sec=1.0, min_rms=0.01):
+    """Seconds until the first block of real speech, or None if there is none.
+
+    THE FIXTURE TRAP THIS EXISTS FOR, which has now cost two debugging rounds.
+    The owner's recordings routinely open with a long stretch of DIGITAL silence
+    (the array/loopback is live before anyone talks): `meeting-2026-07-28T04-10-59Z`
+    is silent for its first 40 s, `meeting-2026-07-30T04-53-29Z` for its first 22 s.
+    Slicing a fixture from offset 0 therefore yields a clip of pure zeros, and the
+    failure is never an obvious "no audio" — it is a *plausible-looking wrong
+    answer*: an embedding of silence is a real, finite, meaningless vector, so
+    `wespeaker/native-rate-final-matches-16k-chunks` minted a third profile, and
+    `nemotron/lane-isolation` skipped itself with an empty baseline. Both were the
+    same silent-fixture bug wearing two costumes.
+
+    `find_fixtures`'s own RMS gate does NOT catch it, and cannot: it averages over
+    30 s, so 20 s of silence plus 10 s of speech scores 0.044 and sails past the
+    0.01 bar while 20 of the 25 seconds a check actually uses are zeros.
+
+    Returning None (nothing anywhere clears the bar) is meaningful, not an error —
+    it is how a wholly silent file, like the owner's dead BlackHole `-remote`
+    capture, still gets rejected by that same gate.
+    """
+    import numpy as np
+    block = max(1, int(block_sec * SR))
+    for i in range(0, max(0, audio.size - block) + 1, block):
+        segment = audio[i:i + block]
+        if segment.size and float(np.sqrt(np.mean(segment * segment))) >= min_rms:
+            return i / SR
+    return None
+
+
+def load_clip(path, start=None, seconds=None):
+    """Read a fixture as float32 16 kHz mono, same loader the aligner probe uses.
+
+    `start=None` means AUTO-SEEK to the first speech — see `first_speech_offset`
+    for why that is the default rather than 0.0. Pass an explicit number (including
+    `--clip-start 0`) to force a position.
+    """
     import numpy as np
     from mlx_audio.stt.utils import load_audio
     audio = np.asarray(load_audio(str(path), sr=SR), dtype=np.float32)
+    if start is None:
+        # No speech at all -> fall back to 0.0 so the caller's RMS gate sees the
+        # silence and rejects the file, instead of us hiding it behind an offset.
+        start = first_speech_offset(audio) or 0.0
     a = int(start * SR)
     b = audio.size if seconds is None else min(audio.size, a + int(seconds * SR))
     return audio[a:b]
@@ -323,7 +413,11 @@ def find_fixtures():
         if meeting in seen_meetings:
             continue
         try:
-            clip = load_clip(path, 0.0, 30.0)
+            # Judge the region the CHECKS will use, i.e. auto-seeked past any
+            # leading silence — not blindly the first 30 s. Same call, same
+            # default, so the gate and the checks can never disagree about
+            # whether a file has speech.
+            clip = load_clip(path, None, 30.0)
         except Exception:  # noqa: BLE001 — half-written recordings exist
             continue
         if clip.size < 20 * SR:
@@ -362,6 +456,38 @@ def extract_nested(module, source: str, outer: str, inner: str, inject: dict):
     return namespace[inner]
 
 
+def extract_flush_branch(source: str):
+    """Compile the frame loop's `if n == 0:` (FLUSH) branch into a callable.
+
+    Same idea as extract_nested, one level deeper: the FLUSH branch is a
+    STATEMENT BLOCK inside `main()`'s `while True:` loop, so there is no function
+    to lift and no way to reach it from stdin without loading a model. Lifting it
+    by AST runs the shipped code against injected stubs, which is what lets the
+    protocol-conformance check compare two sidecars' FLUSH handling in
+    milliseconds instead of two model loads.
+
+    The trailing `continue` is dropped (it would be a SyntaxError outside a loop);
+    nothing else is touched.
+    """
+    import ast
+    tree = ast.parse(source)
+    main_fn = next(n for n in tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+    loop = next(n for n in ast.walk(main_fn) if isinstance(n, ast.While))
+    branch = next(s for s in loop.body
+                  if isinstance(s, ast.If) and ast.unparse(s.test) == "n == 0")
+    body = [s for s in branch.body if not isinstance(s, ast.Continue)]
+    module = ast.Module(body=body, type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, "<main.flush-branch>", "exec")
+
+    def run(namespace: dict) -> dict:
+        exec(code, namespace)  # noqa: S102 — the point is to run the real code
+        return namespace
+
+    return run
+
+
 def load_sidecar_module(filename: str, mod_name: str):
     """Import a sidecar for its module-level constants WITHOUT running main()."""
     import importlib.util
@@ -386,7 +512,7 @@ def run_nemotron(rep: Report, ctx):
     #    contract. Its own process, fed ONLY office frames, so the assertion
     #    covers every byte the sidecar produced rather than a filtered subset.
     if ctx.wants("nemotron/single-stream-bytes"):
-        sc = Sidecar("nemotron-asr-service.py", ["--language", "en-US"])
+        sc = Sidecar(NEMOTRON_SERVICE, ["--language", "en-US"])
         try:
             ready = sc.wait_for(lambda m: m.get("type") in ("status", "error"),
                                 timeout=ctx.load_timeout)
@@ -424,7 +550,7 @@ def run_nemotron(rep: Report, ctx):
     if not remaining:
         return
 
-    sc = Sidecar("nemotron-asr-service.py", ["--language", "en-US"])
+    sc = Sidecar(NEMOTRON_SERVICE, ["--language", "en-US"])
     try:
         ready = sc.wait_for(lambda m: m.get("type") in ("status", "error"),
                             timeout=ctx.load_timeout)
@@ -594,13 +720,59 @@ def run_nemotron(rep: Report, ctx):
 
 
 # ============================================================= chunked group
+# The three mlx-audio chunked sidecars — scripts/qwen3/, scripts/granite/,
+# scripts/voxtral/. Whisper was split out first (2026-07-29) and its checks live in
+# the `whisper` group below; the last shared file, chunked/chunked-asr-service.py,
+# was deleted on 2026-07-30 once these three were proven byte-identical to it.
+#
+# The canned-gate check now runs against ALL THREE modules, not one: with the gate
+# copied into three files, a check that only read one of them would pass while
+# another file's copy had drifted — and this gate deletes transcript, so drift in
+# it is the expensive kind.
 CHUNKED_CHECKS = [
-    "chunked/whisper-gate-keeps-real-speech",
     "chunked/canned-gate-spares-real-short-replies",
-    "chunked/final-shape-without-aligner",
-    "chunked/src-indices-skip-punctuation",
-    "chunked/words-never-past-chunk",
+    "chunked/final-shape",
 ]
+
+# Qwen3's decoding options, exposed 2026-08-03 on the Whisper precedent. Pure
+# calls to qwen3_generate_kwargs — no model load — because the failure they guard
+# is INVISIBLE in the output: an option whose default quietly differs from what
+# the call used to pass changes every transcript, and nothing anywhere says so.
+QWEN3_CHECKS = [
+    "qwen3/option-defaults-are-todays-behaviour",
+    "qwen3/sentinels-become-none",
+    "qwen3/context-size-never-travels-alone",
+]
+
+# What model.generate() was called with BEFORE the options existed. The
+# pre-options sidecar built it with the literal expression
+#     kwargs = {"language": language} if language else {}
+# so there are exactly two shapes and NEITHER carries anything else. Written out
+# literally rather than derived, so a change to qwen3_generate_kwargs cannot also
+# change what it is compared against — the whole point of the check.
+QWEN3_TODAYS_KWARGS = {"language": "en"}
+QWEN3_TODAYS_KWARGS_AUTO = {}
+
+
+def chunked_service_for(model: str) -> str:
+    """Which sidecar serves this HF repo. Mirrors the Swift `ChunkedASRModel`s.
+
+    Exhaustive on purpose, and it RAISES rather than falling back: a default would
+    have quietly kept pointing at the deleted shared file.
+    """
+    lower = model.lower()
+    for needle, service in (("qwen3-asr", QWEN3_SERVICE),
+                            ("granite", GRANITE_SERVICE),
+                            ("voxtral", VOXTRAL_SERVICE),
+                            ("whisper", WHISPER_SERVICE),
+                            # The ASR-role service: this function answers
+                            # "--chunked-model X runs which sidecar", and that is
+                            # the chunked ASR role. The diarization role is never
+                            # selected this way.
+                            ("moss", MOSS_ASR_SERVICE)):
+        if needle in lower:
+            return service
+    raise ValueError(f"no sidecar known for --chunked-model {model!r}")
 
 # Segments captured from the owner's real meetings, with the verdict each one
 # must get. The dropped rows are Whisper's silence hallucinations; the kept rows
@@ -627,41 +799,15 @@ WHISPER_GATE_CASES = [
 
 
 def run_chunked(rep: Report, ctx):
-    # -- the hallucination gate, as a pure rule. No model load: it imports the
-    #    sidecar module and replays real captured segments, so it runs in
-    #    milliseconds and cannot be skipped for want of a fixture.
-    if ctx.wants("chunked/whisper-gate-keeps-real-speech"):
-        cid = "chunked/whisper-gate-keeps-real-speech"
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "chunked_asr_service", SCRIPTS / "chunked-asr-service.py")
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            wrong = []
-            for text, ns, cr, dur, want_keep in WHISPER_GATE_CASES:
-                reason = mod.whisper_drop_reason(text, no_speech=ns,
-                                                 compression=cr, duration=dur)
-                if (reason is None) != want_keep:
-                    verdict = "kept" if reason is None else f"dropped as {reason}"
-                    wrong.append(f"{text[:45]!r} was {verdict}")
-            rep.expect(cid, not wrong,
-                       f"all {len(WHISPER_GATE_CASES)} real segments judged correctly",
-                       "; ".join(wrong))
-        except Exception as exc:  # noqa: BLE001
-            rep.fail(cid, f"could not evaluate the gate: {exc}")
-
     # -- the model-agnostic canned-phrase gate. Granite/Qwen3 expose no
     #    confidence numbers, so this is their only hallucination check — and the
     #    thing it must never do is eat a real short reply.
     if ctx.wants("chunked/canned-gate-spares-real-short-replies"):
         cid = "chunked/canned-gate-spares-real-short-replies"
         try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "chunked_asr_service_canned", SCRIPTS / "chunked-asr-service.py")
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
+            modules = [(label, load_sidecar_module(service,
+                                                   f"mt_{label}_canned")[0])
+                       for label, service in MLX_SERVICES]
             cases = [
                 # (text, duration, keep?)
                 ("Thank you.", 30.0, False),          # observed on Granite
@@ -674,24 +820,46 @@ def run_chunked(rep: Report, ctx):
                 ("thanks, I agree with that point", 30.0, True),
             ]
             wrong = []
-            for text, dur, want_keep in cases:
-                reason = mod.canned_drop_reason(text, dur)
-                if (reason is None) != want_keep:
-                    verdict = "kept" if reason is None else f"dropped as {reason}"
-                    wrong.append(f"{text!r} ({dur:.0f}s) was {verdict}")
+            for label, mod in modules:
+                for text, dur, want_keep in cases:
+                    reason = mod.canned_drop_reason(text, dur)
+                    if (reason is None) != want_keep:
+                        verdict = "kept" if reason is None else f"dropped as {reason}"
+                        wrong.append(f"{label}: {text!r} ({dur:.0f}s) was {verdict}")
+                # The thresholds were RENAMED in the split (they carried a
+                # WHISPER_ prefix in the shared file although the rule is the
+                # mlx-audio one). Values pinned here so the rename cannot have
+                # moved them, and the old names must be gone — a file defining
+                # both would mean one is dead and nobody knows which.
+                if getattr(mod, "CANNED_MIN_DURATION_SEC", None) != 4.0:
+                    wrong.append(f"{label}: CANNED_MIN_DURATION_SEC is "
+                                 f"{getattr(mod, 'CANNED_MIN_DURATION_SEC', None)!r}, not 4.0")
+                if getattr(mod, "CANNED_MIN_WORDS_PER_SEC", None) != 0.5:
+                    wrong.append(f"{label}: CANNED_MIN_WORDS_PER_SEC is "
+                                 f"{getattr(mod, 'CANNED_MIN_WORDS_PER_SEC', None)!r}, not 0.5")
+                for stale in ("WHISPER_MIN_DENSITY_DURATION", "WHISPER_MIN_WORDS_PER_SEC",
+                              "WHISPER_NO_SPEECH_MAX", "WHISPER_COMPRESSION_MAX"):
+                    if hasattr(mod, stale):
+                        wrong.append(f"{label}: still defines {stale} — this file has "
+                                     "no Whisper in it")
             rep.expect(cid, not wrong,
-                       f"all {len(cases)} canned/real cases judged correctly",
+                       f"all {len(cases)} canned/real cases judged correctly by all "
+                       f"{len(modules)} mlx-audio services, on the renamed thresholds",
                        "; ".join(wrong))
         except Exception as exc:  # noqa: BLE001
             rep.fail(cid, f"could not evaluate the canned gate: {exc}")
 
-
-    # -- check 5: with no --align-model, a final carries EXACTLY type and text.
-    #    This is what keeps the single-stream wire format byte-identical; a
-    #    stray "words"/"dur" here would be a silent protocol change.
-    if ctx.wants("chunked/final-shape-without-aligner"):
-        cid = "chunked/final-shape-without-aligner"
-        sc = Sidecar("chunked-asr-service.py",
+    # -- check 5: a final carries EXACTLY type and text (plus "conf" on
+    #    Whisper) — NEVER "words"/"dur". It used to carry them whenever
+    #    --align-model was given; alignment moved to its own sidecar on
+    #    2026-07-29, so this now pins that an ASR final can never carry word
+    #    timestamps at all, whatever the settings say.
+    if ctx.wants("chunked/final-shape"):
+        cid = "chunked/final-shape"
+        # Whichever service owns --chunked-model (default Qwen3). Resolved rather
+        # than hard-coded because the shared sidecar that used to serve every MLX
+        # model no longer exists.
+        sc = Sidecar(chunked_service_for(ctx.chunked_model),
                      ["--model", ctx.chunked_model, "--language", "en"])
         try:
             ready = sc.wait_for(lambda m: m.get("type") in ("status", "error"),
@@ -707,29 +875,599 @@ def run_chunked(rep: Report, ctx):
                 if final is None:
                     rep.fail(cid, "no final came back")
                 else:
-                    rep.expect(cid, set(final) == {"type", "text"},
-                               'final carried exactly {"type","text"}',
-                               f"final key set was {sorted(final)} "
-                               "(expected no words/dur without --align-model)")
+                    # "conf" is Whisper-only. With the DEFAULT model (Qwen3) the
+                    # allowance below is empty, so this check doubles as the pin
+                    # that an mlx-audio model NEVER fabricates a confidence.
+                    is_whisper = "whisper" in ctx.chunked_model.lower()
+                    allowed_extra = {"conf"} if is_whisper else set()
+                    extra = set(final) - {"type", "text"}
+                    conf_ok = True
+                    if "conf" in final:
+                        conf = final["conf"]
+                        conf_ok = isinstance(conf, (int, float)) and 0 < conf <= 1.0
+                    rep.expect(cid, extra <= allowed_extra and conf_ok,
+                               'final carried exactly {"type","text"}'
+                               + (f' + conf={final.get("conf")}' if "conf" in final
+                                  else " (no conf — mlx-audio reports none)"),
+                               f"final key set was {sorted(final)} with conf="
+                               f"{final.get('conf')!r} (expected no words/dur — "
+                               f"alignment is a separate sidecar; conf allowed "
+                               f"only on Whisper, and only as 0 < x <= 1)")
         finally:
             sc.close()
 
-    # The next two exercise code the wire protocol cannot reach: the chunked
-    # sidecar only ever aligns text ITS OWN ASR produced, so neither a chosen
-    # sentence nor a hallucinated timestamp can be injected from stdin. They run
-    # the real functions lifted out of the real file — see extract_nested().
-    needs_whitebox = [c for c in CHUNKED_CHECKS[1:] if ctx.wants(c)]
-    if not needs_whitebox:
+
+# ============================================================= whisper group
+# scripts/whisper/whisper-service.py — the standalone Whisper sidecar, extracted
+# VERBATIM out of the old shared chunked-asr-service.py on 2026-07-29 (owner: one
+# sidecar per ASR model, FULLY standalone, no shared protocol module). That shared
+# file is gone since 2026-07-30; Whisper's gate and confidence code lives only here.
+#
+# The first three checks are the SAME checks that used to run as `chunked/*`;
+# they simply followed the code when it moved here. All four are pure imports — no
+# model load, milliseconds.
+#
+# The fourth is the price of the standalone choice: with the wire protocol defined
+# in more than one file, disciplined editing CANNOT prevent drift, but a test can
+# detect it. It drives EVERY ASR sidecar's payload builders and real FLUSH branch
+# with the same inputs and fails loudly if a protocol edit lands in one file and
+# not the others. It compared two files when only Whisper was split; since
+# 2026-07-30 it compares Whisper against all three mlx-audio services, because a
+# protocol edit missed in ONE of four files is exactly the failure the standalone
+# choice was known to risk (and it fails silently in the app — the number simply
+# never appears).
+#
+# The last four cover the decoding options exposed on 2026-07-29
+# (--initial-prompt, --best-of, …). They are pure calls to
+# whisper_transcribe_kwargs — no model load — because the failure they guard is
+# invisible in the output: an option whose default quietly differs from what the
+# call used to pass changes every transcript, and nothing anywhere says so.
+WHISPER_CHECKS = [
+    "whisper/gate-keeps-real-speech",
+    "whisper/conf-pooling",
+    "whisper/conf-only-from-kept-segments",
+    "whisper/protocol-matches-chunked",
+    "whisper/option-defaults-are-todays-behaviour",
+    "whisper/sentinels-become-none",
+    "whisper/hallucination-implies-word-timestamps",
+    "whisper/autodetect-clears-language",
+]
+
+# What mlx_whisper.transcribe() was called with BEFORE the options existed, plus
+# the library's own defaults for everything the call did not name. Written out
+# literally rather than derived, so a change to whisper_transcribe_kwargs cannot
+# also change what it is compared against — the whole point of the check.
+WHISPER_TODAYS_KWARGS = {
+    "path_or_hf_repo": "mlx-community/whisper-large-v3-mlx",
+    "language": "en",
+    "task": "transcribe",                  # DecodingOptions default
+    "no_speech_threshold": 0.6,            # mlx_whisper default
+    "logprob_threshold": -1.0,             # mlx_whisper default
+    "compression_ratio_threshold": 2.4,    # mlx_whisper default
+    "word_timestamps": False,              # mlx_whisper default
+}
+
+# Every wire message the two sidecars can produce, as (builder, args). Compared
+# BYTE FOR BYTE rather than by key set, so key ORDER and the conf rounding are
+# covered too — a re-ordered payload is still a protocol change.
+PROTOCOL_EMIT_CASES = [
+    ("emit", ("status", "LOADED")),
+    ("emit", ("error", "Chunk transcription failed: boom")),
+    # No words/dur cases any more: alignment left these sidecars on 2026-07-29
+    # and a `final` can no longer carry word timestamps at all.
+    ("emit_final", ("hello world", None)),
+    ("emit_final", ("hello world", 0.876543)),
+    ("emit_final", ("", None)),
+    ("emit_file", ("file_result", 7, "some text", 0.5)),
+    ("emit_file", ("file_result", 7, "some text", None)),
+    ("emit_file", ("file_error", 7, "file not found: /nope.wav")),
+    ("emit_file", ("file_error", None, "file transcription failed: boom")),
+]
+
+# Constants that are part of the wire behaviour, not implementation detail: a
+# different MIN_CHUNK_SEC in one file means the two services silently disagree
+# about which flushes produce a final at all.
+PROTOCOL_CONSTANTS = ["SR", "MIN_CHUNK_SEC", "MAX_BUFFER_SEC"]
+
+
+def capture_stdout(fn, *args):
+    """Run fn(*args) and return the raw stdout lines it wrote."""
+    import contextlib
+    import io
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        fn(*args)
+    return buffer.getvalue().splitlines()
+
+
+def run_flush_branch(module, source, buffered_sec: float, transcribed):
+    """Execute a sidecar's REAL `n == 0` FLUSH branch over a synthetic buffer.
+
+    Returns (stdout_lines, log_lines, remaining_buffer_size). The ASR is stubbed
+    (`transcribed` is the (text, conf) it returns), so the only thing under test
+    is the branch's own decisions: the MIN_CHUNK_SEC floor, whether a final is
+    emitted at all, and the buffer reset. There is no alignment stub any more —
+    the aligner is its own sidecar and this branch never calls it.
+    """
+    import numpy as np
+    logs = []
+    namespace = dict(vars(module))
+    namespace.update({
+        "buffer": np.zeros(int(buffered_sec * SR), dtype=np.float32),
+        "np": np,
+        "log": logs.append,
+        "transcribe": lambda audio: transcribed,
+    })
+    lines = capture_stdout(extract_flush_branch(source), namespace)
+    return lines, logs, int(namespace["buffer"].size)
+
+
+def run_whisper(rep: Report, ctx):
+    module = source = None
+    try:
+        module, source = load_sidecar_module(WHISPER_SERVICE, "mt_whisper_service")
+    except Exception as exc:  # noqa: BLE001
+        for cid in WHISPER_CHECKS:
+            if ctx.wants(cid):
+                rep.fail(cid, f"could not import whisper-service.py: {exc!r}")
         return
 
-    module, source = load_sidecar_module("chunked-asr-service.py", "mt_chunked_asr")
+    # -- the hallucination gate, as a pure rule. No model load: it imports the
+    #    sidecar module and replays real captured segments, so it runs in
+    #    milliseconds and cannot be skipped for want of a fixture.
+    if ctx.wants("whisper/gate-keeps-real-speech"):
+        cid = "whisper/gate-keeps-real-speech"
+        try:
+            wrong = []
+            for text, ns, cr, dur, want_keep in WHISPER_GATE_CASES:
+                reason = module.whisper_drop_reason(text, no_speech=ns,
+                                                    compression=cr, duration=dur)
+                if (reason is None) != want_keep:
+                    verdict = "kept" if reason is None else f"dropped as {reason}"
+                    wrong.append(f"{text[:45]!r} was {verdict}")
+            # The extraction must NOT have dragged the mlx-audio canned-phrase
+            # gate along. Whisper's path never called it, so wiring it in here
+            # would ADD a gate — over-deletion, the dangerous direction.
+            if hasattr(module, "canned_drop_reason") or hasattr(module, "CANNED_HALLUCINATIONS"):
+                wrong.append("whisper-service.py defines the mlx-audio canned-phrase "
+                             "gate — Whisper never had it; adding it would delete text "
+                             "the shared sidecar keeps")
+            rep.expect(cid, not wrong,
+                       f"all {len(WHISPER_GATE_CASES)} real segments judged "
+                       "correctly, and no canned-phrase gate came along",
+                       "; ".join(wrong))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the gate: {exc}")
 
-    # -- check 6: "src" indices point into the ORIGINAL text.split(), skipping
+    # -- transcript confidence, as a pure pooling rule. No model load.
+    #    The number goes in front of the user as "asr 0.92", so the way it is
+    #    pooled is the part that can be quietly, unfalsifiably wrong: averaging
+    #    the exponentiated per-segment values (instead of the log-probs) or
+    #    weighting every segment equally (instead of by words) both produce a
+    #    plausible-looking number that is not the geometric-mean per-token
+    #    probability it is presented as. The last case is the important one:
+    #    NOTHING KEPT MUST YIELD None, never a fabricated 0.0 or 1.0.
+    if ctx.wants("whisper/conf-pooling"):
+        cid = "whisper/conf-pooling"
+        try:
+            import math
+            fn = module.whisper_chunk_confidence
+            problems = []
+
+            # (a) word-WEIGHTED pooling in the LOG domain. A 10-word confident
+            #     segment and a 2-word unsure one: the long one must dominate.
+            got = fn([(10, -0.1), (2, -2.0)])
+            weighted_log = math.exp((10 * -0.1 + 2 * -2.0) / 12)      # 0.6592
+            unweighted_log = math.exp((-0.1 + -2.0) / 2)              # 0.3499
+            mean_of_probs = (math.exp(-0.1) + math.exp(-2.0)) / 2     # 0.5201
+            if got is None or abs(got - weighted_log) > 1e-9:
+                problems.append(f"pooled {got} != word-weighted log mean "
+                                f"{weighted_log:.4f} (unweighted would be "
+                                f"{unweighted_log:.4f}, mean-of-probs "
+                                f"{mean_of_probs:.4f})")
+
+            # (b) exp() mapping of a single segment is just its per-token prob.
+            single = fn([(7, -0.3)])
+            if single is None or abs(single - math.exp(-0.3)) > 1e-9:
+                problems.append(f"single segment gave {single}, expected "
+                                f"{math.exp(-0.3):.4f}")
+
+            # (c) clamp: avg_logprob can come back a hair above 0, and "1.22"
+            #     shown as a confidence is a visible bug.
+            clamped = fn([(5, 0.2)])
+            if clamped != 1.0:
+                problems.append(f"positive logprob was not clamped to 1.0: {clamped}")
+
+            # (d) NOTHING to pool ⇒ None, never a number. Three ways to get there.
+            for label, arg in (("empty list", []),
+                               ("zero words", [(0, -0.5)]),
+                               ("no avg_logprob", [(5, None)])):
+                if fn(arg) is not None:
+                    problems.append(f"{label} fabricated a value: {fn(arg)}")
+
+            # (e) a missing avg_logprob is skipped, not counted as 0.0.
+            mixed = fn([(5, None), (5, -0.2)])
+            if mixed is None or abs(mixed - math.exp(-0.2)) > 1e-9:
+                problems.append(f"segment with no logprob polluted the pool: {mixed}")
+
+            rep.expect(cid, not problems,
+                       "word-weighted log-domain pooling, exp mapping, clamp at "
+                       "1.0, and None (never 0) when there is nothing to pool",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the pooling rule: {exc!r}")
+
+    # -- the confidence describes the transcript the USER SEES. A dropped
+    #    hallucination must therefore contribute nothing to it — otherwise a
+    #    30 s silence read as a very confident "Thank you." would inflate the
+    #    number for the real sentence beside it. This runs the REAL
+    #    transcribe_path with mlx_whisper stubbed out, so it covers the actual
+    #    ordering of the drop decision and the score collection — the thing a
+    #    pure-function test of the pooling rule cannot see.
+    if ctx.wants("whisper/conf-only-from-kept-segments"):
+        cid = "whisper/conf-only-from-kept-segments"
+        try:
+            import math
+            real = ("If we have a one-minute speech to deliver,", -0.2)   # 8 words
+            fake = ("Thank you.", -0.01)   # 2 words, 30 s of silence → dropped
+            segments = [
+                {"text": " " + real[0], "start": 0.0, "end": 3.0,
+                 "no_speech_prob": 0.86, "compression_ratio": 1.6,
+                 "avg_logprob": real[1]},
+                {"text": " " + fake[0], "start": 3.0, "end": 33.0,
+                 "no_speech_prob": 0.89, "compression_ratio": 1.0,
+                 "avg_logprob": fake[1]},
+            ]
+            # **kwargs, not a fixed signature: the real call now passes the dict
+            # built by whisper_transcribe_kwargs, and this check is about the
+            # drop/score ORDERING, not about which decoding options are in it.
+            fake_whisper = type("FakeWhisper", (), {
+                "transcribe": staticmethod(
+                    lambda audio, **kwargs: {
+                        "text": real[0] + " " + fake[0], "segments": segments}),
+            })()
+            logs = []
+            fn = extract_nested(
+                module, source, "main", "transcribe_path",
+                {"mlx_whisper": fake_whisper,
+                 "args": type("Args", (), {"model": "mlx-community/whisper-large-v3-mlx"})(),
+                 "language": "en",
+                 "transcribe_kwargs": module.whisper_transcribe_kwargs(
+                     "mlx-community/whisper-large-v3-mlx", "en"),
+                 "prompt_words": 0,
+                 "load_audio_16k": lambda path: None,
+                 "log": logs.append},
+            )
+            text, conf = fn("/dev/null")
+
+            kept_only = math.exp(real[1])                                  # 0.8187
+            both = math.exp((8 * real[1] + 2 * fake[1]) / 10)              # 0.8504
+            problems = []
+            if fake[0] in text:
+                problems.append(f"the dropped hallucination is still in the text: {text!r}")
+            if real[0] not in text:
+                problems.append(f"the real sentence was lost: {text!r}")
+            if not any("drop" in l for l in logs):
+                problems.append(f"the drop was not logged (logs: {logs})")
+            if conf is None:
+                problems.append("no confidence at all for a chunk with a kept segment")
+            elif abs(conf - kept_only) > 1e-9:
+                problems.append(f"conf {conf:.4f} != kept-only {kept_only:.4f} "
+                                f"(counting the dropped segment gives {both:.4f})")
+            rep.expect(cid, not problems,
+                       f"1 kept + 1 dropped segment ⇒ conf {conf} from the kept "
+                       f"segment alone (both would be {both:.4f})",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not run the Whisper branch: {exc!r}")
+
+    # -- THE DRIFT DETECTOR. The owner chose fully standalone services over a
+    #    shared protocol module, accepting that the wire format now lives in
+    #    several copies. This is what makes that safe: it drives whisper-service.py
+    #    and EVERY mlx-audio service (qwen3, granite, voxtral) through the SAME
+    #    payload builders and the SAME real FLUSH branch, and fails if their replies
+    #    stop agreeing. A protocol edit applied to one file and not the others dies
+    #    HERE rather than as a Swift decode that silently drops a key mid-meeting.
+    #    Validated once with a negative control: an extra "engine" key and a changed
+    #    MIN_CHUNK_SEC in one file made it fail loudly on every drift.
+    #
+    #    No model load: the builders are pure, and the FLUSH branch is lifted out
+    #    by AST with the ASR stubbed (see extract_flush_branch).
+    if ctx.wants("whisper/protocol-matches-chunked"):
+        cid = "whisper/protocol-matches-chunked"
+        try:
+            import re
+            others = [(label, *load_sidecar_module(service,
+                                                   f"mt_{label}_protocol"))
+                      for label, service in MLX_SERVICES]
+            problems = []
+
+            # (1) the constants that decide WHICH flushes produce a message.
+            for name in PROTOCOL_CONSTANTS:
+                a = getattr(module, name, None)
+                for label, other, _ in others:
+                    b = getattr(other, name, None)
+                    if a is None or b is None or a != b:
+                        problems.append(f"{name}: whisper={a!r} {label}={b!r}")
+
+            # (2) every wire message, byte for byte (key set, key ORDER, rounding).
+            key_sets = {}
+            for builder, cargs in PROTOCOL_EMIT_CASES:
+                mine = capture_stdout(getattr(module, builder), *cargs)
+                agreed = True
+                for label, other, _ in others:
+                    theirs = capture_stdout(getattr(other, builder), *cargs)
+                    if mine != theirs:
+                        problems.append(f"{builder}{cargs!r}: whisper wrote {mine} "
+                                        f"but {label} wrote {theirs}")
+                        agreed = False
+                if not agreed:
+                    continue
+                for line in mine:
+                    payload = json.loads(line)
+                    key_sets.setdefault(payload["type"], set()).update(payload)
+
+            # (3) the top-level key sets, stated explicitly rather than implied by
+            #     (2), because these are the exact sets the Swift decoder reads.
+            expected_keys = {
+                "status": {"type", "text"},
+                "error": {"type", "text"},
+                # No "words"/"dur": word timestamps left these sidecars for
+                # scripts/aligner/aligner-service.py on 2026-07-29. Either key
+                # reappearing here means an ASR service has grown an aligner
+                # again — which is exactly the drift this check exists to catch.
+                "final": {"type", "text", "conf"},
+                "file_result": {"type", "id", "text", "conf"},
+                "file_error": {"type", "id", "text"},
+            }
+            for kind, want in expected_keys.items():
+                got = key_sets.get(kind)
+                if got != want:
+                    problems.append(f"{kind} key union was {sorted(got or [])}, "
+                                    f"expected {sorted(want)}")
+
+            # (4) the REAL `n == 0` branch of both sidecars, over the same buffer.
+            #     The under-MIN_CHUNK_SEC case is the one that must agree most:
+            #     a service that emitted a final there (or one that stopped
+            #     emitting one above the floor) would desync the app's
+            #     pendingChunkWindows FIFO for the rest of the meeting.
+            def mask(lines):
+                # Log lines carry timings; compare their SHAPE, not the clock.
+                return [re.sub(r"[\d.]+", "#", l) for l in lines]
+
+            for case, secs in (("under MIN_CHUNK_SEC", 0.1),
+                               ("above MIN_CHUNK_SEC", 1.0)):
+                mine = run_flush_branch(module, source, secs, ("hello there", 0.9))
+                for label, other, other_source in others:
+                    theirs = run_flush_branch(other, other_source, secs,
+                                              ("hello there", 0.9))
+                    if mine[0] != theirs[0]:
+                        problems.append(f"FLUSH {case}: whisper emitted {mine[0]} "
+                                        f"but {label} emitted {theirs[0]}")
+                    if mask(mine[1]) != mask(theirs[1]):
+                        problems.append(f"FLUSH {case}: log shapes differ — "
+                                        f"whisper {mask(mine[1])} vs {label} "
+                                        f"{mask(theirs[1])}")
+                    if theirs[2] != 0:
+                        problems.append(f"FLUSH {case}: {label} did not reset its "
+                                        f"buffer ({theirs[2]} samples left)")
+                if mine[2] != 0:
+                    problems.append(f"FLUSH {case}: whisper did not reset its "
+                                    f"buffer ({mine[2]} samples left)")
+                # And the behaviour itself, not merely that they agree on it.
+                emitted = bool(mine[0])
+                if emitted != (secs >= module.MIN_CHUNK_SEC):
+                    problems.append(f"FLUSH {case}: emitted={emitted} for a "
+                                    f"{secs}s buffer")
+
+            rep.expect(cid, not problems,
+                       f"{len(PROTOCOL_CONSTANTS)} constants, "
+                       f"{len(PROTOCOL_EMIT_CASES)} wire messages byte-identical, "
+                       f"{len(expected_keys)} key sets exact, and all "
+                       f"{len(others) + 1} FLUSH branches agree above and below "
+                       "MIN_CHUNK_SEC",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare the sidecars: {exc!r}")
+
+    # -- THE GOVERNING RULE of the decoding-options change: adding the options
+    #    must not change a single transcript until a knob is deliberately moved.
+    #    At default settings the kwargs must therefore be VALUE-identical to the
+    #    old three-argument call — the four optional knobs absent (mlx_whisper's
+    #    own None), the thresholds at the library's defaults, word_timestamps
+    #    off. The failure this guards is silent: a default that is a hair off
+    #    changes every meeting and nothing in the output says why.
+    if ctx.wants("whisper/option-defaults-are-todays-behaviour"):
+        cid = "whisper/option-defaults-are-todays-behaviour"
+        try:
+            got = module.whisper_transcribe_kwargs(
+                WHISPER_TODAYS_KWARGS["path_or_hf_repo"], "en")
+            problems = []
+            if got != WHISPER_TODAYS_KWARGS:
+                extra = {k: v for k, v in got.items()
+                         if k not in WHISPER_TODAYS_KWARGS}
+                missing = {k: v for k, v in WHISPER_TODAYS_KWARGS.items()
+                           if k not in got}
+                differing = {k: (got[k], v) for k, v in WHISPER_TODAYS_KWARGS.items()
+                             if k in got and got[k] != v}
+                problems.append(f"extra={extra} missing={missing} "
+                                f"differing(got, want)={differing}")
+            # Stated separately from the dict compare so the message names the
+            # option when one of these ever appears at its sentinel.
+            for key in ("initial_prompt", "best_of",
+                        "hallucination_silence_threshold"):
+                if key in got:
+                    problems.append(f"{key} is present at defaults ({got[key]!r}) "
+                                    "— it must be omitted so mlx_whisper uses None")
+            rep.expect(cid, not problems,
+                       f"default kwargs are exactly the pre-options call "
+                       f"({len(WHISPER_TODAYS_KWARGS)} keys, no optional knobs)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not build the default kwargs: {exc!r}")
+
+    # -- 0 means OFF and must reach mlx_whisper as None, never as 0. They are not
+    #    the same setting: best_of=0 is not "sample nothing", and
+    #    hallucination_silence_threshold=0.0 is not "no skipping". Omitting the
+    #    key is how None is expressed here (mlx_whisper defaults all three to
+    #    None), so the check is that the key is ABSENT and, explicitly, not 0.
+    if ctx.wants("whisper/sentinels-become-none"):
+        cid = "whisper/sentinels-become-none"
+        try:
+            got = module.whisper_transcribe_kwargs(
+                "repo", "en", best_of=0,
+                hallucination_silence_sec=0, initial_prompt="")
+            problems = []
+            for key in ("best_of", "hallucination_silence_threshold",
+                        "initial_prompt"):
+                if key in got:
+                    problems.append(f"{key}={got[key]!r} was passed through; "
+                                    "the sentinel must become None (absent)")
+                if got.get(key, None) is not None:
+                    problems.append(f"{key} resolves to {got.get(key)!r}, not None")
+            if got.get("word_timestamps") is not False:
+                problems.append("a 0 hallucination threshold turned word "
+                                "timestamps on")
+            # And the positive control: non-zero values DO come through, so the
+            # check above is not passing merely because everything is dropped.
+            on = module.whisper_transcribe_kwargs(
+                "repo", "en", best_of=5,
+                hallucination_silence_sec=2.0, initial_prompt=" Aggia ")
+            for key, want in (("best_of", 5),
+                              ("hallucination_silence_threshold", 2.0),
+                              ("initial_prompt", "Aggia")):
+                if on.get(key) != want:
+                    problems.append(f"{key} was {on.get(key)!r}, expected {want!r}")
+            # beam_size is NOT a knob here and must stay unrepresentable:
+            # mlx_whisper's decoding.py:437 raises NotImplementedError for any
+            # beam_size, so a "beam 2" setting could only ever kill the sidecar
+            # at load (measured 2026-07-29 — `mlx_whisper.transcribe(...,
+            # beam_size=2)` raises immediately, so the warmup fails and the
+            # sidecar exits with a load error instead of starting). Pinned
+            # so re-adding it has to be a conscious edit to this check too.
+            try:
+                module.whisper_transcribe_kwargs("repo", "en", beam_size=2)
+                problems.append("whisper_transcribe_kwargs accepted beam_size — "
+                                "mlx_whisper cannot do beam search at all")
+            except TypeError:
+                pass
+            rep.expect(cid, not problems,
+                       "0/\"\" are dropped (⇒ None), real values pass through, "
+                       "and beam_size is refused outright",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the sentinels: {exc!r}")
+
+    # -- THE COUPLING. mlx_whisper reads hallucination_silence_threshold only
+    #    inside its `if word_timestamps:` block, so setting the threshold alone
+    #    is accepted and does NOTHING. A setting that appears to work but does
+    #    nothing is worse than one that refuses, so the sidecar forces word
+    #    timestamps on (and says so in the log and the UI, because that reverses
+    #    a measured decision — CLAUDE.md, "word_timestamps MEASURED and
+    #    REJECTED"). If this check ever fails, the option has gone silent.
+    if ctx.wants("whisper/hallucination-implies-word-timestamps"):
+        cid = "whisper/hallucination-implies-word-timestamps"
+        try:
+            got = module.whisper_transcribe_kwargs("repo", "en",
+                                                   hallucination_silence_sec=2.0)
+            problems = []
+            if got.get("hallucination_silence_threshold") != 2.0:
+                problems.append(f"threshold was {got.get('hallucination_silence_threshold')!r}")
+            if got.get("word_timestamps") is not True:
+                problems.append("word_timestamps was NOT forced on — the "
+                                "threshold would be silently ignored by "
+                                "mlx_whisper")
+            # It must not leak the other way: word timestamps stay off unless
+            # the threshold asked for them.
+            if module.whisper_transcribe_kwargs("repo", "en")["word_timestamps"]:
+                problems.append("word_timestamps is on at default settings")
+            rep.expect(cid, not problems,
+                       "threshold 2.0s carries word_timestamps=True with it; "
+                       "off by default",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the coupling: {exc!r}")
+
+    # -- auto-detect must CLEAR the language, not merely be recorded. The flag is
+    #    resolved in main() (the app sends --language AND the flag), so this
+    #    lifts main()'s own two lines rather than restating the rule.
+    if ctx.wants("whisper/autodetect-clears-language"):
+        cid = "whisper/autodetect-clears-language"
+        try:
+            import ast
+            problems = []
+
+            def resolve(language_arg: str, auto: bool):
+                """Run main()'s real language-resolution statements."""
+                tree = ast.parse(source)
+                main_fn = next(n for n in tree.body
+                               if isinstance(n, ast.FunctionDef) and n.name == "main")
+                start = next(i for i, s in enumerate(main_fn.body)
+                             if isinstance(s, ast.Assign)
+                             and getattr(s.targets[0], "id", "") == "language")
+                block = ast.Module(body=main_fn.body[start:start + 2],
+                                   type_ignores=[])
+                ast.fix_missing_locations(block)
+                namespace = {"args": type("Args", (), {
+                    "language": language_arg, "auto_detect_language": auto})()}
+                exec(compile(block, "<main.language>", "exec"), namespace)  # noqa: S102
+                return namespace["language"]
+
+            if resolve("en", True) is not None:
+                problems.append("auto-detect did not clear an explicit language")
+            if resolve("en", False) != "en":
+                problems.append(f"explicit code was lost: {resolve('en', False)!r}")
+            if resolve("auto", False) is not None:
+                problems.append("language 'auto' did not become None")
+            # …and the resolved value is what lands in the kwargs.
+            if module.whisper_transcribe_kwargs("repo", None)["language"] is not None:
+                problems.append("a None language did not reach the kwargs")
+            rep.expect(cid, not problems,
+                       "auto-detect ⇒ language=None; off ⇒ the explicit code "
+                       "survives",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate language resolution: {exc!r}")
+
+
+# ============================================================= aligner group
+# scripts/aligner/aligner-service.py — the forced aligner, extracted out of the
+# ASR sidecars on 2026-07-29 so that word timestamps became ASYNCHRONOUS (the
+# transcript no longer waits on them).
+#
+# The first two checks are the SAME two that used to run as `chunked/*`; they
+# follow the code, because the functions they test now live here. They also got
+# CHEAPER and more honest in the move: `pair_source_indices` and `align_chunk`
+# are module-level functions taking `(align_proc, log)` / `(aligner, align_proc,
+# log)` explicitly, so the checks are plain imports instead of AST extractions
+# out of a nested closure.
+#
+# The third is new and covers the one thing this service's wire format must get
+# right: a REJECTED alignment is an `align_result` WITHOUT words, not an
+# `align_error` and not an empty list. Rejection is a normal outcome (the gates
+# exist to produce it) and the app must not treat it as a failure.
+ALIGNER_CHECKS = [
+    "aligner/src-indices-skip-punctuation",
+    "aligner/words-never-past-chunk",
+    "aligner/reply-shape",
+]
+
+
+def run_aligner(rep: Report, ctx):
+    try:
+        module, _ = load_sidecar_module(ALIGNER_SERVICE, "mt_aligner_service")
+    except Exception as exc:  # noqa: BLE001
+        for cid in ALIGNER_CHECKS:
+            if ctx.wants(cid):
+                rep.fail(cid, f"could not import aligner-service.py: {exc!r}")
+        return
+
+    # -- "src" indices point into the ORIGINAL text.split(), skipping
     #    punctuation-only source words. The aligner's tokenizer drops a
     #    standalone em-dash, so a naive item->word index shifts every later word
     #    one speaker to the left. That is the exact bug "src" exists to prevent.
-    if ctx.wants("chunked/src-indices-skip-punctuation"):
-        cid = "chunked/src-indices-skip-punctuation"
+    if ctx.wants("aligner/src-indices-skip-punctuation"):
+        cid = "aligner/src-indices-skip-punctuation"
         try:
             from mlx_audio.stt.models.qwen3_asr.qwen3_forced_aligner import (
                 ForceAlignProcessor,
@@ -741,8 +1479,6 @@ def run_chunked(rep: Report, ctx):
 
         if proc is not None:
             logs = []
-            pair = extract_nested(module, source, "main", "pair_source_indices",
-                                  {"align_proc": proc, "log": logs.append})
             text = "we shipped it — and then we tested it"
             words = text.split()
             assert words[3] == "—", "fixture must contain a standalone em-dash"
@@ -752,7 +1488,8 @@ def run_chunked(rep: Report, ctx):
                     self.text = t
 
             tokens, _ = proc.encode_timestamp(text, "English")
-            indices = pair(text, [Item(t) for t in tokens])
+            indices = module.pair_source_indices(proc, logs.append, text,
+                                                 [Item(t) for t in tokens])
 
             if indices is None:
                 rep.fail(cid, f"pairing returned None for {text!r}: {logs}")
@@ -767,45 +1504,46 @@ def run_chunked(rep: Report, ctx):
                            f"{indices} skip it (naive would be {naive})",
                            f"indices {indices} map to {mapped}, expected {expected}")
 
-    # -- check 7: alignment items are never allowed to run past the chunk.
-    #    Forced alignment force-fits whatever text it is handed, so a real
-    #    Whisper hallucination got stamped after the end of the audio: a few
-    #    stragglers are dropped, but a bulk overrun rejects the whole alignment
-    #    rather than emitting a truncated guess.
-    if ctx.wants("chunked/words-never-past-chunk"):
-        cid = "chunked/words-never-past-chunk"
+    # -- alignment items are never allowed to run past the chunk. Forced
+    #    alignment force-fits whatever text it is handed, so a real Whisper
+    #    hallucination got stamped after the end of the audio: a few stragglers
+    #    are dropped, but a bulk overrun rejects the whole alignment rather than
+    #    emitting a truncated guess.
+    if ctx.wants("aligner/words-never-past-chunk"):
+        cid = "aligner/words-never-past-chunk"
         import numpy as np
 
         class Item:
             def __init__(self, text, start, end):
                 self.text, self.start_time, self.end_time = text, start, end
 
-        def make_align(items):
-            """align_chunk with a fake aligner and an identity src mapping, so the
-            only thing under test is the past-the-end gate itself."""
-            fake = type("FakeAligner", (), {"generate": lambda self, a, t, language=None: items})()
+        def run_align(items):
+            """The REAL align_chunk with a fake aligner and an identity src
+            mapping, so the only thing under test is the past-the-end gate."""
+            fake = type("FakeAligner", (),
+                        {"generate": lambda self, a, t, language=None: items})()
             logs = []
-            fn = extract_nested(
-                module, source, "main", "align_chunk",
-                {"aligner": fake,
-                 "pair_source_indices": lambda text, its: list(range(len(its))),
-                 "log": logs.append},
-            )
-            return fn, logs
-
-        audio = np.zeros(int(10.0 * SR), dtype=np.float32)  # a 10 s chunk
+            audio = np.zeros(int(10.0 * SR), dtype=np.float32)  # a 10 s chunk
+            text = " ".join(it.text for it in items)
+            # pair_source_indices is a module global here, so replacing it
+            # replaces the very name align_chunk calls. Restored below.
+            original = module.pair_source_indices
+            module.pair_source_indices = \
+                lambda proc, log, t, its: list(range(len(its)))
+            try:
+                return module.align_chunk(fake, None, logs.append, audio, text), logs
+            finally:
+                module.pair_source_indices = original
 
         # (a) one straggler out of twenty: dropped, the rest survive.
         good = [Item(f"w{i}", i * 0.4, i * 0.4 + 0.3) for i in range(19)]
         good.append(Item("hallucination", 10.9, 11.4))
-        fn, logs_a = make_align(good)
-        kept = fn(audio, " ".join(it.text for it in good))
+        kept, logs_a = run_align(good)
 
         # (b) a bulk overrun: no timestamps at all rather than a truncated guess.
         bad = [Item(f"w{i}", i * 0.4, i * 0.4 + 0.3) for i in range(10)]
         bad += [Item(f"h{i}", 11.0 + i, 11.5 + i) for i in range(6)]
-        fn, logs_b = make_align(bad)
-        rejected = fn(audio, " ".join(it.text for it in bad))
+        rejected, _ = run_align(bad)
 
         problems = []
         if kept is None:
@@ -823,28 +1561,1038 @@ def run_chunked(rep: Report, ctx):
                    "1/20 past-end item dropped, 6/16 overrun rejected wholesale",
                    "; ".join(problems))
 
+    # -- the reply shapes, byte for byte. No model load: the emitters are pure.
+    #    The distinction under test is the one the app depends on — rejection is
+    #    an align_result with NO words (absent, never []), an error is a
+    #    different message type entirely — because the app treats the first as
+    #    "keep the estimate" and the second as a failure worth logging.
+    if ctx.wants("aligner/reply-shape"):
+        cid = "aligner/reply-shape"
+        try:
+            problems = []
+            words = [{"text": "hello", "start": 0.0, "end": 0.4, "src": 0}]
 
-# ============================================================= diarize group
-DIARIZE_CHECKS = [
-    "diarize/absent-stream-means-office",
-    "diarize/profile-stores-are-disjoint",
-    "diarize/native-rate-final-matches-16k-chunks",
-    "diarize/reset-wipes-both-stores",
+            ok_line = capture_stdout(module.emit_align, 7, words, 30.0)
+            none_line = capture_stdout(module.emit_align, 7, None, None)
+            err_line = capture_stdout(module.emit_align_error, 7,
+                                      "file not found: /nope.wav")
+            for label, lines in (("align_result", ok_line),
+                                 ("rejected", none_line), ("align_error", err_line)):
+                if len(lines) != 1:
+                    problems.append(f"{label} wrote {len(lines)} lines")
+            ok = json.loads(ok_line[0])
+            none = json.loads(none_line[0])
+            err = json.loads(err_line[0])
+
+            if set(ok) != {"type", "id", "words", "dur"}:
+                problems.append(f"success key set was {sorted(ok)}")
+            if ok.get("type") != "align_result" or ok.get("id") != 7:
+                problems.append(f"success type/id were {ok.get('type')!r}/{ok.get('id')!r}")
+            if ok.get("words") != words or ok.get("dur") != 30.0:
+                problems.append("success payload did not carry the words/dur verbatim")
+
+            if set(none) != {"type", "id"}:
+                problems.append(f"rejected key set was {sorted(none)} — "
+                                "words/dur must be ABSENT, not [] or null")
+            if none.get("type") != "align_result":
+                problems.append(f"a rejected alignment was sent as "
+                                f"{none.get('type')!r}, not align_result")
+
+            if set(err) != {"type", "id", "text"} or err.get("type") != "align_error":
+                problems.append(f"error key set was {sorted(err)} "
+                                f"(type {err.get('type')!r})")
+            rep.expect(cid, not problems,
+                       "align_result carries id+words+dur, a rejection carries "
+                       "id alone, and an error is align_error",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the reply shapes: {exc!r}")
+
+
+# ================================================================ moss group
+# MOSS-Transcribe-Diarize (speaker-attributed ASR). Every check is a pure import
+# of the MOSS sidecars — no 3.6 GB model load, milliseconds — for the same reason
+# the chunked gate checks are: the parts that can be silently wrong here are
+# RULES (a gate's verdict, a wire shape), and a check that needs a model load is
+# a check nobody runs.
+#
+# The first five run against BOTH copies (see MOSS_COPIES); the last three exist
+# only because there ARE two copies.
+MOSS_CHECKS = [
+    "moss/silence-gate-skips-allsilent",
+    "moss/refusal-gate-is-narrow",
+    "moss/truncation-warning-fires-at-cap",
+    "moss/parse-to-wire-shape",
+    "moss/final-shape-empty-on-skip",
+    "moss/asr-matches-moss",
+    "moss/diar-has-no-file-branch",
+    "moss/asr-vendor-is-own-and-identical",
+]
+
+# Every wire message BOTH MOSS sidecars can produce, as (builder, args). MOSS's
+# own shapes, NOT the mlx/Whisper ones: its `final` carries `segments` and never
+# `conf`. Compared BYTE FOR BYTE across the copies so key ORDER and the segment
+# rounding are covered too.
+#
+# MOSS deliberately stays OUT of `whisper/protocol-matches-chunked`: that check
+# asserts the final key set is {"type","text","conf"}, which is exactly what a
+# MOSS final must NOT be. Loosening it to admit MOSS would destroy the thing it
+# proves about the other four services.
+MOSS_SHARED_EMIT_CASES = [
+    ("emit", ("status", "LOADED")),
+    ("emit", ("error", "Chunk transcription failed: boom")),
+    ("emit_final", ("hello there. hi.",
+                    [{"start": 0.0, "end": 4.1, "speaker": "S01", "text": "Hello there."},
+                     {"start": 4.4, "end": 5.2, "speaker": "S02", "text": "Hi."}])),
+    ("emit_final", ("", [])),
+]
+
+# The `-2` FILE-TRANSCRIBE replies, which ONLY the ASR role has (phase 2,
+# 2026-07-31 — the diar process is never sent a `-2` frame, see
+# `moss/diar-has-no-file-branch`). Having lost its second participant, this half
+# can no longer be pinned by cross-copy comparison, so each case carries the
+# EXACT LINE it must produce. That keeps the byte-level pin — key set AND key
+# ORDER — alive, and it is worth keeping: the `-2` protocol is load-bearing for
+# Remote chunks and for overlap-repair re-ASR.
+MOSS_ASR_ONLY_EMIT_CASES = [
+    (("file_result", 7, "some text"),
+     '{"type": "file_result", "id": 7, "text": "some text"}'),
+    (("file_result", 7, ""),
+     '{"type": "file_result", "id": 7, "text": ""}'),
+    (("file_error", 7, "file not found: /nope.wav"),
+     '{"type": "file_error", "id": 7, "text": "file not found: /nope.wav"}'),
+    (("file_error", None, "file transcription failed: boom"),
+     '{"type": "file_error", "id": null, "text": "file transcription failed: boom"}'),
+]
+
+# Constants that are part of MOSS's wire/gate behaviour, not implementation
+# detail. The two gate constants matter as much as the framing ones: a different
+# SILENCE_RMS in one copy means one role calls the model on silence and answers
+# as a chatbot while the other does not.
+MOSS_PROTOCOL_CONSTANTS = ["SR", "MIN_CHUNK_SEC", "MAX_BUFFER_SEC", "SILENCE_RMS",
+                           "MAX_NEW_TOKENS", "REFUSAL_MARKERS", "REFUSAL_PREFIXES",
+                           # A per-copy MPS cap would let one role survive a long
+                           # chunk while the other died on the same audio — and in
+                           # MOSS+MOSS mode both are live at once, so the two caps
+                           # ADD against one machine. They must move together.
+                           "MPS_MEMORY_CAP_GB"]
+
+# The exact refusal captured on the owner's M4 when the model was handed 30 s of
+# digital silence — it answered as an LLM instead of transcribing. The gate that
+# must catch it is a BACKSTOP (the silence gate stops the call happening at all),
+# so its false-positive risk matters more than its recall: everything in the
+# `True` rows below is ordinary meeting speech that must survive, including the
+# apology that opens the refusal but is not it.
+MOSS_REFUSAL_CASES = [
+    # (text, keep?)
+    ("I'm sorry, I can't assist with that request. I'm a Qwen-1 model developed "
+     "by Qwen-Omni, and I can't process audio.", False),
+    ("I can't assist with that request.", False),
+    ("I'm a Qwen model.", False),
+    ("Okay.", True),
+    ("I'm sorry, I missed that.", True),
+    ("I'm sorry, could you repeat the question about the quarterly numbers?", True),
+    ("So the main challenge that we face is how do we really consolidate so much "
+     "important information into just one minute?", True),
+    ("He said he couldn't assist with that request, which I thought was odd.", True),
 ]
 
 
-def run_diarize(rep: Report, ctx):
-    wanted = [c for c in DIARIZE_CHECKS if ctx.wants(c)]
+def run_moss(rep: Report, ctx):
+    # Both copies, loaded once. A missing/broken file fails EVERY moss check
+    # rather than silently reducing the loop to one participant — a drift check
+    # that quietly stops comparing is worse than no drift check.
+    copies = []
+    try:
+        for label, service, vendor in MOSS_COPIES:
+            mod, src = load_sidecar_module(service, f"mt_{label.replace('-', '_')}_service")
+            copies.append((label, mod, src, vendor))
+    except Exception as exc:  # noqa: BLE001
+        for cid in MOSS_CHECKS:
+            if ctx.wants(cid):
+                rep.fail(cid, f"could not import a MOSS sidecar: {exc!r}")
+        return
+
+    # -- check 1: the silence gate. MEASURED failure it guards: 30 s of digital
+    #    silence made the model reply "I'm sorry, I can't assist with that
+    #    request. I'm a Qwen-1 model…", which would have entered the transcript
+    #    as speech. The gate must fire on silence and must NOT fire on audio the
+    #    rest of the suite already treats as speech-like.
+    if ctx.wants("moss/silence-gate-skips-allsilent"):
+        cid = "moss/silence-gate-skips-allsilent"
+        try:
+            import numpy as np
+            problems = []
+            digital_silence = np.zeros(30 * SR, dtype="float32")
+            speech_like = tone(30.0)
+            for label, module, _, _ in copies:
+                if module.silence_skip_reason(digital_silence) is None:
+                    problems.append(f"{label}: 30 s of digital silence was NOT skipped")
+                if module.silence_skip_reason(near_silence(30.0)) is None:
+                    problems.append(f"{label}: an idle (near-silent) channel was NOT skipped")
+                reason = module.silence_skip_reason(speech_like)
+                if reason is not None:
+                    problems.append(f"{label}: the tone fixture was skipped as {reason!r}")
+                if module.silence_skip_reason(np.zeros(0, dtype="float32")) is None:
+                    problems.append(f"{label}: an empty buffer was NOT skipped")
+            rep.expect(cid, not problems,
+                       f"silence/near-silence skipped, tone kept, in all "
+                       f"{len(copies)} copies (threshold {copies[0][1].SILENCE_RMS})",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the silence gate: {exc!r}")
+
+    # -- check 2: the refusal backstop, in BOTH directions. Over-deletion is the
+    #    dangerous direction (a dropped chunk leaves no trace in the transcript,
+    #    only in each role's own log), so the surviving cases are the point of this
+    #    check as much as the dropped ones.
+    if ctx.wants("moss/refusal-gate-is-narrow"):
+        cid = "moss/refusal-gate-is-narrow"
+        try:
+            wrong = []
+            for label, module, _, _ in copies:
+                for text, want_keep in MOSS_REFUSAL_CASES:
+                    reason = module.refusal_drop_reason(text)
+                    if (reason is None) != want_keep:
+                        verdict = "kept" if reason is None else f"dropped as {reason}"
+                        wrong.append(f"{label}: {text[:50]!r} was {verdict}")
+            rep.expect(cid, not wrong,
+                       f"all {len(MOSS_REFUSAL_CASES)} refusal/real cases judged "
+                       f"correctly in all {len(copies)} copies (real speech survives)",
+                       "; ".join(wrong))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the refusal gate: {exc!r}")
+
+    # -- check 2b: the truncation warning (added by the 2026-07-31 upstream audit).
+    #    Upstream `generate_transcription` returns `generated_tokens`; we discarded
+    #    it, and hitting `max_new_tokens` cuts the transcript MID-SEGMENT while
+    #    `parse_transcript` drops the incomplete tail WITHOUT raising (measured: a
+    #    3-segment transcript cut mid-text parses to 2). So the log line this gate
+    #    produces is the ONLY trace such a loss would ever leave — the same reason
+    #    every hallucination-gate drop is logged with its reason.
+    #
+    #    The boundary is `>=`, not `>`: transformers stops AT the cap, so a run
+    #    that reached exactly `cap` is the truncated case, not the last good one.
+    #    Both directions are asserted, because a gate that cried truncation on
+    #    every chunk would train the reader to ignore the one that matters.
+    if ctx.wants("moss/truncation-warning-fires-at-cap"):
+        cid = "moss/truncation-warning-fires-at-cap"
+        try:
+            wrong = []
+            caps = {}
+            for label, module, _, _ in copies:
+                cap = module.MAX_NEW_TOKENS
+                caps[label] = cap
+                cases = [(0, False), (1, False), (cap // 2, False), (cap - 1, False),
+                         (cap, True), (cap + 250, True)]
+                for generated, want_warning in cases:
+                    warning = module.truncation_warning(generated)
+                    if (warning is not None) != want_warning:
+                        verdict = "silent" if warning is None else "warned"
+                        wrong.append(f"{label}: {generated} tokens vs cap {cap} → {verdict}")
+                    if warning is not None and str(generated) not in warning:
+                        wrong.append(f"{label}: the {generated}-token warning does not "
+                                     "name the actual count, so the log cannot show "
+                                     "how far past the cap it went")
+            # Same cap in both copies. `asr-matches-moss` compares the constant
+            # too; here it matters for a different reason — a per-copy cap would
+            # make one role truncate while the other did not, on the SAME audio.
+            if len(set(caps.values())) > 1:
+                wrong.append(f"the copies disagree on MAX_NEW_TOKENS: {caps}")
+            rep.expect(cid, not wrong,
+                       f"silent below the {sorted(set(caps.values()))[0]}-token cap and "
+                       f"warns at or above it, in all {len(copies)} copies",
+                       "; ".join(wrong))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the truncation gate: {exc!r}")
+
+    # -- check 3: model output → the wire shape the Swift decoder reads. The
+    #    vendored parser is exercised too, so a broken/absent
+    #    scripts/<service>/vendor/moss_transcribe_diarize fails HERE rather than at
+    #    the first chunk of a real meeting (the build.sh `git+`-strip trap).
+    if ctx.wants("moss/parse-to-wire-shape"):
+        cid = "moss/parse-to-wire-shape"
+        try:
+            raw = "[00.00][S01]Hello there.[04.10] [04.40][S02]Hi.[05.20]"
+            expected = [
+                {"start": 0.0, "end": 4.1, "speaker": "S01", "text": "Hello there."},
+                {"start": 4.4, "end": 5.2, "speaker": "S02", "text": "Hi."},
+            ]
+            problems = []
+            for label, module, _, vendor in copies:
+                # Each copy's OWN vendor tree is exercised, not whichever one
+                # happened to be imported first — the point of the check is that
+                # a service's parser is really there, so a cached module would
+                # let a missing/broken tree pass.
+                for name in [m for m in sys.modules
+                             if m == "moss_transcribe_diarize"
+                             or m.startswith("moss_transcribe_diarize.")]:
+                    del sys.modules[name]
+                sys.path.insert(0, str(vendor))
+                try:
+                    from moss_transcribe_diarize import parse_transcript
+                    import moss_transcribe_diarize as _mtd
+                    if str(vendor) not in _mtd.__file__:
+                        problems.append(f"{label}: parser came from {_mtd.__file__}, "
+                                        f"not {vendor}")
+                    segments = module.wire_segments(parse_transcript(raw))
+                finally:
+                    sys.path.remove(str(vendor))
+                if segments != expected:
+                    problems.append(f"{label}: segments were {segments}, expected {expected}")
+                for seg in segments:
+                    if set(seg) != {"start", "end", "speaker", "text"}:
+                        problems.append(f"{label}: unexpected keys {sorted(seg)}")
+                # Times are CHUNK-LOCAL — the app adds the window start. A parser
+                # that ever returned absolute times would double-offset every row.
+                if segments and segments[0]["start"] != 0.0:
+                    problems.append(f"{label}: first segment does not start at 0 "
+                                    "(not chunk-local)")
+                joined = module.joined_text(segments)
+                if joined != "Hello there. Hi.":
+                    problems.append(f"{label}: joined text was {joined!r}")
+                if module.speaker_index("S01") != 1 or module.speaker_index("S12") != 12:
+                    problems.append(f"{label}: speaker_index does not map S01→1 / S12→12")
+            rep.expect(cid, not problems,
+                       f"2 segments, chunk-local floats, exact keys, text joins in "
+                       f"order — from each of {len(copies)} services' own vendor tree",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the wire shape: {exc!r}")
+
+    # -- check 4: a SKIPPED chunk still emits a final. The app pops one entry off
+    #    pendingChunkWindows per final; a silent chunk that emitted nothing would
+    #    leave that FIFO one deep forever and misalign every later chunk's window
+    #    against the diarization turns.
+    if ctx.wants("moss/final-shape-empty-on-skip"):
+        cid = "moss/final-shape-empty-on-skip"
+        try:
+            import io
+            import contextlib
+            problems = []
+            for label, module, _, _ in copies:
+                buffer = io.StringIO()
+                with contextlib.redirect_stdout(buffer):
+                    module.emit_final("", [])
+                payload = json.loads(buffer.getvalue().strip())
+                if payload != {"type": "final", "text": "", "segments": []}:
+                    problems.append(f"{label}: payload was {payload}")
+                # Never invent a confidence: MOSS reports none, and absent means
+                # "not measured" everywhere in this app.
+                if "conf" in payload or "words" in payload:
+                    problems.append(f"{label}: a MOSS final carried conf/words")
+            rep.expect(cid, not problems,
+                       'skipped chunk emits {"type":"final","text":"","segments":[]} '
+                       f"in all {len(copies)} copies",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the skipped-chunk final: {exc!r}")
+
+    # -- check 5: THE DRIFT DETECTOR for the two MOSS copies. Same job as
+    #    `whisper/protocol-matches-chunked` does for the five ASR services, and
+    #    the same justification: the owner chose standalone services over a
+    #    shared module, so the wire format and the gates now live in two copies
+    #    of MOSS as well. A `-2` reply reshaped in one file, or a gate threshold
+    #    moved in one file, dies HERE — not as one role behaving differently from
+    #    the other in a meeting, which nothing in the output would explain.
+    #
+    #    No model load: the builders are pure and the FLUSH branch is lifted by
+    #    AST with `transcribe` stubbed (extract_flush_branch).
+    if ctx.wants("moss/asr-matches-moss"):
+        cid = "moss/asr-matches-moss"
+        try:
+            import re
+            import numpy as np
+            base_label, base, base_src, _ = copies[0]
+            others = copies[1:]
+            problems = []
+
+            # (1) the constants that decide what reaches the model and what a
+            #     FLUSH produces.
+            for name in MOSS_PROTOCOL_CONSTANTS:
+                a = getattr(base, name, None)
+                for label, other, _, _ in others:
+                    b = getattr(other, name, None)
+                    if a is None or b is None or a != b:
+                        problems.append(f"{name}: {base_label}={a!r} {label}={b!r}")
+
+            # (2) every SHARED wire message, byte for byte across the copies (key
+            #     set, key ORDER, the segment rounding).
+            key_sets = {}
+            for builder, cargs in MOSS_SHARED_EMIT_CASES:
+                mine = capture_stdout(getattr(base, builder), *cargs)
+                agreed = True
+                for label, other, _, _ in others:
+                    theirs = capture_stdout(getattr(other, builder), *cargs)
+                    if mine != theirs:
+                        problems.append(f"{builder}{cargs!r}: {base_label} wrote {mine} "
+                                        f"but {label} wrote {theirs}")
+                        agreed = False
+                if not agreed:
+                    continue
+                for line in mine:
+                    payload = json.loads(line)
+                    key_sets.setdefault(payload["type"], set()).update(payload)
+
+            # (2b) the ASR-ONLY `-2` replies. `emit_file` exists in the ASR file
+            #      alone, so there is nothing to compare it against — each case is
+            #      pinned to its exact line instead, which holds key ORDER as
+            #      firmly as the cross-copy comparison did. Deliberately run on
+            #      the ASR copy BY NAME rather than on `base`: if MOSS_COPIES is
+            #      ever reordered this must still land on the file that has it.
+            asr_label, asr_module, _, _ = next(
+                (c for c in copies if c[0] == "moss-asr"), (None, None, None, None))
+            if asr_module is None:
+                problems.append("the moss-asr copy is not in MOSS_COPIES — the "
+                                "`-2` protocol has no owner to check")
+            elif not hasattr(asr_module, "emit_file"):
+                # Reported as a DRIFT, not left to raise inside the try: an
+                # AttributeError here would be a crash report, and the thing that
+                # actually happened is that the ASR role lost the `-2` protocol
+                # Remote and overlap repair ride on.
+                problems.append(f"{asr_label} no longer defines emit_file — the `-2` "
+                                "FILE-TRANSCRIBE protocol has been deleted from the "
+                                "role that needs it")
+            elif any(hasattr(m, "emit_file") for l, m, _, _ in copies if l != "moss-asr"):
+                problems.append("a non-ASR MOSS copy defines emit_file — the `-2` "
+                                "frame belongs to the ASR role alone")
+            else:
+                for cargs, want in MOSS_ASR_ONLY_EMIT_CASES:
+                    got = capture_stdout(asr_module.emit_file, *cargs)
+                    if got != [want]:
+                        problems.append(f"emit_file{cargs!r}: {asr_label} wrote {got}, "
+                                        f"expected [{want!r}]")
+                        continue
+                    payload = json.loads(got[0])
+                    key_sets.setdefault(payload["type"], set()).update(payload)
+
+            # (3) the top-level key sets, stated explicitly rather than implied
+            #     by (2) — these are the exact sets the Swift decoder reads, and
+            #     they are MOSS's, not the other services'. `segments` on a final
+            #     is load-bearing: in MOSS+MOSS mode this one process is the only
+            #     thing feeding the diarization rows. `conf`/`words` must never
+            #     appear — MOSS measures neither, and absent means absent.
+            #     UNCHANGED by the phase-2 split: all five types are still
+            #     required, the file_* two now sourced from the ASR copy alone
+            #     (2b) rather than from the cross-copy comparison.
+            expected_keys = {
+                "status": {"type", "text"},
+                "error": {"type", "text"},
+                "final": {"type", "text", "segments"},
+                "file_result": {"type", "id", "text"},
+                "file_error": {"type", "id", "text"},
+            }
+            for kind, want in expected_keys.items():
+                got = key_sets.get(kind)
+                if got != want:
+                    problems.append(f"{kind} key union was {sorted(got or [])}, "
+                                    f"expected {sorted(want)}")
+
+            # (4) the REAL `n == 0` branch of both copies, over the same buffers.
+            #     Three cases, because MOSS's branch has three outcomes and each
+            #     must agree: below the floor, above it but silent (the gate that
+            #     stops the model answering as a chatbot), and a real transcribe.
+            def mask(lines):
+                return [re.sub(r"[\d.]+", "#", l) for l in lines]
+
+            stub = ("hello there. hi.",
+                    [{"start": 0.0, "end": 4.1, "speaker": "S01", "text": "Hello there."},
+                     {"start": 4.4, "end": 5.2, "speaker": "S02", "text": "Hi."}])
+
+            def flush(module, source, buf):
+                """The sidecar's own FLUSH branch over an EXPLICIT buffer.
+
+                `run_flush_branch` builds a zeros buffer, which for MOSS can only
+                ever exercise the silence gate — so the transcribing case needs
+                the buffer passed in. Same machinery (extract_flush_branch), same
+                stubbing rule: only the branch's own decisions are under test.
+                """
+                logs = []
+                namespace = dict(vars(module))
+                namespace.update({"buffer": buf.copy(), "np": np, "log": logs.append,
+                                  "transcribe": lambda audio: stub})
+                lines = capture_stdout(extract_flush_branch(source), namespace)
+                return lines, logs, int(namespace["buffer"].size)
+
+            cases = [
+                ("under MIN_CHUNK_SEC", np.zeros(int(0.1 * SR), dtype=np.float32), False),
+                ("silent above MIN_CHUNK_SEC", np.zeros(SR, dtype=np.float32), False),
+                ("real speech", tone(1.0).astype(np.float32), True),
+            ]
+            for case, buf, wants_text in cases:
+                mine = flush(base, base_src, buf)
+                for label, other, other_src, _ in others:
+                    theirs = flush(other, other_src, buf)
+                    if mine[0] != theirs[0]:
+                        problems.append(f"FLUSH {case}: {base_label} emitted {mine[0]} "
+                                        f"but {label} emitted {theirs[0]}")
+                    if mask(mine[1]) != mask(theirs[1]):
+                        problems.append(f"FLUSH {case}: log shapes differ — "
+                                        f"{base_label} {mask(mine[1])} vs {label} "
+                                        f"{mask(theirs[1])}")
+                    if theirs[2] != 0:
+                        problems.append(f"FLUSH {case}: {label} did not reset its "
+                                        f"buffer ({theirs[2]} samples left)")
+                if mine[2] != 0:
+                    problems.append(f"FLUSH {case}: {base_label} did not reset its "
+                                    f"buffer ({mine[2]} samples left)")
+                # And the behaviour itself, not merely that they agree on it: a
+                # final is ALWAYS emitted (the pendingChunkWindows FIFO must
+                # drain), but only the real-speech case may carry text.
+                if len(mine[0]) != 1:
+                    problems.append(f"FLUSH {case}: emitted {len(mine[0])} lines, "
+                                    "expected exactly one final")
+                else:
+                    payload = json.loads(mine[0][0])
+                    if bool(payload.get("text")) != wants_text:
+                        problems.append(f"FLUSH {case}: text was {payload.get('text')!r}")
+                    if bool(payload.get("segments")) != wants_text:
+                        problems.append(f"FLUSH {case}: segments were "
+                                        f"{payload.get('segments')!r}")
+
+            rep.expect(cid, not problems,
+                       f"{len(MOSS_PROTOCOL_CONSTANTS)} constants, "
+                       f"{len(MOSS_SHARED_EMIT_CASES)} wire messages byte-identical "
+                       f"across copies + {len(MOSS_ASR_ONLY_EMIT_CASES)} ASR-only "
+                       f"`-2` replies pinned to exact lines, "
+                       f"{len(expected_keys)} key sets exact, and all "
+                       f"{len(copies)} FLUSH branches agree over {len(cases)} cases",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare the MOSS copies: {exc!r}")
+
+    # -- check 6: the ONE deliberate behavioural difference between the copies —
+    #    the DIARIZATION role has no `-2` FILE-TRANSCRIBE frame and no emit_file.
+    #
+    #    Why it is pinned rather than left to notice (the
+    #    `pyannote/no-path-to-torchcodec` precedent — an invariant that is
+    #    invisible in normal use):
+    #      * ADDING it back is the tidy-minded mistake. `transcribeFile` is only
+    #        ever reached through `modelLoader.chunkedASR`, so the diar process
+    #        cannot be sent a `-2` frame; the branch would never run, and dead
+    #        branches rot silently.
+    #      * REMOVING it from the ASR file is the dangerous mistake, and it is the
+    #        over-deletion direction: Remote chunks and overlap-repair re-ASR both
+    #        ride `-2`, and a missing branch there stalls a request forever rather
+    #        than failing. That file's docstring says nothing may be dropped from
+    #        it; this is the check that enforces it.
+    #    Both halves are asserted, so the check is PROVEN ABLE TO FAIL in each
+    #    direction rather than merely passing on an absence.
+    #
+    #    By AST, not grep: both files DOCUMENT the `-2` asymmetry at length, so a
+    #    textual search matches its own explanation (build.sh's tokenizer gate and
+    #    `pyannote/no-path-to-torchcodec` learned this the hard way).
+    if ctx.wants("moss/diar-has-no-file-branch"):
+        cid = "moss/diar-has-no-file-branch"
+        try:
+            import ast
+
+            def shape(source):
+                """(emit_file defs, `-2` compares in the read loop, `-2` anywhere)."""
+                tree = ast.parse(source)
+                defs = [n for n in ast.walk(tree)
+                        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and n.name == "emit_file"]
+
+                def is_minus_two(node):
+                    return (isinstance(node, ast.UnaryOp)
+                            and isinstance(node.op, ast.USub)
+                            and isinstance(node.operand, ast.Constant)
+                            and node.operand.value == 2)
+
+                def compares(scope):
+                    return [n for n in ast.walk(scope) if isinstance(n, ast.Compare)
+                            and any(is_minus_two(c) for c in n.comparators)]
+
+                main = next((n for n in ast.walk(tree)
+                             if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+                loops = [n for n in ast.walk(main)
+                         if isinstance(n, ast.While)] if main is not None else []
+                in_loop = [c for loop in loops for c in compares(loop)]
+                return len(defs), len(in_loop), len(compares(tree)), main is not None
+
+            shapes = {label: shape(source) for label, _, source, _ in copies}
+            problems = []
+            for label in ("moss-asr", "moss-diar"):
+                if label not in shapes:
+                    problems.append(f"{label} is not in MOSS_COPIES — this check "
+                                    "cannot compare the roles")
+            if not problems:
+                # The NEGATIVE half: the diar role must have neither.
+                d_defs, d_loop, d_any, d_main = shapes["moss-diar"]
+                if not d_main:
+                    problems.append("moss-diar has no main() — the read loop could "
+                                    "not be located")
+                if d_defs:
+                    problems.append(f"moss-diar defines emit_file ({d_defs} times) — "
+                                    "it is never sent a `-2` frame")
+                if d_loop or d_any:
+                    problems.append(f"moss-diar compares against -2 ({d_loop} in its "
+                                    f"read loop, {d_any} in the file)")
+                # The POSITIVE half: the ASR role must have BOTH, which is what
+                # makes the assertion above capable of failing at all — and what
+                # catches an over-deletion from the file that needs them.
+                a_defs, a_loop, a_any, a_main = shapes["moss-asr"]
+                if not a_main:
+                    problems.append("moss-asr has no main() — the read loop could "
+                                    "not be located")
+                if a_defs != 1:
+                    problems.append(f"moss-asr defines emit_file {a_defs} times, "
+                                    "expected exactly 1 (Remote + overlap repair "
+                                    "depend on it)")
+                if a_loop < 1:
+                    problems.append("moss-asr's read loop no longer handles the `-2` "
+                                    "FILE-TRANSCRIBE frame")
+            rep.expect(cid, not problems,
+                       "moss-diar has no emit_file and no `-2` branch, while "
+                       "moss-asr has both (so this check can fail in either "
+                       "direction)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare the MOSS read loops: {exc!r}")
+
+    # -- check 7: each MOSS service must put its OWN vendor tree on sys.path,
+    #    and the trees must be identical.
+    #
+    #    THE SILENT TRAP this exists for: the two trees are byte-identical and
+    #    both present, so either service pointing at the OTHER's vendor folder
+    #    WORKS TODAY and breaks only when that folder moves — a failure that would
+    #    appear months later, in a release, as one MOSS role refusing to load. It
+    #    already caught the phase-2 rename exactly as predicted: moss/vendor became
+    #    moss-diar/vendor. Read by AST, NOT by grep: both files DOCUMENT this at length,
+    #    so a textual search matches its own explanation (the lesson from
+    #    `pyannote/no-path-to-torchcodec` and build.sh's tokenizer gate).
+    if ctx.wants("moss/asr-vendor-is-own-and-identical"):
+        cid = "moss/asr-vendor-is-own-and-identical"
+        try:
+            import ast
+            import hashlib
+            problems = []
+            for label, _, source, vendor in copies:
+                inserted = []
+                for node in ast.walk(ast.parse(source)):
+                    if (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "insert"
+                            and ast.unparse(node.func.value) == "sys.path"):
+                        inserted.append([c.value for c in ast.walk(node)
+                                         if isinstance(c, ast.Constant)
+                                         and isinstance(c.value, str)])
+                if len(inserted) != 1:
+                    problems.append(f"{label}: {len(inserted)} sys.path.insert calls, "
+                                    "expected exactly 1")
+                    continue
+                parts = inserted[0]
+                # The folder is the service's OWN, and it is that folder's vendor.
+                if vendor.name not in parts or vendor.parent.name not in parts:
+                    problems.append(f"{label}: sys.path.insert names {parts}, "
+                                    f"not {vendor.parent.name}/{vendor.name}")
+                # The POSITIVE half: the path it names actually exists and holds
+                # the package. "No wrong literal" alone would pass a typo.
+                if not (vendor / "moss_transcribe_diarize" / "__init__.py").exists():
+                    problems.append(f"{label}: {vendor}/moss_transcribe_diarize is missing")
+
+            def tree_hash(vendor):
+                pkg = vendor / "moss_transcribe_diarize"
+                out = {}
+                for path in sorted(pkg.rglob("*.py")):
+                    if "__pycache__" in path.parts:
+                        continue
+                    out[str(path.relative_to(pkg))] = hashlib.sha256(
+                        path.read_bytes()).hexdigest()
+                return out
+
+            hashes = [(label, tree_hash(vendor)) for label, _, _, vendor in copies]
+            base_label, base_hash = hashes[0]
+            if not base_hash:
+                problems.append(f"{base_label}: vendor tree is empty")
+            for label, other in hashes[1:]:
+                if other != base_hash:
+                    differing = sorted(set(base_hash) ^ set(other)) or \
+                        sorted(k for k in base_hash if base_hash[k] != other.get(k))
+                    problems.append(f"{base_label} and {label} vendor trees differ: "
+                                    f"{differing}")
+            rep.expect(cid, not problems,
+                       f"each of {len(copies)} services inserts its OWN vendor dir, "
+                       f"and the trees are byte-identical ({len(base_hash)} files)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not check the vendor trees: {exc!r}")
+
+
+# ============================================================ pyannote group
+#
+# The PIPELINE half of the 2026-07-30 split. Everything here is about what the
+# pipeline may and may not say: spans and run-local labels, never identity.
+PYANNOTE_CHECKS = [
+    "pyannote/telemetry-is-off",
+    "pyannote/no-path-to-torchcodec",
+    "pyannote/local-labels-only",
+    "pyannote/absent-stream-means-office",
+]
+
+
+def run_offline_guards(rep: Report, ctx):
+    """Both pyannote-side sidecars must stay OFFLINE and ffmpeg-free.
+
+    Two real, shipped defects, found 2026-07-30 by auditing pyannote.audio 4.0.7:
+
+    1. pyannote 4.x ships OpenTelemetry tracing ON BY DEFAULT
+       (`telemetry/config.yaml: metrics_enabled: true`) and posts to
+       `https://otel.pyannote.ai/v1/traces` on every model init, pipeline init and
+       every single `apply()` — carrying the AUDIO DURATION of a client meeting.
+       `HF_HUB_OFFLINE` does not cover it. That breaks hard requirement #1.
+    2. pyannote hands a file PATH to torchcodec, whose dylibs resolve ffmpeg
+       through one LC_RPATH of `/opt/homebrew/opt/ffmpeg/lib`. No client Mac has
+       that, and there is no fallback — diarization died at the first chunk in the
+       packaged `.app`. `torchaudio.load` is the same trap (a torchcodec wrapper
+       since TorchAudio 2.9).
+
+    Both are invisible in normal use ON THIS MACHINE — #1 succeeds silently, #2
+    only fails where Homebrew ffmpeg is absent — which is exactly why they need
+    pinning here rather than being left to notice.
+
+    Pure: module import only, no model load, no audio. Milliseconds.
+    """
+    import ast
+
+    cid = "pyannote/telemetry-is-off"
+    if ctx.wants(cid):
+        # BOTH sidecars in ONE check, reported once: the id is the invariant
+        # ("nothing pyannote-side phones home"), and one id per invariant is this
+        # suite's whole bookkeeping discipline.
+        results, problems = [], []
+        for service, mod_name in ((PYANNOTE_SERVICE, "mt_pyannote_offline"),
+                                  (WESPEAKER_SERVICE, "mt_wespeaker_offline")):
+            previous = os.environ.get("PYANNOTE_METRICS_ENABLED")
+            # Force the DANGEROUS value FIRST, so a sidecar that merely
+            # `setdefault`s inherits "true" and gets caught. That is precisely the
+            # failure "assign, don't setdefault" exists to prevent, and a check
+            # starting from a clean environment could not see it.
+            os.environ["PYANNOTE_METRICS_ENABLED"] = "true"
+            try:
+                load_sidecar_module(service, mod_name)
+                value = os.environ.get("PYANNOTE_METRICS_ENABLED")
+                from pyannote.audio.telemetry.metrics import is_metrics_enabled
+                live = is_metrics_enabled()
+            except Exception as exc:  # noqa: BLE001
+                problems.append(f"{service} would not import: {exc!r}")
+                continue
+            finally:
+                if previous is None:
+                    os.environ.pop("PYANNOTE_METRICS_ENABLED", None)
+                else:
+                    os.environ["PYANNOTE_METRICS_ENABLED"] = previous
+            results.append(f"{pathlib.Path(service).name}={value!r}")
+            if value != "false" or live:
+                problems.append(f"{service} left PYANNOTE_METRICS_ENABLED={value!r} "
+                                f"(is_metrics_enabled()={live})")
+        rep.expect(cid, not problems,
+                   f"both sidecars forced metrics off over an inherited 'true' "
+                   f"({', '.join(results)})",
+                   "; ".join(problems) + " — pyannote would post meeting durations "
+                   "to otel.pyannote.ai, breaking the 100%-offline requirement")
+
+    cid = "pyannote/no-path-to-torchcodec"
+    if ctx.wants(cid):
+        # AST, not grep: both files DOCUMENT this trap at length, so a textual
+        # search matches its own explanation. Only real calls count.
+        offenders = []
+        for service in (PYANNOTE_SERVICE, WESPEAKER_SERVICE):
+            source = (SCRIPTS / service).read_text()
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute):
+                    continue
+                if (node.attr in ("load", "info")
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == "torchaudio"):
+                    offenders.append(f"{service}:{node.lineno} torchaudio.{node.attr}")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id == "AudioDecoder":
+                    offenders.append(f"{service}:{node.lineno} AudioDecoder")
+        # And the positive half: pyannote must be CALLED with a waveform mapping.
+        pyannote_src = (SCRIPTS / PYANNOTE_SERVICE).read_text()
+        hands_waveform = '"waveform"' in pyannote_src and "sf.read(" in pyannote_src
+        rep.expect(cid, not offenders and hands_waveform,
+                   "neither sidecar calls torchaudio.load/info or AudioDecoder, and "
+                   "pyannote-service decodes with soundfile into a waveform mapping",
+                   f"offenders={offenders or 'none'}, "
+                   f"pyannote-service hands over a waveform: {hands_waveform} — "
+                   f"a path-based decode needs Homebrew ffmpeg, which no client Mac has")
+
+
+def run_pyannote(rep: Report, ctx):
+    run_offline_guards(rep, ctx)
+
+    wanted = [c for c in PYANNOTE_CHECKS
+              if ctx.wants(c) and c not in ("pyannote/telemetry-is-off",
+                                            "pyannote/no-path-to-torchcodec")]
     if not wanted:
         return
 
-    # EVERY diarization run is pointed at a throwaway profile dir. The real one
+    audio_path = None
+    if ctx.audio_diarize:
+        clip = load_clip(ctx.audio_diarize, ctx.clip_start, ctx.diarize_sec)
+        audio_path = write_wav(pathlib.Path(ctx.tmp) / "pyannote-fixture.wav", clip)
+    if audio_path is None:
+        for cid in wanted:
+            rep.skip(cid, "needs a real speech recording (--audio-diarize); none "
+                          "found in recordings/")
+        return
+
+    # MT_PROFILE_DIR is pointed at a temp dir even though this process has NO
+    # profile store — see SAFETY in the module docstring. If it ever grows one,
+    # the fence is already there.
+    profile_dir = pathlib.Path(tempfile.mkdtemp(prefix="mt-pyannote-", dir=ctx.tmp))
+    sc = Sidecar(PYANNOTE_SERVICE,
+                 env_extra={"MT_PROFILE_DIR": str(profile_dir)}, text_stdin=True)
+    try:
+        ready = sc.wait_for(lambda m: m.get("type") in ("status", "error"),
+                            timeout=ctx.load_timeout)
+        if ready is None or ready.get("type") == "error":
+            for cid in wanted:
+                rep.fail(cid, f"sidecar never reported LOADED: {ready}")
+            return
+
+        # One real diarization run answers both checks.
+        sc.send_json({"cmd": "final", "audio": audio_path})
+        office = sc.wait_for(lambda m: m.get("type") in ("result", "error"),
+                            timeout=ctx.job_timeout)
+
+        # -- IDENTITY CANNOT LEAK BACK OUT OF THE PIPELINE STAGE. This is the
+        #    structural half of the split: the process that decides WHERE the
+        #    speech is has no embedder and no profile store, so it cannot be the
+        #    thing that writes a voice into one. A segment carrying "id"/"name"/
+        #    "conf" would mean that separation had quietly been undone.
+        if ctx.wants("pyannote/local-labels-only"):
+            cid = "pyannote/local-labels-only"
+            if office is None or office.get("type") == "error":
+                rep.fail(cid, f"office job failed: {office}")
+            else:
+                segs = office["segments"]
+                bad_keys = sorted({k for s in segs for k in s} - {"start", "end", "label"})
+                unlabelled = [s for s in segs if not str(s.get("label", "")).strip()]
+                # Unrounded on purpose: the identity stage slices the waveform with
+                # these numbers, so rounding here would move each slice by up to
+                # ~8 samples and change the embedding. Rounding happens once, in
+                # AudioRecorder.composeTurns.
+                rounded = [s for s in segs
+                           if s["start"] == round(s["start"], 3)
+                           and s["end"] == round(s["end"], 3)]
+                problems = []
+                if not segs:
+                    problems.append("the pipeline produced no turns at all")
+                if bad_keys:
+                    problems.append(f"segments carried non-pipeline keys {bad_keys} "
+                                    f"— identity leaked back into the pipeline stage")
+                if unlabelled:
+                    problems.append(f"{len(unlabelled)} segments had no label")
+                if segs and len(rounded) == len(segs):
+                    problems.append("every time was already at 3 dp — the wire looks "
+                                    "rounded, which would change the identity "
+                                    "stage's waveform slices")
+                rep.expect(cid, not problems,
+                           f"{len(segs)} segments, keys exactly "
+                           f"{{start,end,label}}, "
+                           f"{len(segs) - len(rounded)}/{len(segs)} times at full "
+                           f"precision, labels like "
+                           f"{sorted({s['label'] for s in segs})[:3]}",
+                           "; ".join(problems))
+
+        # -- a job with no "stream" key is an office job and its reply has the
+        #    pre-dual-stream shape — no "stream" echoed back. The key set now
+        #    includes "audio", which is LOAD-BEARING rather than incidental: it is
+        #    how the app knows which file to hand the identity stage, with no
+        #    second bookkeeping map. Re-pinned against the new shape; the intent
+        #    (office echoes nothing, the key set is fixed) is what carried over
+        #    from the merged sidecar's version of this check.
+        if ctx.wants("pyannote/absent-stream-means-office"):
+            cid = "pyannote/absent-stream-means-office"
+            if office is None or office.get("type") == "error":
+                rep.fail(cid, f"office job failed: {office}")
+            else:
+                sc.send_json({"cmd": "final", "audio": audio_path, "stream": "remote"})
+                remote = sc.wait_for(lambda m: m.get("type") in ("result", "error"),
+                                     timeout=ctx.job_timeout)
+                problems = []
+                if set(office) != {"type", "segments", "audio"}:
+                    problems.append(f"office reply key set was {sorted(office)}")
+                if office.get("audio") != audio_path:
+                    problems.append(f"office reply did not echo the audio path: "
+                                    f"{office.get('audio')!r}")
+                if remote is None or remote.get("type") == "error":
+                    problems.append(f"remote job failed: {remote}")
+                elif set(remote) != {"type", "segments", "audio", "stream"}:
+                    problems.append(f"remote reply key set was {sorted(remote)}")
+                elif remote.get("stream") != "remote":
+                    problems.append("remote reply did not echo stream=remote")
+                rep.expect(cid, not problems,
+                           'office reply was exactly {"type","segments","audio"} '
+                           f'with {len(office["segments"])} turns and no "stream" '
+                           'key; the remote job added exactly "stream"',
+                           "; ".join(problems))
+    finally:
+        sc.close()
+
+
+# =========================================================== wespeaker group
+#
+# The IDENTITY half of the split: the WeSpeaker embedder and BOTH profile stores.
+# None of these checks loads the pyannote pipeline — the spans are FABRICATED,
+# which is the whole point of the split being testable this way. They used to cost
+# a pipeline load each.
+WESPEAKER_CHECKS = [
+    "wespeaker/assign-conf-matched-vs-new",
+    "wespeaker/absent-stream-means-office",
+    "wespeaker/profile-stores-are-disjoint",
+    "wespeaker/native-rate-final-matches-16k-chunks",
+    "wespeaker/reset-wipes-both-stores",
+]
+
+
+def run_assign_conf(rep: Report, ctx):
+    """`ProfileStore.assign` reports the winning cosine — and NOTHING for a new
+    voice.
+
+    The speaker confidence shown in the transcript is that cosine. The failure
+    this pins is the tempting one: making a brand-new profile report 0.0 (or
+    1.0) so every turn has a number. A first appearance was never scored against
+    anything, and "0.00" in front of a correctly-identified speaker reads as
+    "this is definitely the wrong person".
+
+    Pure: no pipeline, no embedder, no audio — the real ProfileStore over a
+    throwaway PROFILE_DIR and hand-built vectors, so it runs in milliseconds.
+    """
+    cid = "wespeaker/assign-conf-matched-vs-new"
+    tmp_profiles = pathlib.Path(tempfile.mkdtemp(prefix="mt-assign-conf-", dir=ctx.tmp))
+    try:
+        import numpy as np
+        # PROFILE_DIR is read from MT_PROFILE_DIR at IMPORT time, so point the
+        # env at the temp dir for exactly that moment and put it back after —
+        # nothing this process spawns later should inherit it.
+        previous = os.environ.get("MT_PROFILE_DIR")
+        os.environ["MT_PROFILE_DIR"] = str(tmp_profiles)
+        try:
+            module, _ = load_sidecar_module(WESPEAKER_SERVICE, "mt_wespeaker_conf")
+        finally:
+            if previous is None:
+                os.environ.pop("MT_PROFILE_DIR", None)
+            else:
+                os.environ["MT_PROFILE_DIR"] = previous
+        if pathlib.Path(module.PROFILE_DIR) != tmp_profiles:
+            rep.fail(cid, f"module PROFILE_DIR is {module.PROFILE_DIR}, not the "
+                          f"temp dir — REFUSING to touch the real profiles")
+            return
+
+        rng = np.random.default_rng(7)
+        base = rng.standard_normal(192).astype("float32")
+        store = module.ProfileStore(np)
+        problems = []
+
+        # (1) first voice ever: a new profile, and NO similarity to report.
+        first = store.assign({"SPEAKER_00": base})
+        entry = first.get("SPEAKER_00")
+        if not (isinstance(entry, tuple) and len(entry) == 2):
+            problems.append(f"assign did not return a (pid, conf) pair: {first!r}")
+        else:
+            new_pid, new_conf = entry
+            if new_conf is not None:
+                problems.append(f"a brand-new profile reported conf={new_conf!r} — "
+                                "it was never scored against anything")
+            if new_pid != 1:
+                problems.append(f"first profile id was {new_pid}, expected 1")
+
+        # (2) the same voice again (nudged): matched, conf = that cosine.
+        similar = (base + 0.15 * rng.standard_normal(192)).astype("float32")
+        expected = store._cosine(similar, store.centroids[1])
+        second = store.assign({"SPEAKER_00": similar})
+        pid2, conf2 = second["SPEAKER_00"]
+        if pid2 != 1:
+            problems.append(f"the same voice minted profile {pid2} instead of matching 1")
+        elif conf2 is None:
+            problems.append("a MATCHED voice reported no confidence at all")
+        elif abs(conf2 - expected) > 1e-6:
+            problems.append(f"conf {conf2:.4f} is not the winning cosine {expected:.4f}")
+        elif not (module.SIM_THRESHOLD <= conf2 <= 1.0):
+            problems.append(f"matched conf {conf2:.4f} outside "
+                            f"[{module.SIM_THRESHOLD}, 1.0]")
+
+        # (3) a genuinely different voice: new profile, again no conf.
+        other = rng.standard_normal(192).astype("float32")
+        third = store.assign({"SPEAKER_01": other})
+        pid3, conf3 = third["SPEAKER_01"]
+        if pid3 == 1:
+            problems.append("an unrelated vector matched the existing profile — "
+                            "fixture is too weak to prove anything")
+        if conf3 is not None:
+            problems.append(f"a second new profile reported conf={conf3!r}")
+
+        # (4) a local id may never reach REMOTE_ID_BASE. Nothing enforced this
+        #     before the split; it was merely true because nobody has had 10 000
+        #     speakers. The offset is applied at the process boundary, so a local
+        #     id of 10 000 would leave here indistinguishable from a remote id and
+        #     the app would start writing an office voice into profiles-remote.json
+        #     — the silent, permanent corruption the two stores exist to prevent.
+        store.profiles.append({"id": module.REMOTE_ID_BASE - 1,
+                               "name": "edge", "count": 1})
+        store.centroids[module.REMOTE_ID_BASE - 1] = rng.standard_normal(192).astype("float32")
+        try:
+            store.assign({"SPEAKER_02": rng.standard_normal(192).astype("float32")})
+            problems.append(f"minting local id {module.REMOTE_ID_BASE} was allowed — "
+                            "the office and remote id spaces would collide")
+        except RuntimeError:
+            pass  # refused, as it must be
+
+        rep.expect(cid, not problems,
+                   f"matched voice → (1, {conf2:.3f}); both new profiles → conf "
+                   f"None; local id {module.REMOTE_ID_BASE} refused",
+                   "; ".join(problems))
+    except Exception as exc:  # noqa: BLE001
+        rep.fail(cid, f"could not evaluate assign(): {exc!r}")
+
+
+def fabricated_turns(seconds: float, labels=("SPEAKER_00", "SPEAKER_01")):
+    """Spans over a real clip, WITHOUT loading the pipeline.
+
+    The identity service is handed spans by somebody else — that is the contract
+    the split created — so these checks supply them directly. Each label gets a
+    contiguous block comfortably over MIN_EMBED_SEC, plus one deliberate sliver
+    that must come back unidentifiable.
+    """
+    block = (seconds - 1.0) / len(labels)
+    turns = []
+    for i, label in enumerate(labels):
+        start = 0.5 + i * block
+        turns.append({"start": round(start, 3),
+                      "end": round(start + block - 0.2, 3),
+                      "label": label})
+    turns.append({"start": round(seconds - 0.45, 3),
+                  "end": round(seconds - 0.05, 3),
+                  "label": "SPEAKER_SLIVER"})
+    return turns
+
+
+def run_wespeaker(rep: Report, ctx):
+    wanted = [c for c in WESPEAKER_CHECKS if ctx.wants(c)]
+    if not wanted:
+        return
+
+    # No model, no audio — run it before the fixture gate below so a machine with
+    # no recordings still proves the conf contract.
+    if ctx.wants("wespeaker/assign-conf-matched-vs-new"):
+        run_assign_conf(rep, ctx)
+        wanted = [c for c in wanted if c != "wespeaker/assign-conf-matched-vs-new"]
+        if not wanted:
+            return
+
+    # EVERY identity run is pointed at a throwaway profile dir. The real one
     # holds the owner's voices; see SAFETY in the module docstring.
     profile_dir = pathlib.Path(tempfile.mkdtemp(prefix="mt-profiles-", dir=ctx.tmp))
     audio_path = None
     if ctx.audio_diarize:
         clip = load_clip(ctx.audio_diarize, ctx.clip_start, ctx.diarize_sec)
-        audio_path = write_wav(pathlib.Path(ctx.tmp) / "diarize-fixture.wav", clip)
+        audio_path = write_wav(pathlib.Path(ctx.tmp) / "wespeaker-fixture.wav", clip)
 
     if audio_path is None:
         for cid in wanted:
@@ -852,8 +2600,22 @@ def run_diarize(rep: Report, ctx):
                           "found in recordings/ — PROFILE-STORE SEPARATION IS UNTESTED")
         return
 
-    sc = Sidecar("diarize-service.py",
+    seconds = clip.size / SR
+    turns = fabricated_turns(seconds)
+
+    sc = Sidecar(WESPEAKER_SERVICE,
                  env_extra={"MT_PROFILE_DIR": str(profile_dir)}, text_stdin=True)
+    next_id = [0]
+
+    def identify(audio, spans, stream=None, timeout=None):
+        next_id[0] += 1
+        job = {"cmd": "identify", "id": next_id[0], "audio": audio, "turns": spans}
+        if stream:
+            job["stream"] = stream
+        sc.send_json(job)
+        return sc.wait_for(lambda m: m.get("type") in ("identify_result", "error"),
+                           timeout=timeout or ctx.job_timeout)
+
     try:
         ready = sc.wait_for(lambda m: m.get("type") in ("status", "error"),
                             timeout=ctx.load_timeout)
@@ -866,48 +2628,81 @@ def run_diarize(rep: Report, ctx):
         sc.send_json({"cmd": "reset"})
         sc.wait_for(lambda m: m.get("text") == "RESET", timeout=60)
 
-        # -- check 8: a job with no "stream" key is an office job and its reply
-        #    has the pre-dual-stream shape — no "stream" echoed back.
-        sc.send_json({"cmd": "final", "audio": audio_path})
-        office = sc.wait_for(lambda m: m.get("type") in ("result", "error"),
-                             timeout=ctx.job_timeout)
-        if ctx.wants("diarize/absent-stream-means-office"):
-            cid = "diarize/absent-stream-means-office"
-            if office is None or office.get("type") == "error":
-                rep.fail(cid, f"office job failed: {office}")
-            else:
-                rep.expect(cid, set(office) == {"type", "segments"},
-                           f'reply was exactly {{"type","segments"}} with '
-                           f'{len(office["segments"])} turns, no "stream" key',
-                           f"reply key set was {sorted(office)}")
+        office = identify(audio_path, turns)
 
-        # -- check 9: the two stores cannot cross-contaminate. The SAME audio is
-        #    sent again as a remote job: if the stores were shared it would match
-        #    the office profiles and create nothing at all. It must instead build
-        #    its own R-named identities in its own file.
-        if ctx.wants("diarize/profile-stores-are-disjoint"):
-            cid = "diarize/profile-stores-are-disjoint"
-            sc.send_json({"cmd": "final", "audio": audio_path, "stream": "remote"})
-            remote = sc.wait_for(lambda m: m.get("type") in ("result", "error"),
-                                 timeout=ctx.job_timeout)
+        # -- an identify job with no "stream" key is an office job, and its reply
+        #    echoes NOTHING back: the request `id` is what correlates it. The
+        #    merged sidecar's version of this check pinned "no stream echo on an
+        #    office job" plus "conf is a real cosine where present, never a bare 0
+        #    standing in for not-measured". Both are re-pinned here against the
+        #    identify reply shape.
+        if ctx.wants("wespeaker/absent-stream-means-office"):
+            cid = "wespeaker/absent-stream-means-office"
             if office is None or office.get("type") == "error":
-                rep.fail(cid, f"office job failed, cannot compare: {office}")
+                rep.fail(cid, f"office identify failed: {office}")
+            else:
+                speakers = office["speakers"]
+                named = {k: v for k, v in speakers.items() if v is not None}
+                bad_conf = [v for v in named.values()
+                            if "conf" in v and not (isinstance(v["conf"], (int, float))
+                                                    and not isinstance(v["conf"], bool)
+                                                    and -1.0 <= v["conf"] <= 1.0)]
+                bad_keys = sorted({k for v in named.values() for k in v}
+                                  - {"id", "name", "conf"})
+                problems = []
+                if set(office) != {"type", "id", "speakers"}:
+                    problems.append(f"reply key set was {sorted(office)}")
+                if office.get("id") != 1:
+                    problems.append(f"the request id was not correlated back: "
+                                    f"{office.get('id')!r}")
+                if not named:
+                    problems.append("no voice was identified at all")
+                if bad_keys:
+                    problems.append(f"an identity carried unexpected keys {bad_keys}")
+                if bad_conf:
+                    problems.append(f"invalid conf values: "
+                                    f"{[v.get('conf') for v in bad_conf][:3]}")
+                # A first appearance must carry NO conf key — this is the empty
+                # store, so every identity here is brand new.
+                with_conf = [k for k, v in named.items() if "conf" in v]
+                if with_conf:
+                    problems.append(f"brand-new profiles reported a confidence: "
+                                    f"{with_conf}")
+                if speakers.get("SPEAKER_SLIVER") is not None:
+                    problems.append("a 0.4 s span was identified — MIN_EMBED_SEC "
+                                    "did not gate it")
+                rep.expect(cid, not problems,
+                           'reply was exactly {"type","id","speakers"} with '
+                           f'{len(named)} identified voices, no "stream" key, no '
+                           'conf on a first appearance, and the sliver null',
+                           "; ".join(problems))
+
+        # -- the two stores cannot cross-contaminate. The SAME audio and the SAME
+        #    spans are sent again as a remote job: if the stores were shared it
+        #    would match the office profiles and create nothing at all. It must
+        #    instead build its own R-named identities in its own file.
+        if ctx.wants("wespeaker/profile-stores-are-disjoint"):
+            cid = "wespeaker/profile-stores-are-disjoint"
+            remote = identify(audio_path, turns, stream="remote")
+            if office is None or office.get("type") == "error":
+                rep.fail(cid, f"office identify failed, cannot compare: {office}")
             elif remote is None or remote.get("type") == "error":
-                rep.fail(cid, f"remote job failed: {remote}")
+                rep.fail(cid, f"remote identify failed: {remote}")
             else:
                 def read_json(name):
                     path = profile_dir / name
                     return json.loads(path.read_text()) if path.exists() else None
 
-                office_ids = {s["id"] for s in office["segments"]}
-                remote_ids = {s["id"] for s in remote["segments"]}
-                remote_names = {s["name"] for s in remote["segments"]}
+                office_ids = {v["id"] for v in office["speakers"].values() if v}
+                remote_ids = {v["id"] for v in remote["speakers"].values() if v}
+                remote_names = {v["name"] for v in remote["speakers"].values() if v}
                 office_file = read_json("profiles.json") or []
                 remote_file = read_json("profiles-remote.json")
 
                 problems = []
-                if remote.get("stream") != "remote":
-                    problems.append(f'reply did not echo stream=remote: {sorted(remote)}')
+                if "stream" in remote:
+                    problems.append("a SUCCESS reply echoed stream — the id is what "
+                                    "correlates it")
                 if not office_ids:
                     problems.append("office job produced no identified speakers")
                 if any(i >= REMOTE_ID_BASE for i in office_ids):
@@ -945,8 +2740,6 @@ def run_diarize(rep: Report, ctx):
                            f"in profiles-remote.json, neither file holding the other",
                            "; ".join(problems))
 
-        # -- check 10: reset wipes BOTH spaces. Leaving half of it populated
-        #    would make remote numbering carry over into a "fresh" session.
         # -- the sample-rate regression. WeSpeaker is a 16 kHz model and does not
         #    error on another rate — it silently embeds pitch- and tempo-shifted
         #    speech. Live chunks arrive as 16 kHz temp WAVs, but a stop-time pass
@@ -955,12 +2748,13 @@ def run_diarize(rep: Report, ctx):
         #    chunk and 0.11 on the final, fell under SIM_THRESHOLD and minted a
         #    duplicate profile — one person shown as two speakers.
         #
-        #    So: enrol from 16 kHz chunks, then run a final over a 44.1 kHz file
-        #    of the SAME speech. It must land on the SAME profile. Without the
-        #    resample in resolve_speakers this yields a new id, which is exactly
-        #    the shipped bug.
-        if ctx.wants("diarize/native-rate-final-matches-16k-chunks"):
-            cid = "diarize/native-rate-final-matches-16k-chunks"
+        #    So: enrol from 16 kHz audio, then identify the SAME speech from a
+        #    44.1 kHz file with the SAME spans. It must land on the SAME profiles.
+        #    Without the resample in resolve_speakers this yields new ids, which is
+        #    exactly the shipped bug. No pipeline is involved either way, which is
+        #    why this check now costs seconds instead of two diarization runs.
+        if ctx.wants("wespeaker/native-rate-final-matches-16k-chunks"):
+            cid = "wespeaker/native-rate-final-matches-16k-chunks"
             try:
                 import numpy as np
                 import torch
@@ -975,46 +2769,47 @@ def run_diarize(rep: Report, ctx):
                 up = torchaudio.functional.resample(
                     torch.from_numpy(np.asarray(clip, dtype=np.float32)).unsqueeze(0),
                     SR, native_sr).squeeze(0).numpy()
-                native_path = write_wav(pathlib.Path(ctx.tmp) / "diarize-native.wav",
+                native_path = write_wav(pathlib.Path(ctx.tmp) / "wespeaker-native.wav",
                                         up, sr=native_sr)
 
-                # Enrol from 16 kHz chunks, the live path.
-                half = clip.size // 2
-                chunk_ids = []
-                for i, piece in enumerate((clip[:half], clip[half:])):
-                    cp = write_wav(pathlib.Path(ctx.tmp) / f"diarize-16k-{i}.wav", piece)
-                    sc.send_json({"cmd": "chunk", "audio": cp,
-                                  "window_start": 0.0, "stream": "remote"})
-                    m = sc.wait_for(lambda m: m.get("type") in ("chunk_result", "error"),
-                                    timeout=ctx.job_timeout)
-                    if m and m.get("type") == "chunk_result":
-                        chunk_ids += [s["id"] for s in m.get("segments", [])]
+                enrol = identify(audio_path, turns, stream="remote")
+                enrolled = ({v["id"] for v in enrol["speakers"].values() if v}
+                            if enrol and enrol.get("type") == "identify_result" else set())
 
-                sc.send_json({"cmd": "final", "audio": native_path, "stream": "remote"})
-                fin = sc.wait_for(lambda m: m.get("type") in ("result", "error"),
-                                  timeout=ctx.final_timeout)
-                final_ids = ([s["id"] for s in fin.get("segments", [])]
-                             if fin and fin.get("type") == "result" else [])
+                fin = identify(native_path, turns, stream="remote",
+                               timeout=ctx.final_timeout)
+                final_ids = ({v["id"] for v in fin["speakers"].values() if v}
+                             if fin and fin.get("type") == "identify_result" else set())
 
-                if not chunk_ids:
-                    rep.fail(cid, "16 kHz chunks enrolled no speaker — nothing to compare")
+                if not enrolled:
+                    rep.fail(cid, "the 16 kHz pass enrolled no speaker — nothing to compare")
                 elif not final_ids:
-                    rep.fail(cid, f"the {native_sr} Hz final produced no labelled turns: {fin}")
+                    rep.fail(cid, f"the {native_sr} Hz pass identified nobody: {fin}")
                 else:
-                    known = set(chunk_ids)
-                    unknown = sorted(set(final_ids) - known)
+                    unknown = sorted(final_ids - enrolled)
                     rep.expect(cid, not unknown,
-                               f"{native_sr} Hz final reused the 16 kHz profile "
-                               f"{sorted(known)}",
-                               f"final minted {unknown} instead of reusing "
-                               f"{sorted(known)} — the same voice embedded at "
+                               f"{native_sr} Hz pass reused the 16 kHz profiles "
+                               f"{sorted(enrolled)}",
+                               f"it minted {unknown} instead of reusing "
+                               f"{sorted(enrolled)} — the same voice embedded at "
                                f"{native_sr} Hz did not match its own 16 kHz profile")
             except Exception as exc:  # noqa: BLE001
                 rep.fail(cid, f"check could not run: {exc!r}")
 
-        if ctx.wants("diarize/reset-wipes-both-stores"):
-            cid = "diarize/reset-wipes-both-stores"
+        if ctx.wants("wespeaker/reset-wipes-both-stores"):
+            cid = "wespeaker/reset-wipes-both-stores"
+            # Repopulate the OFFICE store first. The native-rate check above resets
+            # and then works purely on the remote stream, so without this the
+            # "before" list holds only profiles-remote.* — and a check that never
+            # saw an office file cannot prove reset wipes BOTH spaces, which is the
+            # one thing it exists to prove (leaving half populated would make
+            # remote numbering carry over into a "fresh" session).
+            identify(audio_path, turns)
             before = sorted(p.name for p in profile_dir.iterdir())
+            if not {"profiles.json", "profiles-remote.json"} <= set(before):
+                rep.fail(cid, f"both stores were meant to be populated before the "
+                              f"reset; only {before} existed")
+                return
             sc.send_json({"cmd": "reset"})
             done = sc.wait_for(lambda m: m.get("text") == "RESET", timeout=60)
             after = sorted(p.name for p in profile_dir.iterdir())
@@ -1030,11 +2825,366 @@ def run_diarize(rep: Report, ctx):
         sc.close()
 
 
+# ============================================================== layout group
+#
+# NAMING CONSISTENCY, 2026-07-31. One rule, and it now holds 13/13 on BOTH sides:
+#
+#     scripts/<name>/<name>-service.py   writes   logs/<name>.log
+#
+# Before this pass the tree agreed on the folder but not on the file or the log:
+# `vad/silero-vad-service.py`, `nemotron/nemotron-asr-service.py`, and eight logs
+# still carrying a ROLE suffix (`whisper-asr`, `overlap-repair-sidecar`,
+# `dicow-sidecar`, `silero-vad`, …) left over from the shared chunked sidecar and
+# from the days when a service's log was named for the job it did.
+#
+# WHY THIS IS PINNED RATHER THAN LEFT TO CARE. The 2026-07-28 one-service-per-model
+# split established that a missed edit in one of N copies FAILS SILENTLY — the
+# number simply never appears — and `whisper/protocol-matches-chunked` exists for
+# exactly that reason on the wire side. This is the same failure on the *naming*
+# side, and it is worse in one respect: a log written to the wrong basename still
+# works. Nothing breaks, nothing is empty, and the evidence for the next bug just
+# quietly lands in a file nobody greps.
+#
+# Both defects it guards are invisible on this machine in normal use:
+#   * a stale SCRIPT path is loud for Nemotron (a session-start error) but SILENT
+#     for the VAD — `SileroVADService.init?` returns nil and callers fall back to
+#     the heuristic VAD, so the app runs and ATND beam gating quietly degrades,
+#   * a stale LOG name is silent for every service.
+#
+# Pure: directory listing + regex/scan over Swift source. No model load, no audio,
+# milliseconds — the `pyannote/telemetry-is-off` precedent.
+LAYOUT_CHECKS = [
+    "layout/one-service-per-folder",
+    "layout/log-name-matches-folder",
+]
+
+# Direct children of scripts/ that legitimately hold no *-service.py. Each carries
+# its reason HERE, so an exemption is a decision on the record rather than a name
+# someone added to make a check go green.
+LAYOUT_EXEMPT = {
+    "atnd": "ATND1061 TCP/multicast simulators and the diagnostic receiver — "
+            "developer tools driven by hand, never launched by the app",
+    "tools": "one-off utilities (align-test, make-icon-variants), not services",
+    "__pycache__": "CPython bytecode, not source",
+}
+
+# The three shapes a log basename is written in on the Swift side. All three are
+# LITERALS on purpose: an indirection (`logHandle(name: Self.logName)`) is caught
+# at its declaration instead, so nothing is counted twice.
+SWIFT_LOG_PATTERNS = (
+    re.compile(r'logHandle\(name:\s*"([^"]+)"\s*\)'),      # direct call site
+    re.compile(r'\blogName\s*=\s*"([^"]+)"'),              # static let logName
+    re.compile(r'\blogName:\s*String\s*\{\s*"([^"]+)"\s*\}'),  # protocol witness
+    re.compile(r'\blogName:\s*"([^"]+)"'),                 # Config(...) argument
+)
+
+SERVICE_REF = re.compile(r'([A-Za-z0-9_.+-]+)/([A-Za-z0-9_.+-]+-service\.py)')
+
+
+def _swift_scan(source: str):
+    """Split Swift source into (string literals, code with comments removed).
+
+    Hand-rolled rather than regex'd because a regex cannot tell the `//` in
+    "https://…" from a real comment, and this codebase is full of both.
+
+    The split matters: COMMENTS ARE DELIBERATELY EXEMPT from the
+    "referenced script must exist" rule below. This project records deleted
+    files as history — `ChunkedASRService.swift` names `chunked/chunked-asr-service.py`
+    and `moss/moss-service.py` precisely to say they are GONE — and house style
+    keeps history as history. A string literal is a live path the app really uses;
+    a comment is a note about the past. Only the former is checked.
+    """
+    literals, code, i, n = [], [], 0, len(source)
+    while i < n:
+        c = source[i]
+        if c == '"':
+            j, buf, escaped = i + 1, [], False
+            while j < n:
+                d = source[j]
+                if escaped:
+                    escaped = False
+                elif d == "\\":
+                    escaped = True
+                elif d == '"':
+                    break
+                buf.append(d)
+                j += 1
+            literals.append("".join(buf))
+            code.append(source[i:j + 1])
+            i = j + 1
+        elif c == "/" and i + 1 < n and source[i + 1] == "/":
+            while i < n and source[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and source[i + 1] == "*":
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        else:
+            code.append(c)
+            i += 1
+    return literals, "".join(code)
+
+
+def service_layout(scripts_dir: pathlib.Path, swift_sources: pathlib.Path):
+    """The whole rule, against ANY tree. Returns (services, script_problems, log_problems).
+
+    Takes its roots as arguments so the negative control can drive it against a
+    FAKE tree — a check that has only ever been run against a healthy tree has
+    not been shown to fail.
+    """
+    script_problems, log_problems = [], []
+
+    # ---- (a)(b)(c) the SCRIPT side -------------------------------------
+    services = {}       # folder -> "<folder>/<folder>-service.py"
+    discovered = set()  # folders that hold ANY *-service.py (valid name or not)
+    for child in sorted(p for p in scripts_dir.iterdir() if p.is_dir()):
+        # DIRECT children only: a service must not hide in a vendor/ subtree.
+        found = sorted(p.name for p in child.glob("*-service.py"))
+        if child.name in LAYOUT_EXEMPT:
+            # (b) An exemption means "this folder has no service", NOT "this
+            # folder is unchecked" — otherwise the cheapest way to dodge the rule
+            # is to move a service into an exempt folder.
+            if found:
+                script_problems.append(
+                    f"exempt folder {child.name}/ contains {found} — the exemption "
+                    f"says it has NO service ({LAYOUT_EXEMPT[child.name]}); a "
+                    f"service there would escape the naming rule entirely")
+            continue
+        discovered.add(child.name)
+        expected = f"{child.name}-service.py"
+        if not found:
+            discovered.discard(child.name)
+            script_problems.append(
+                f"{child.name}/ is not exempt but holds no *-service.py — either it "
+                f"is a service folder missing its service, or it needs an entry in "
+                f"LAYOUT_EXEMPT with a reason")
+        elif len(found) > 1:
+            script_problems.append(
+                f"{child.name}/ holds {len(found)} service files {found} — one "
+                f"service per folder, because one service per LOG is what keeps two "
+                f"writers off one file (the 2026-07-15 mistake)")
+        elif found[0] != expected:
+            script_problems.append(
+                f"scripts/{child.name}/{found[0]} breaks the rule — it must be "
+                f"scripts/{child.name}/{expected} so that it writes logs/{child.name}.log")
+        else:
+            services[child.name] = f"{child.name}/{expected}"
+
+    # (c) The pre-2026-07-28 flat layout must not creep back. sidecar-tests.py is
+    # not a service and is deliberately not matched by *-service.py.
+    stray = sorted(p.name for p in scripts_dir.glob("*-service.py"))
+    if stray:
+        script_problems.append(
+            f"*-service.py directly under scripts/: {stray} — the flat pre-2026-07-28 "
+            f"layout is gone, and a sidecar one folder shallower silently resolves "
+            f"BASE to scripts/ (the three-dirname trap)")
+
+    # ---- (d) the LOG side, derived from the SWIFT SOURCE ----------------
+    # Deliberately NOT a hard-coded list here: a list would be a copy of the thing
+    # this check exists to verify, and would agree with itself after a bad rename.
+    logs, refs, per_file = set(), [], {}
+    swift_files = sorted(swift_sources.rglob("*.swift"))
+    if not swift_files:
+        log_problems.append(f"no .swift files under {swift_sources} — the log side "
+                            f"of the rule could not be checked at all")
+    for path in swift_files:
+        source = path.read_text()
+        literals, code = _swift_scan(source)
+        file_logs = set()
+        for pattern in SWIFT_LOG_PATTERNS:
+            file_logs.update(pattern.findall(code))
+        logs |= file_logs
+        file_refs = {f"{m.group(1)}/{m.group(2)}"
+                     for lit in literals for m in SERVICE_REF.finditer(lit)}
+        for ref in sorted(file_refs):
+            refs.append((path.name, ref))
+        if file_logs or file_refs:
+            per_file[path.name] = (file_refs, file_logs)
+
+    # Every script path the app can actually reach must be a real file. This is
+    # the half that catches a rename applied to disk but not to Swift.
+    for name, ref in refs:
+        if not (scripts_dir / ref).exists():
+            log_problems.append(
+                f"{name} names \"{ref}\" but no such file exists — for the VAD this "
+                f"failure is SILENT (init? returns nil, callers fall back to the "
+                f"heuristic VAD)")
+
+    # Set equality: the log basenames Swift writes ARE the service folder names.
+    if logs != discovered:
+        only_swift = sorted(logs - discovered)
+        only_disk = sorted(discovered - logs)
+        log_problems.append(
+            f"log names and service folders disagree — Swift writes "
+            f"{only_swift or 'nothing extra'} with no matching scripts/<name>/, and "
+            f"{only_disk or 'nothing'} has a service but no log name in Swift")
+
+    # And the PAIRING, wherever one file names exactly one script and one log.
+    # (ChunkedASRService/ChunkedASRModels name many of each and are covered by
+    # ChunkedASRSidecarRoutingTests on the Swift side instead.)
+    for name, (file_refs, file_logs) in sorted(per_file.items()):
+        if len(file_refs) != 1 or len(file_logs) != 1:
+            continue
+        ref, log = next(iter(file_refs)), next(iter(file_logs))
+        folder = ref.split("/", 1)[0]
+        if folder != log:
+            log_problems.append(
+                f"{name} runs {ref} but writes logs/{log}.log — the log is named for "
+                f"the service folder, not for the role it plays")
+
+    return services, script_problems, log_problems
+
+
+def service_layout_problems(scripts_dir: pathlib.Path, swift_sources: pathlib.Path):
+    """Flat problem list — what the negative control drives."""
+    _, script_problems, log_problems = service_layout(scripts_dir, swift_sources)
+    return script_problems + log_problems
+
+
+def run_layout(rep: Report, ctx):
+    services, script_problems, log_problems = service_layout(SCRIPTS, SWIFT_SOURCES)
+
+    cid = "layout/one-service-per-folder"
+    if ctx.wants(cid):
+        rep.expect(cid, not script_problems,
+                   f"{len(services)} folders, each with exactly one "
+                   f"<folder>-service.py as a direct child; "
+                   f"{len(LAYOUT_EXEMPT)} exemptions hold none; none at scripts/ root",
+                   "; ".join(script_problems))
+
+    cid = "layout/log-name-matches-folder"
+    if ctx.wants(cid):
+        rep.expect(cid, not log_problems,
+                   f"every service's log basename equals its folder name "
+                   f"({len(services)}/{len(services)}), read out of the Swift source "
+                   f"rather than listed here",
+                   "; ".join(log_problems))
+
+
+def run_qwen3(rep: Report, ctx):
+    """Qwen3's decoding options — pure, no model load, milliseconds.
+
+    The Whisper precedent, for the same reason it exists there: this is the one
+    place where a settings value becomes a decoding decision, and every way it
+    can go wrong is silent. A default that drifts changes every transcript with
+    nobody having touched a setting; a sentinel passed through reaches the
+    decoder as a real value; and a flag that the model reads nowhere is a control
+    that does nothing (the Granite language picker, shipped 2026-08-01).
+    """
+    module = source = None
+    try:
+        module, source = load_sidecar_module(QWEN3_SERVICE, "mt_qwen3_service")
+    except Exception as exc:  # noqa: BLE001
+        for cid in QWEN3_CHECKS:
+            if ctx.wants(cid):
+                rep.fail(cid, f"could not import qwen3-service.py: {exc!r}")
+        return
+
+    if ctx.wants("qwen3/option-defaults-are-todays-behaviour"):
+        cid = "qwen3/option-defaults-are-todays-behaviour"
+        try:
+            problems = []
+            # BOTH pre-options shapes, because the old expression had two: a
+            # forced language, and auto (where it was the empty dict).
+            for label, language, want in (
+                    ("forced language", "en", QWEN3_TODAYS_KWARGS),
+                    ("auto", None, QWEN3_TODAYS_KWARGS_AUTO)):
+                got = module.qwen3_generate_kwargs(language)
+                if got != want:
+                    extra = {k: v for k, v in got.items() if k not in want}
+                    missing = {k: v for k, v in want.items() if k not in got}
+                    differing = {k: (got[k], v) for k, v in want.items()
+                                 if k in got and got[k] != v}
+                    problems.append(f"{label}: extra={extra} missing={missing} "
+                                    f"differing(got, want)={differing}")
+            # Stated separately from the dict compare so the message names the
+            # option when one of these ever appears at its sentinel.
+            got = module.qwen3_generate_kwargs("en")
+            for key in ("system_prompt", "repetition_penalty",
+                        "repetition_context_size"):
+                if key in got:
+                    problems.append(f"{key} is present at defaults ({got[key]!r}) "
+                                    "— it must be omitted so mlx-audio uses its own")
+            rep.expect(cid, not problems,
+                       "default kwargs are exactly the pre-options expression "
+                       "({\"language\": language} if language else {}), no "
+                       "optional knobs",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not build the default kwargs: {exc!r}")
+
+    if ctx.wants("qwen3/sentinels-become-none"):
+        cid = "qwen3/sentinels-become-none"
+        try:
+            got = module.qwen3_generate_kwargs(
+                "en", system_prompt="", repetition_penalty=0.0)
+            problems = []
+            for key in ("system_prompt", "repetition_penalty",
+                        "repetition_context_size"):
+                if key in got:
+                    problems.append(f"{key}={got[key]!r} was passed through; the "
+                                    "sentinel must become None (absent)")
+            # And the positive control: real values DO come through, so the check
+            # above is not passing merely because everything is dropped.
+            on = module.qwen3_generate_kwargs(
+                "en", system_prompt="  Aggia PREP  ", repetition_penalty=1.2,
+                repetition_context_size=20)
+            for key, want in (("system_prompt", "Aggia PREP"),
+                              ("repetition_penalty", 1.2),
+                              ("repetition_context_size", 20)):
+                if on.get(key) != want:
+                    problems.append(f"{key} was {on.get(key)!r}, expected {want!r}")
+            rep.expect(cid, not problems,
+                       "0/\"\" are dropped (⇒ mlx-audio's own default) and real "
+                       "values pass through",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the sentinels: {exc!r}")
+
+    # -- THE COUPLING, and the reason this is a check rather than a comment.
+    #    mlx-audio reads repetition_context_size ONLY where it builds the
+    #    penalty (`if repetition_penalty`, qwen3_asr.py:1292), so sending it
+    #    alone is accepted and does NOTHING — the exact shape of the Granite
+    #    language picker that shipped inert. Measured 2026-08-03 on real audio:
+    #    ctx 5 vs 100 at penalty 1.2 gave different text, so WITH a penalty it
+    #    genuinely matters; the positive half asserts that too, because "never
+    #    sent" alone would pass a build that had dropped the option entirely.
+    if ctx.wants("qwen3/context-size-never-travels-alone"):
+        cid = "qwen3/context-size-never-travels-alone"
+        try:
+            problems = []
+            alone = module.qwen3_generate_kwargs("en", repetition_context_size=20)
+            if "repetition_context_size" in alone:
+                problems.append(
+                    f"repetition_context_size={alone['repetition_context_size']!r} "
+                    "was sent with no penalty — mlx-audio never reads it there, "
+                    "so it is a flag that cannot change the transcript")
+            paired = module.qwen3_generate_kwargs(
+                "en", repetition_penalty=1.2, repetition_context_size=20)
+            if paired.get("repetition_context_size") != 20:
+                problems.append("with a penalty active the context size did not "
+                                f"travel: {paired.get('repetition_context_size')!r}")
+            if paired.get("repetition_penalty") != 1.2:
+                problems.append("the penalty itself did not travel: "
+                                f"{paired.get('repetition_penalty')!r}")
+            rep.expect(cid, not problems,
+                       "the context size is sent only alongside a penalty, and "
+                       "always when one is active",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the coupling: {exc!r}")
+
+
 # ===================================================================== main
 GROUPS = [
+    ("layout", LAYOUT_CHECKS, run_layout),
     ("nemotron", NEMOTRON_CHECKS, run_nemotron),
     ("chunked", CHUNKED_CHECKS, run_chunked),
-    ("diarize", DIARIZE_CHECKS, run_diarize),
+    ("whisper", WHISPER_CHECKS, run_whisper),
+    ("qwen3", QWEN3_CHECKS, run_qwen3),
+    ("aligner", ALIGNER_CHECKS, run_aligner),
+    ("moss", MOSS_CHECKS, run_moss),
+    ("pyannote", PYANNOTE_CHECKS, run_pyannote),
+    ("wespeaker", WESPEAKER_CHECKS, run_wespeaker),
 ]
 
 
@@ -1069,7 +3219,13 @@ def main() -> int:
     p.add_argument("--audio-b", default=None,
                    help="a DIFFERENT real speech WAV (remote lane)")
     p.add_argument("--audio-diarize", default=None, help="real speech WAV for diarization")
-    p.add_argument("--clip-start", type=float, default=0.0)
+    # Default None = auto-seek past leading digital silence (see load_clip /
+    # first_speech_offset). It is NOT 0.0: the owner's recordings routinely open
+    # with 20-40 s of zeros, and slicing from 0 gave checks an embedding of
+    # silence rather than an obvious empty-audio failure. `--clip-start 0` still
+    # forces offset 0 explicitly.
+    p.add_argument("--clip-start", type=float, default=None,
+                   help="seconds into each fixture (default: first speech)")
     p.add_argument("--clip-sec", type=float, default=6.0,
                    help="seconds of each fixture fed to the realtime lanes")
     p.add_argument("--diarize-sec", type=float, default=25.0)
@@ -1107,7 +3263,27 @@ def main() -> int:
           f"{os.environ.get('HF_HUB_OFFLINE')})")
     print(f"  audio A       {args.audio_a or '(none — real-speech checks will SKIP)'}")
     print(f"  audio B       {args.audio_b or '(none — real-speech checks will SKIP)'}")
-    print(f"  audio diarize {args.audio_diarize or '(none — diarize checks will SKIP)'}")
+    print(f"  audio diarize {args.audio_diarize or '(none — pyannote+wespeaker checks will SKIP)'}")
+    # Print the offset each fixture will actually be sliced from. A run over a
+    # fixture whose speech starts at 22 s used to look identical to one over
+    # speech at 0 s, and produced confident nonsense; now it is on screen.
+    if args.clip_start is None:
+        for label, path in (("A", args.audio_a), ("B", args.audio_b),
+                            ("diarize", args.audio_diarize)):
+            if not path:
+                continue
+            try:
+                import numpy as np
+                from mlx_audio.stt.utils import load_audio
+                whole = np.asarray(load_audio(str(path), sr=SR), dtype=np.float32)
+                found = first_speech_offset(whole)
+            except Exception:  # noqa: BLE001
+                found = None
+            where = (f"auto {found:.1f}s" if found is not None
+                     else "auto -> 0.0s (NO SPEECH FOUND IN THIS FILE)")
+            print(f"  clip start {label:8s} {where}")
+    else:
+        print(f"  clip start    {args.clip_start:.1f}s (explicit)")
     print("=" * 72)
 
     # SAFETY: fingerprint the owner's real profiles before anything runs.

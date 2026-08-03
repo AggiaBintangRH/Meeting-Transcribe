@@ -28,7 +28,16 @@ struct RealtimeModelTab: View {
             }
 
             SettingBlock(title: "Language") {
-                LanguagePicker(selection: $language)
+                LanguagePicker(selection: $language, entries: Languages.realtime)
+
+                // The chunked tab now offers a per-model list built from each
+                // model's published roster. Nemotron has none, so this list is
+                // deliberately the old short one — said out loud so the
+                // difference between the two tabs does not read as an oversight.
+                Text("Nemotron's card states 40 locales but does not publish which ones, so this list is not the full set — unlike the chunked models, whose languages come from their published rosters.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

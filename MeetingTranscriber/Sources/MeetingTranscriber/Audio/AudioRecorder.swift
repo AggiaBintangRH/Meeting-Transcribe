@@ -77,6 +77,26 @@ final class AudioRecorder: ObservableObject {
     var stopWatchdog: Task<Void, Never>?
     var repairTask: Task<Void, Never>?
 
+    // MARK: The stop-time chunked pass (`chunked.finalPass` / `chunked.continueOnStop`)
+    //
+    // See AudioRecorder+ChunkedStop.swift. All three default to today's
+    // behaviour, and `beginCapture` resets them per session.
+
+    /// Whether `checkLastChunkDone` may delete the leftover unconfirmed
+    /// (realtime) segments. Written once per session from
+    /// `chunkedStopPlan(_:).sweepsUnconfirmedTail`. TRUE — the sweep as it has
+    /// always been — unless `chunked.finalPass` is off, in which case the
+    /// realtime tail is the only text that audio will ever have.
+    var chunkedSweepsUnconfirmed = true
+    /// The full re-transcription driver, or nil. Cancelled by its watchdog.
+    var chunkedFullPassTask: Task<Void, Never>?
+    var fullPassWatchdog: Task<Void, Never>?
+    /// The full pass has taken the remote leg of the stop gate and still owes it
+    /// back. Taken in `stop()` rather than in the driver, because the remote
+    /// block's `checkRemoteChunksDone()` runs in between and would otherwise
+    /// settle the leg before the pass had claimed it.
+    var fullPassHoldsRemoteLeg = false
+
     private var chunkElapsed: Double = 0      // seconds since last chunk flush
     private var chunkWatchdog: Task<Void, Never>?
 
@@ -93,8 +113,28 @@ final class AudioRecorder: ObservableObject {
     // Live chunked diarization — runs on its OWN interval, independent of ASR
     var chunkAudio: [Float] = []                       // 16k samples pending diarization
     var chunkFileByWindow: [Double: URL] = [:]
+
+    // MARK: Forced alignment (its own sidecar since 2026-07-29)
+    //
+    // Two cadences, two buffers — the same rule `remoteChunkAudio` vs
+    // `remoteDiarAudio` already follows. `chunkAudio` above LOOKS reusable and is
+    // not: it is cleared on the DIARIZATION cadence (`diarization.intervalSec`,
+    // in `diarizeLiveChunk`/`diarizeTailChunk`), and with live diarization off
+    // plus continue-on-stop it is never cleared at all. The aligner needs exactly
+    // the audio of ONE ASR chunk, so it gets a buffer cleared at the ASR chunk
+    // boundary and nowhere else.
+
+    /// 16 kHz office samples accumulated since the last ASR chunk boundary.
+    /// Only filled when this session has an aligner — otherwise it stays empty
+    /// and every path below is inert. Capped at `alignMaxBufferSamples`.
+    var alignChunkAudio: [Float] = []
+    /// Chunk audio parked under its window start, waiting for that chunk's text
+    /// to come back so the two can be sent to the aligner together. Keyed like
+    /// `chunkFileByWindow`; drained on EVERY path that pops
+    /// `pendingChunkWindows`, or a failed chunk would leak a 30 s buffer.
+    var alignAudioByWindow: [Double: [Float]] = [:]
     var sessionSpeakerIDs = Set<Int>()
-    var liveTurns: [DiarizationService.Turn] = []      // absolute-time turns collected so far
+    var liveTurns: [SpeakerTurn] = []      // absolute-time turns collected so far
     // Position-based diarization (ATND beam) — off unless atnd.position.enabled.
     // Recorder-owned, one per session; nil means the feature is off, so
     // positionGapFill returns [] and the display path is pure pyannote.
@@ -154,7 +194,7 @@ final class AudioRecorder: ObservableObject {
     var remoteRecordingURL: URL?
     /// Remote-space turns collected so far — the remote twin of `liveTurns`.
     /// Ids are already offset by `remoteIDBase` (the sidecar applies it).
-    var remoteLiveTurns: [DiarizationService.Turn] = []
+    var remoteLiveTurns: [SpeakerTurn] = []
     /// 16 kHz remote samples pending live diarization. Separate from
     /// `remoteChunkAudio` because the diarization cadence is its own setting.
     var remoteDiarAudio: [Float] = []
@@ -174,6 +214,57 @@ final class AudioRecorder: ObservableObject {
     /// twin of `awaitingTailWindowStart`; kept apart because both streams use the
     /// SAME window starts and one would otherwise settle the other's gate.
     var awaitingRemoteTailWindowStart: Double? = nil
+
+    // MARK: MOSS speaker-attributed ASR (diarization.engine == "moss")
+    //
+    // Storage only — every rule about these lives in `AudioRecorder+Moss`, which
+    // is where the whole engine is implemented. They are declared HERE and not
+    // there for the plain Swift reason the remote state above is: an extension
+    // cannot hold stored properties.
+    //
+    // Inert for a pyannote session: `mossDiarizationActive` stays false, so the
+    // callbacks return immediately, `mossTurns` stays empty and the display path
+    // reads `liveTurns` exactly as it always has.
+
+    /// True when THIS session is taking its speaker labels from MOSS. Read once
+    /// in `beginCapture` like every other setting, so the engine cannot change
+    /// mid-recording and leave half the transcript labelled by each.
+    var mossDiarizationActive = false
+    /// True when the chunked ASR model IS MOSS, so one process fills both roles
+    /// and the segments arriving on `onChunkSegments` describe the very text
+    /// `onChunkTranscript` is about to deliver.
+    var mossIsChunkedModel = false
+    /// MOSS turns — the engine's own per-chunk speaker spans, in recording time.
+    /// A SEPARATE collection from `liveTurns` on purpose: office-only state must
+    /// stay pure pyannote, so every `officeTurnsOnly` assert, `overlapRegions`,
+    /// `applyFinalSpeakers` and `speakerCount` keeps holding without being
+    /// relaxed for this engine.
+    var mossTurns: [SpeakerTurn] = []
+
+    /// The stop-time MOSS re-diarization, when `moss.continueOnStop` is off.
+    /// Held so it can be cancelled; see AudioRecorder+MossStop.swift.
+    var mossFullPassTask: Task<Void, Never>?
+    /// How many MOSS chunks this session has labelled. Part of every wire id, so
+    /// chunk N's speakers can never be confused with chunk N+1's.
+    var mossChunkIndex = 0
+    /// Segments from a `final` that has arrived, waiting for the transcript
+    /// callback of that SAME `final` to consume them.
+    ///
+    /// One variable serves both modes because at most ONE MOSS process ever
+    /// exists (`ModelLoader.needsSecondMossProcess`): either the chunked sidecar
+    /// is MOSS, or a second one is, never both. The split exists so that exactly
+    /// one callback owns the window FIFO — the segments callback only records,
+    /// the transcript callback pops and applies, and the sidecar guarantees that
+    /// order for a given `final`.
+    var mossIncomingSegments: [ChunkedASRService.MossSegment]?
+    /// Window FIFO for the SECOND MOSS process (other ASR + MOSS diarization).
+    /// Its own queue, never `pendingChunkWindows`: two sidecars flush on the same
+    /// boundary and each has to pop the window it was actually given.
+    var mossPendingWindows: [ClosedRange<Double>] = []
+    /// Stop gate leg for that second process, mirroring `lastChunkDone`. Starts
+    /// true so a session without one is already complete before it is consulted.
+    var mossLastChunkDone = true
+    var mossChunkWatchdog: Task<Void, Never>?
 
     /// Publishes per-model progress for the loading overlay.
     let modelLoader = ModelLoader()
@@ -243,6 +334,39 @@ final class AudioRecorder: ObservableObject {
                                                        chunkedModelID: chunkedID) {
             dualStreamLog("REFUSED start — \(refusal)")
             modelLoader.failStartup(step: "Remote stream + chunked model", message: refusal)
+            errorMessage = refusal
+            state = .idle
+            return
+        }
+        // Same rule, same place, for the other combination that cannot keep up:
+        // Voxtral as the chunked model while MOSS is the diarization engine.
+        // Checked before `loadAll` for the same reason — the user should not
+        // wait out a 4B load plus a 3.6 GB one to be told it will not work.
+        let diarEngine = UserDefaults.standard.string(forKey: "diarization.engine")
+            ?? ModelLoader.pyannoteEngineID
+        if let refusal = Self.mossRefusalMessage(chunkedModelID: chunkedID,
+                                                 diarizationEngine: diarEngine,
+                                                 remoteChannel: mic.remoteChannel) {
+            mossLog("REFUSED start — \(refusal)")
+            modelLoader.failStartup(step: "MOSS diarization + chunked model", message: refusal)
+            errorMessage = refusal
+            state = .idle
+            return
+        }
+        // Third refusal, same rule and same place: "Run a transcription pass at stop" with
+        // "Continue from live text (tail only)" OFF asks for a full re-transcription
+        // of the whole recording, which MOSS cannot do at all and Voxtral cannot
+        // do in reasonable time. Told before the meeting, not after it — the cost
+        // of finding out at Stop is an hour of processing or a truncated
+        // transcript. Refusal, never a silent downgrade to the tail: the user
+        // asked for the whole recording and would have no way to know they did
+        // not get it.
+        let chunkedFinalPass = UserDefaults.standard.object(forKey: "chunked.finalPass") as? Bool ?? true
+        let chunkedTailOnly = UserDefaults.standard.object(forKey: "chunked.continueOnStop") as? Bool ?? true
+        if chunkedFinalPass, !chunkedTailOnly,
+           let refusal = Self.chunkedFullPassRefusalMessage(chunkedModelID: chunkedID) {
+            chunkedStopLog("REFUSED start — \(refusal)")
+            modelLoader.failStartup(step: "Stop-time transcription pass + chunked model", message: refusal)
             errorMessage = refusal
             state = .idle
             return
@@ -379,7 +503,13 @@ final class AudioRecorder: ObservableObject {
                     // Short so the live-partial label flips quickly on a talker switch.
                     // In `pyannote` source mode the position layer is not displayed
                     // anywhere, so the live partial must not carry its label either.
-                    self.partialSpeakerName = self.positionSource.usesPosition
+                    // The MOSS engine is the same case for the same reason
+                    // (`derivedRows` forces the pyannote-pure plan under it): without
+                    // this the caption would show an ATND position name while every
+                    // confirmed row below it showed a MOSS label — two naming systems
+                    // on screen at once, the top one vanishing as it commits.
+                    self.partialSpeakerName = !self.mossDiarizationActive
+                        && self.positionSource.usesPosition
                         ? self.positionDiarizer?.label(
                             for: max(0, self.recordingElapsed - 1.0)...self.recordingElapsed,
                             minSamples: 3)?.name
@@ -446,11 +576,21 @@ final class AudioRecorder: ObservableObject {
         stopWatchdog?.cancel()
         stopWatchdog = nil
         stopSteps = []
+        // Stop-time chunked pass: back to today's behaviour for the new session.
+        // `stop()` writes the real values from this session's settings.
+        chunkedSweepsUnconfirmed = true
+        chunkedFullPassTask?.cancel()
+        chunkedFullPassTask = nil
+        fullPassWatchdog?.cancel()
+        fullPassWatchdog = nil
+        fullPassHoldsRemoteLeg = false
         // Fresh per-session speaker state, then wire the live/final callbacks.
         chunkFileByWindow = [:]
         sessionSpeakerIDs = []
         liveTurns = []
         chunkAudio = []
+        alignChunkAudio = []
+        alignAudioByWindow = [:]
         diarElapsed = 0
         lastDiarBoundary = 0
         // Fresh remote state. `remoteStreamActive` also requires the resampler:
@@ -483,6 +623,15 @@ final class AudioRecorder: ObservableObject {
         awaitingRemoteTailWindowStart = nil
         configureDiarization()
         configurePositionDiarization()
+        // AFTER the position config: `configureMoss` reads `positionSource` to
+        // log, once, that the position layer contributes nothing under this
+        // engine. It also resets every MOSS collection for the session and wires
+        // the second process's callbacks when there is one.
+        configureMoss()
+        // The second MOSS process for this session, or nil — captured once, like
+        // `chunked`, so the escaping tap closure never touches the recorder to
+        // find it.
+        let mossDiar = mossDiarService
         // Real-time speaker split: when the beam settles on a different talker,
         // end the old speaker's realtime segment now and relabel existing rows.
         // Detection lags the real switch by ~0.7s (0.4s smoother warm-up + 3
@@ -503,9 +652,13 @@ final class AudioRecorder: ObservableObject {
             self.modelLoader.nemotronASR?.office.flush()  // end the old speaker's realtime segment now
             self.rebuildDisplayRows()              // relabel existing rows' fills instantly
         }
-        // Optionally start each recording with a clean speaker store.
+        // Optionally start each recording with a clean speaker store. Addressed to
+        // the STORE'S OWNER since the 2026-07-30 split — the pyannote sidecar has
+        // no profiles to reset any more. Semantics are unchanged: the reset rides
+        // the same FIFO stdin as the identify jobs, so it is necessarily handled
+        // before the first job of this session, exactly as before.
         if UserDefaults.standard.object(forKey: "diarization.resetOnStart") as? Bool ?? true {
-            modelLoader.diarization?.resetProfiles()
+            modelLoader.embedding?.resetProfiles()
         }
         let chunkInterval = Double(
             UserDefaults.standard.object(forKey: "chunked.intervalSec") as? Int ?? 30
@@ -515,7 +668,25 @@ final class AudioRecorder: ObservableObject {
             UserDefaults.standard.object(forKey: "diarization.intervalSec") as? Int ?? 30
         )
         chunkedError = nil
-        chunked?.onChunkTranscript = { [weak self] text, words, chunkDuration in
+        // MOSS as the chunked model AND the diarizer — the one-process mode. The
+        // segments arrive just before the transcript of the same `final`; record
+        // them here and let that transcript callback apply them, so exactly one
+        // callback owns the window FIFO. Explicitly cleared otherwise: the service
+        // outlives the session, so a stale closure from a previous meeting must
+        // not survive a switch back to pyannote (and MOSS-as-ASR under pyannote
+        // must ignore the segments entirely).
+        if mossDiarizationActive, mossIsChunkedModel {
+            chunked?.onChunkSegments = { [weak self] segments in
+                Task { @MainActor in self?.mossIncomingSegments = segments }
+            }
+        } else {
+            chunked?.onChunkSegments = nil
+        }
+        // The aligner for THIS session, captured once like `chunked` — nil means
+        // no alignment happens at all: no buffer is accumulated in the tap, no
+        // window is parked, and no request is ever sent.
+        let aligner = modelLoader.aligner
+        chunked?.onChunkTranscript = { [weak self] text, conf in
             Task { @MainActor in
                 guard let self else { return }
                 self.chunkWatchdog?.cancel()
@@ -526,14 +697,33 @@ final class AudioRecorder: ObservableObject {
                 // audio position, so unconfirmed segments = this chunk).
                 let window = self.pendingChunkWindows.isEmpty
                     ? nil : self.pendingChunkWindows.removeFirst()
+                // Popped here, and used below only if this chunk is actually
+                // alignable. Removing it unconditionally is the point: every
+                // path that pops a window must also drop its audio.
+                let alignSamples = window.flatMap {
+                    self.alignAudioByWindow.removeValue(forKey: $0.lowerBound)
+                }
                 self.segments.removeAll { !$0.confirmed }
-                if !text.isEmpty {
-                    // Words are carried through untouched (chunk-relative) for
-                    // word-exact attribution; nothing consumes them yet, so row
-                    // building below is unchanged.
-                    self.segments.append(TranscriptSegment(text: text, confirmed: true, window: window,
-                                                           words: words,
-                                                           alignedChunkDuration: chunkDuration))
+                // MOSS filling BOTH roles: the `final` that carried this text also
+                // carried the model's own per-speaker segmentation of it, which
+                // arrived on `onChunkSegments` a moment ago. Append those as pinned
+                // per-speaker rows instead of this one joined, unattributed row —
+                // appending both would duplicate every word in the chunk. Returns
+                // false in every other configuration, leaving the line below to run
+                // exactly as it always has.
+                let handledByMoss = self.applyMossChunk(window: window)
+                if !text.isEmpty, !handledByMoss {
+                    // No `words` yet, ON PURPOSE: the row is shown NOW with the
+                    // estimated character-proportional split, and the aligner is
+                    // asked separately below. `applyAlignedWords` fills them in
+                    // when (if) the reply lands.
+                    let segment = TranscriptSegment(text: text, confirmed: true,
+                                                    window: window, asrConf: conf)
+                    self.segments.append(segment)
+                    if let aligner, let samples = alignSamples, !samples.isEmpty {
+                        self.requestAlignment(aligner: aligner, samples: samples,
+                                              segmentID: segment.id, text: text)
+                    }
                 }
                 // Rebuild rows: splits this chunk by any diarization turns already in.
                 self.rebuildDisplayRows()
@@ -549,7 +739,10 @@ final class AudioRecorder: ObservableObject {
                 // Drain the queued window even on failure, or a stuck entry
                 // blocks checkLastChunkDone()/misaligns the next chunk's window.
                 if !self.pendingChunkWindows.isEmpty {
-                    self.pendingChunkWindows.removeFirst()
+                    let window = self.pendingChunkWindows.removeFirst()
+                    // …and its parked alignment audio with it: there will be no
+                    // text for this window, so nothing would ever collect it.
+                    self.alignAudioByWindow.removeValue(forKey: window.lowerBound)
                 }
                 self.checkLastChunkDone()
             }
@@ -594,6 +787,12 @@ final class AudioRecorder: ObservableObject {
                                         bufferDuration: duration) ?? false
             asr?.feed(samples16k)
             chunked?.feed(samples16k)
+            // The SECOND MOSS process gets the identical office samples — nil in
+            // every other configuration, including MOSS+MOSS where `chunked` above
+            // already IS the MOSS process. Fed from the captured local, off the
+            // main actor, for the same reason `chunked` is: `feed` hands the
+            // samples straight to the sidecar's own write queue.
+            mossDiar?.feed(samples16k)
 
             Task { @MainActor in
                 self.rms = level
@@ -615,6 +814,16 @@ final class AudioRecorder: ObservableObject {
                             || self.chunkElapsed >= chunkInterval * 1.5
                 // Accumulate audio for live diarization (its own cadence below)
                 self.chunkAudio.append(contentsOf: samples16k)
+                // …and, separately, for the aligner, which needs exactly ONE ASR
+                // chunk. Only when this session has an aligner: otherwise not a
+                // sample is copied and the feature costs nothing.
+                if aligner != nil {
+                    self.alignChunkAudio.append(contentsOf: samples16k)
+                    if self.alignChunkAudio.count > Self.alignMaxBufferSamples {
+                        self.alignChunkAudio.removeFirst(
+                            self.alignChunkAudio.count - Self.alignMaxBufferSamples)
+                    }
+                }
                 // Remote accumulates in parallel. Empty for a single-stream
                 // session, so this is a no-op there.
                 if !remoteSamples16k.isEmpty {
@@ -633,7 +842,15 @@ final class AudioRecorder: ObservableObject {
                     let windowStart = self.lastChunkBoundary
                     self.pendingChunkWindows.append(windowStart...self.recordingElapsed)
                     self.lastChunkBoundary = self.recordingElapsed
+                    // Park this chunk's audio under its window BEFORE the flush,
+                    // so it is already there when the transcript comes back.
+                    self.stashAlignAudio(windowStart: windowStart)
                     self.startChunkFlush(chunked)
+                    // The second MOSS process rides the SAME boundary and gets the
+                    // SAME window — deliberately, not `diarization.intervalSec`:
+                    // identical windows are what let its turns split the ASR
+                    // model's text exactly. No-op when there is no second process.
+                    self.flushMossDiarChunk(window: windowStart...self.recordingElapsed)
                     // Remote rides the SAME boundary — one cadence, so the two
                     // streams' windows stay aligned and comparable. The office
                     // FLUSH (n=0) is queued first and the remote `-2` frame
@@ -688,22 +905,26 @@ final class AudioRecorder: ObservableObject {
     // MARK: - Stop
 
     /// Flush a chunk with a watchdog: if no result within 3 minutes,
-    /// clear the spinner and surface a timeout (details in logs/chunked-asr.log).
+    /// clear the spinner and surface a timeout (details in that sidecar's log —
+    /// each ASR service owns its own file, so the name comes from the service
+    /// rather than being hard-coded to the old shared one).
     private func startChunkFlush(_ service: ChunkedASRService?) {
         guard let service else { return }
         chunkedBusy = true
         service.flush()
         chunkWatchdog?.cancel()
+        let logName = service.config.logName
         chunkWatchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(180))
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, self.chunkedBusy else { return }
                 self.chunkedBusy = false
-                self.chunkedError = "Chunk transcription timed out — see logs/chunked-asr.log"
+                self.chunkedError = "Chunk transcription timed out — see logs/\(logName).log"
                 // Drain the queued window on timeout too — same reasoning as onChunkError.
                 if !self.pendingChunkWindows.isEmpty {
-                    self.pendingChunkWindows.removeFirst()
+                    let window = self.pendingChunkWindows.removeFirst()
+                    self.alignAudioByWindow.removeValue(forKey: window.lowerBound)
                 }
                 self.checkLastChunkDone()
             }
@@ -712,6 +933,33 @@ final class AudioRecorder: ObservableObject {
 
     private func stop() {
         stopped = true
+        // DETACH THE TAP BEFORE ANY FLUSH. The tap body has no `stopped` guard —
+        // it feeds `chunked`, `mossDiar` and the realtime lanes straight from the
+        // audio thread — so while it was still installed, a callback firing
+        // between a FLUSH frame and the teardown further down handed the sidecar
+        // samples it would never be asked to transcribe. Bounded (one 4096-frame
+        // buffer ≈ 85 ms at 48 kHz) and always at the very end of the recording,
+        // but silently dropped: the sidecar transcribes on FLUSH, and no second
+        // FLUSH ever came. Removing the tap here makes every sidecar's buffer
+        // final before the first flush is sent, so what is captured is what is
+        // transcribed. The engine itself is torn down further below, where the
+        // files are closed — only the tap moves.
+        engine?.inputNode.removeTap(onBus: 0)
+        // With the tap gone, the WAV is final — and it, not `recordingElapsed`,
+        // is the authority on how long the recording is.
+        //
+        // `recordingElapsed` is advanced inside `Task { @MainActor }` from the tap
+        // callback, while the SAMPLES are written and fed synchronously on the
+        // audio thread. So a callback whose task had not run yet left the counter
+        // behind the audio by up to one tap buffer (~85 ms at 48 kHz). Every stop
+        // window is built from that counter — the tail window, and every window of
+        // a full pass — so the last ~85 ms sat outside them all: present in the
+        // recording, absent from the transcript. Reading the file closes the gap
+        // at its only authoritative source.
+        if let file, file.fileFormat.sampleRate > 0 {
+            let written = Double(file.length) / file.fileFormat.sampleRate
+            if written > recordingElapsed { recordingElapsed = written }
+        }
         // Stop ingesting beam notices, but KEEP the collected data — display-time
         // gap-fill (positionGapFill → label(for:)) still queries it afterward.
         positionDiarizer?.stop()
@@ -720,16 +968,102 @@ final class AudioRecorder: ObservableObject {
         // branch below advances `lastChunkBoundary`, so both streams' last windows
         // still line up exactly as they did at every live boundary.
         let tailStart = lastChunkBoundary
-        if modelLoader.chunkedASR != nil {
+        // The second MOSS process's tail is the office tail — same window, read
+        // before `lastChunkBoundary` moves, exactly as the remote tail above is.
+        // There is no stop-time MOSS pass of any kind beyond this: the last
+        // chunk's result IS the tail, because the engine labels as it transcribes.
+        // What the MOSS DIARIZATION engine does at stop. Both keys absent →
+        // `.tail`, the branch this line has always taken. Only ever `.full` when
+        // a SECOND MOSS process exists (another model does the ASR) — in
+        // MOSS+MOSS the tail is the chunked tail and `chunked.*` governs it.
+        // See AudioRecorder+MossStop.swift.
+        let mossPlan = Self.mossStopPlan(Self.mossStopMode(
+            finalPass: UserDefaults.standard.object(forKey: "moss.finalPass") as? Bool ?? true,
+            continueOnStop: UserDefaults.standard.object(forKey: "moss.continueOnStop") as? Bool ?? true,
+            hasDiarService: mossDiarService != nil,
+            hasRecording: lastRecordingURL != nil))
+        if mossPlan.flushesTail {
+            flushMossDiarChunk(window: tailStart...max(recordingElapsed, tailStart + 0.01))
+        }
+        if mossPlan.settlesImmediately {
+            mossLastChunkDone = true
+        }
+        if mossPlan.runsFullPass, let recording = lastRecordingURL {
+            startMossFullPass(recording: recording)
+        }
+        // What the chunked pass does at stop. Both keys absent → `.tail`, which
+        // is the branch this block has always taken; the "no chunked model"
+        // early-out is now `.none`, decided in the same place rather than by an
+        // `if` here. See AudioRecorder+ChunkedStop.swift.
+        let chunkedFinalPass = UserDefaults.standard.object(forKey: "chunked.finalPass") as? Bool ?? true
+        let chunkedTailOnly = UserDefaults.standard.object(forKey: "chunked.continueOnStop") as? Bool ?? true
+        let chunkedMode = Self.chunkedStopMode(
+            finalPass: chunkedFinalPass,
+            continueOnStop: chunkedTailOnly,
+            hasChunkedModel: modelLoader.chunkedASR != nil,
+            hasRecording: lastRecordingURL != nil,
+            chunkedModelID: UserDefaults.standard.string(forKey: "chunked.model") ?? "qwen3")
+        let chunkedPlan = Self.chunkedStopPlan(chunkedMode)
+        chunkedSweepsUnconfirmed = chunkedPlan.sweepsUnconfirmedTail
+        if chunkedPlan.queuesTailWindow {
             pendingChunkWindows.append(lastChunkBoundary...max(recordingElapsed, lastChunkBoundary + 0.01))
+            // Same stash as every live boundary — the tail chunk is aligned like
+            // any other. One helper for both sites so they cannot drift apart.
+            stashAlignAudio(windowStart: lastChunkBoundary)
             lastChunkBoundary = recordingElapsed
+        }
+        if chunkedPlan.flushesSidecar {
             startChunkFlush(modelLoader.chunkedASR) // transcribe the last partial chunk
-        } else {
-            // Nothing would ever drain a queued window without a chunked model,
-            // so don't queue one — the gate has to complete here instead.
+        }
+        if chunkedPlan.settlesImmediately {
+            // Nothing will ever drain a queued window (no chunked model, or the
+            // pass is switched off), so don't queue one — the gate has to
+            // complete here instead.
             lastChunkDone = true
         }
-        engine?.inputNode.removeTap(onBus: 0)
+        // Taken HERE, before the remote block below calls `checkRemoteChunksDone()`
+        // with nothing in flight — that call would otherwise settle the remote leg
+        // a moment before the full pass claimed it.
+        if chunkedPlan.runsFullPass, remoteStreamActive, remoteRecordingURL != nil {
+            remotePendingChunks += 1
+            fullPassHoldsRemoteLeg = true
+        }
+        // Watchdog budgets. A full pass legitimately takes MINUTES (Qwen3 ≈ 9 for
+        // a 60-minute meeting), so the fixed 180 s remote and 600 s stop
+        // watchdogs would fire in the middle of healthy work and mark it timed
+        // out. Both are therefore scaled by the number of windows; when no full
+        // pass runs, `fullPassBudget` is 0 and both keep their original values
+        // exactly.
+        let fullPassWindowCount = chunkedPlan.runsFullPass
+            ? Self.fullPassWindows(
+                recordingLength: recordingElapsed,
+                intervalSec: Double(UserDefaults.standard.object(forKey: "chunked.intervalSec") as? Int ?? 30)
+              ).count * (fullPassHoldsRemoteLeg ? 2 : 1)
+            : 0
+        // The MOSS re-diarization pass is a SECOND stop-time pass and was missing
+        // from this budget entirely — found in the 2026-07-31 re-audit, in code
+        // written the same day. With only MOSS re-labelling (chunked on tail), the
+        // budget was 0 and the stop watchdog stayed at its 600 s floor, while a
+        // 60-minute meeting is ~30 windows of 120 s at ~26 s each ≈ 13 minutes.
+        // The watchdog would have fired mid-pass and marked every leg timed out
+        // while the sidecar was working normally — the same failure the tail
+        // diarization watchdog had.
+        //
+        // SUMMED, not maxed: both passes can run at once and they contend for the
+        // same GPU, so their durations add rather than overlap.
+        let mossFullPassWindowCount = mossPlan.runsFullPass
+            ? Self.fullPassWindows(recordingLength: recordingElapsed,
+                                   intervalSec: Self.mossFullPassWindowSec).count
+            : 0
+        let mossFullPassBudget = mossFullPassWindowCount > 0
+            ? Self.fullPassWatchdogSeconds(windowCount: mossFullPassWindowCount) : 0
+        let fullPassBudget = Self.fullPassWatchdogSeconds(
+            windowCount: fullPassWindowCount) * (chunkedPlan.runsFullPass ? 1 : 0)
+            + mossFullPassBudget
+        let remoteStopWatchdogSeconds = max(180.0, fullPassBudget + 120)
+        // The tap is already gone — detached at the top of `stop()` so that no
+        // sample could arrive after a FLUSH. Removing it twice is harmless but
+        // would misstate where the boundary is, so it is not repeated here.
         engine?.stop()
         engine = nil
         file = nil
@@ -745,9 +1079,21 @@ final class AudioRecorder: ObservableObject {
             // caption's trailing speech before its tail chunk is queued. Its own
             // opcode, so this resets only the remote buffer in the sidecar.
             modelLoader.nemotronASR?.remote.flush()
-            flushRemoteChunk(window: tailStart...max(recordingElapsed, tailStart + 0.01),
-                             chunked: modelLoader.chunkedASR)
-            startRemoteStopWatchdog()
+            // Remote follows the SAME two toggles the office lane does, because
+            // they are pipeline-level settings and the alternative is a silent
+            // asymmetry: "re-transcribe the recording" that leaves half the
+            // transcript on the live text, or "no pass at stop" that still runs
+            // one for Remote. With the full pass, Remote's windows are re-run
+            // inside `startChunkedFullPass` instead of here.
+            if chunkedPlan.queuesTailWindow {
+                flushRemoteChunk(window: tailStart...max(recordingElapsed, tailStart + 0.01),
+                                 chunked: modelLoader.chunkedASR)
+            } else if !chunkedPlan.runsFullPass {
+                // No remote row is coming for this window — drop the caption
+                // rather than leave it hanging, exactly as a skipped chunk does.
+                remoteCaption.commit()
+            }
+            startRemoteStopWatchdog(seconds: remoteStopWatchdogSeconds)
             // Nothing in flight (idle channel, everything gated as silent) →
             // complete the gate now instead of waiting for a callback that
             // will never come.
@@ -758,7 +1104,7 @@ final class AudioRecorder: ObservableObject {
         // re-diarize the whole recording (best global clustering).
         let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
         let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? false
-        let willRunStopPass = finalOn && modelLoader.diarization != nil
+        let willRunStopPass = finalOn && modelLoader.pyannote != nil
         // The remote pass is dispatched HERE, before the overlay is built, so the
         // step list knows whether to show a remote-diarization row. Queued ahead
         // of the office stop pass on the same stdin; the sidecar drains it in
@@ -767,9 +1113,31 @@ final class AudioRecorder: ObservableObject {
 
         // Everything below lands asynchronously; block the controls until it does.
         buildStopSteps(willRunStopPass: willRunStopPass,
-                       willRunRemoteDiar: willRunRemoteDiar)
+                       willRunRemoteDiar: willRunRemoteDiar,
+                       willRunMossDiar: mossDiarService != nil)
         state = .processing
-        startStopWatchdog()
+        // One place decides how long the overlay may wait — see
+        // `stopWatchdogSeconds`, which exists because two watchdogs in a row
+        // failed to scale with the work they were guarding.
+        startStopWatchdog(seconds: Self.stopWatchdogSeconds(
+            chunkedFullPassWindows: chunkedPlan.runsFullPass ? fullPassWindowCount : 0,
+            mossFullPassWindows: mossFullPassWindowCount))
+
+        // Started AFTER the step list exists, because the pass reports its
+        // progress into the "chunk" (and, dual-stream, "remote") rows.
+        if chunkedPlan.runsFullPass {
+            if let recording = lastRecordingURL, let service = modelLoader.chunkedASR {
+                startChunkedFullPass(recording: recording, service: service)
+            } else {
+                // Unreachable by construction (`chunkedStopMode` returns `.full`
+                // only when both exist), but the chunk leg must never be left
+                // un-settleable — that hangs the blocking overlay for 10 minutes.
+                chunkedStopLog("FULL PASS could not start — no recording or no chunked model")
+                chunkedError = "The recording could not be re-transcribed"
+                releaseFullPassRemoteLeg()
+                checkLastChunkDone()
+            }
+        }
 
         if willRunStopPass {
             if continueOnStop {

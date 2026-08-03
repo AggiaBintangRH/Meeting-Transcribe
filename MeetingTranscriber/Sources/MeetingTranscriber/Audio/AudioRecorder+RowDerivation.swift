@@ -27,8 +27,66 @@ extension AudioRecorder {
         // Relabel sub-second speaker "islands" first (an ATND beam flicker that
         // caught one word), THEN coalesce — because relabeling restores the
         // adjacency that lets the surrounding rows merge.
-        displayRows = Self.coalesceAdjacentSameSpeaker(
+        let settled = Self.coalesceAdjacentSameSpeaker(
             Self.absorbShortSpeakerIslands(merged))
+        // Speaker confidence is annotated LAST, once the spans are final: the
+        // number is a minimum over the turns a row spans, and coalescing changes
+        // exactly that span. Computing it earlier would describe a row that no
+        // longer exists.
+        displayRows = Self.annotateSpeakerConfidence(rows: settled,
+                                                     officeTurns: liveTurns,
+                                                     remoteTurns: remoteLiveTurns)
+    }
+
+    /// Attach each row's speaker confidence: the MINIMUM matched cosine over the
+    /// turns of that same speaker overlapping the row's final span.
+    ///
+    /// Minimum, not mean: the row is claiming one identity for its whole span, so
+    /// it is worth no more than the weakest evidence inside it. Averaging would
+    /// let one strong turn mask a marginal one, which is the direction that
+    /// misleads (overstated confidence is invisible; understated is merely
+    /// cautious — the same asymmetry the hallucination gates are tuned around).
+    ///
+    /// `nil` is left in place for every legitimate "not measured" case and is
+    /// NEVER replaced with 0: a turn the sidecar sent without a `conf` (a
+    /// brand-new profile's first appearance) is skipped rather than counted as
+    /// zero, an ATND position id (≥ 100 000) simply matches no pyannote turn, and
+    /// unconfirmed realtime rows are not annotated at all.
+    ///
+    /// Reads EXACTLY ONE turn collection per row, chosen by `isRemote` — the same
+    /// one-comparison id-space routing used everywhere else. Office and remote ids
+    /// are disjoint by construction, so this is belt-and-braces; it is spelled out
+    /// because a row taking its confidence from the other space's turns would be a
+    /// silent, plausible-looking wrong number.
+    nonisolated static func annotateSpeakerConfidence(
+        rows: [SpeakerUtterance],
+        officeTurns: [SpeakerTurn],
+        remoteTurns: [SpeakerTurn]) -> [SpeakerUtterance] {
+        rows.map { row in
+            var row = row
+            guard row.confirmed, let id = row.speakerID,
+                  let start = row.start, let end = row.end
+            else { return row }
+            let turns = row.isRemote ? remoteTurns : officeTurns
+            var lowest: Double?
+            for turn in turns where turn.id == id {
+                guard let conf = turn.conf else { continue }  // not measured
+                // Genuine overlap only. A zero-width row touches nothing and so
+                // shows no number — the safe direction.
+                guard min(turn.end, end) > max(turn.start, start) else { continue }
+                lowest = lowest.map { Swift.min($0, conf) } ?? conf
+            }
+            row.speakerConf = lowest
+            return row
+        }
+    }
+
+    /// The lower of two confidences, treating `nil` as "no measurement" rather
+    /// than as a low value: it neither wins nor erases the other side.
+    nonisolated static func minConfidence(_ a: Double?, _ b: Double?) -> Double? {
+        guard let a else { return b }
+        guard let b else { return a }
+        return Swift.min(a, b)
     }
 
     /// Longest a mislabelled "island" row may be to get absorbed. An ATND beam
@@ -57,6 +115,18 @@ extension AudioRecorder {
             let island = out[i], before = out[i - 1], after = out[i + 1]
             guard let flank = before.speakerID, after.speakerID == flank,
                   island.speakerID != flank,
+                  // Never override MOSS. This absorber exists for ONE failure:
+                  // an ATND beam flicker onto a neighbour's seat, which produces
+                  // a near-zero-width span whose timing is right and whose
+                  // identity is wrong. A MOSS row is the opposite case — the
+                  // model attributed those words from the audio itself, and a
+                  // short reply between two turns of one speaker ("Hi.", "Yeah.")
+                  // is the single most common shape a real conversation has.
+                  // Rewriting it from its neighbours would silently delete the
+                  // one thing this engine is selected for. Measured: a genuine
+                  // 0.8 s "Hi." between two turns of S1 was being absorbed and
+                  // then coalesced away entirely.
+                  (island.speakerID ?? 0) < mossIDBase,
                   island.confirmed, before.confirmed, after.confirmed,
                   island.isRemote == before.isRemote, island.isRemote == after.isRemote,
                   let s = island.start, let e = island.end,
@@ -64,6 +134,11 @@ extension AudioRecorder {
             else { continue }
             out[i].speaker = before.speaker
             out[i].speakerID = flank
+            // The identity here came from a HEURISTIC (flanked on both sides),
+            // not from a voice embedding scored against a profile, so any
+            // confidence carried on this row described the speaker it no longer
+            // claims to be. Clear it rather than let it follow the new label.
+            out[i].speakerConf = nil
         }
         return out
     }
@@ -90,7 +165,7 @@ extension AudioRecorder {
     /// a space anyway, so its result is byte-identical before and after.
     /// Seconds between a turn and a window: 0 if they overlap, else the gap to
     /// the nearer edge. Used to attribute an uncovered tail to the nearest talker.
-    nonisolated static func timeDistance(from turn: DiarizationService.Turn,
+    nonisolated static func timeDistance(from turn: SpeakerTurn,
                                          to window: ClosedRange<Double>) -> Double {
         if turn.end < window.lowerBound { return window.lowerBound - turn.end }
         if turn.start > window.upperBound { return turn.start - window.upperBound }
@@ -112,6 +187,10 @@ extension AudioRecorder {
                     .joined(separator: " ")
                 if let e = row.end { last.end = max(last.end ?? e, e) }
                 last.overlapped = last.overlapped || row.overlapped
+                // The merged row now covers both chunks, so it can be no more
+                // trustworthy than the WORSE of them. `nil` (a model that reports
+                // nothing) is ignored rather than treated as zero.
+                last.asrConf = minConfidence(last.asrConf, row.asrConf)
                 out[out.count - 1] = last
             } else {
                 out.append(row)
@@ -147,10 +226,14 @@ extension AudioRecorder {
                                      start: w?.lowerBound, end: w?.upperBound,
                                      text: seg.text, confirmed: true, overlapped: overlapped)]
         }
+        // Neither branch above carries `asrConf`: a repaired or separation-debug
+        // row's text came from a SEPARATED track, so the chunk confidence would
+        // be describing audio those words did not come from.
         guard let window = seg.window else {
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: nil,
                                      speakerID: nil, start: nil, end: nil,
-                                     text: seg.text, confirmed: seg.confirmed)]
+                                     text: seg.text, confirmed: seg.confirmed,
+                                     asrConf: seg.asrConf)]
         }
         let ranges = speakerRanges(in: window)
         // The one switch on the display source (see `PositionSource.plan`):
@@ -162,7 +245,18 @@ extension AudioRecorder {
         // `ranges` itself is untouched in every mode, and the position ids the
         // fills carry never leave `filled` — liveTurns/overlapRegions/
         // speakerCount/SpeakerProfileStore stay pure pyannote throughout.
-        let plan = positionSource.plan(pyannoteRanges: ranges)
+        // Under the MOSS engine the position plan is forced to pure-pyannote —
+        // i.e. "show the ranges, run no gap-fill, relabel nothing". The name is
+        // now a misnomer for what `ranges` holds (they are MOSS spans), but the
+        // PLAN is what matters: the ATND layer exists to fill holes in pyannote's
+        // coverage and to lend pyannote its boundaries, and neither question is
+        // meaningful against turns that came from an ASR model rather than from a
+        // voice-embedding pass over the room. Mixing beam-derived spans into MOSS
+        // rows would also put position ids on rows this engine labels, which is
+        // exactly the id-space collision the ranges are kept disjoint to prevent.
+        // Logged once per session in `configureMoss`, not per rebuild.
+        let source = mossDiarizationActive ? PositionSource.pyannote : positionSource
+        let plan = source.plan(pyannoteRanges: ranges)
         // Off/silent ATND → fills is [] regardless of the source.
         let fills = plan.gapFillCoverage.map { positionGapFill(window: window, covered: $0) } ?? []
         var filled = (plan.displayRanges + fills).sorted { $0.start < $1.start }
@@ -184,7 +278,7 @@ extension AudioRecorder {
             if filled.count > 1 {
                 return Self.assignSentences(seg.text, window: window, ranges: filled,
                                        segID: seg.id.uuidString, regions: regions,
-                                       confirmed: false)
+                                       confirmed: false, asrConf: seg.asrConf)
             }
             func overlap(_ r: (start: Double, end: Double, id: Int, name: String)) -> Double {
                 max(0, min(r.end, window.upperBound) - max(r.start, window.lowerBound))
@@ -193,7 +287,7 @@ extension AudioRecorder {
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: best?.name,
                                      speakerID: best?.id, start: window.lowerBound,
                                      end: window.upperBound, text: seg.text,
-                                     confirmed: false)]
+                                     confirmed: false, asrConf: seg.asrConf)]
         }
 
         if filled.isEmpty {
@@ -205,13 +299,13 @@ extension AudioRecorder {
             // is simply that speaker; across speakers it is the last/next turn,
             // which is a better guess than "unknown" for a sub-second seam.
             // Only a recording with NO turns at all stays UNKNOWN.
-            let nearest = liveTurns.min { a, b in
+            let nearest = displayTurns.min { a, b in
                 Self.timeDistance(from: a, to: window) < Self.timeDistance(from: b, to: window)
             }
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: nearest?.name,
                                      speakerID: nearest?.id, start: window.lowerBound,
                                      end: window.upperBound, text: seg.text,
-                                     confirmed: true)]
+                                     confirmed: true, asrConf: seg.asrConf)]
         }
         // Word-exact path: when the aligner ran, each word goes to the turn that
         // covers it in time instead of to the turn its character offset guesses.
@@ -225,11 +319,13 @@ extension AudioRecorder {
                 let overlapped = regions.contains { max($0.start, p.start) < min($0.end, p.end) }
                 return SpeakerUtterance(id: "\(seg.id.uuidString)-\(i)", speaker: p.name,
                                         speakerID: p.id, start: p.start, end: p.end,
-                                        text: p.text, confirmed: true, overlapped: overlapped)
+                                        text: p.text, confirmed: true, overlapped: overlapped,
+                                        asrConf: seg.asrConf)
             }
         }
         return Self.assignSentences(seg.text, window: window, ranges: filled,
-                               segID: seg.id.uuidString, regions: regions)
+                               segID: seg.id.uuidString, regions: regions,
+                               asrConf: seg.asrConf)
     }
 
     /// Assign whole sentences to speakers. Each sentence is placed in time by its
@@ -245,7 +341,8 @@ extension AudioRecorder {
                                             ranges: [(start: Double, end: Double, id: Int, name: String)],
                                             segID: String,
                                             regions: [(start: Double, end: Double)],
-                                            confirmed: Bool = true) -> [SpeakerUtterance] {
+                                            confirmed: Bool = true,
+                                            asrConf: Double? = nil) -> [SpeakerUtterance] {
         let sentences = splitSentences(text)
         guard !sentences.isEmpty else { return [] }
         let totalChars = max(1, sentences.reduce(0) { $0 + $1.count })
@@ -287,9 +384,13 @@ extension AudioRecorder {
             // Flag only if this row's time genuinely sits over a simultaneous-
             // speech region (two different speakers active at once).
             let overlapped = regions.contains { max($0.start, p.start) < min($0.end, p.end) }
+            // Every row a chunk splits into carries that CHUNK's confidence: the
+            // model scored the chunk as a whole and reports nothing finer, so
+            // splitting the text does not split the evidence.
             return SpeakerUtterance(id: "\(segID)-\(i)", speaker: p.name, speakerID: p.id,
                                     start: p.start, end: p.end, text: p.text,
-                                    confirmed: confirmed, overlapped: overlapped)
+                                    confirmed: confirmed, overlapped: overlapped,
+                                    asrConf: asrConf)
         }
     }
 
@@ -334,17 +435,32 @@ extension AudioRecorder {
 
     /// Speaker turns overlapping a window, clipped to it and merged when the
     /// same speaker continues (small gaps bridged), sorted by start time.
-    /// The office view: always `liveTurns`, never the remote ones.
+    /// The office view: `displayTurns`, never the remote ones.
     func speakerRanges(in window: ClosedRange<Double>)
         -> [(start: Double, end: Double, id: Int, name: String)] {
-        Self.speakerRanges(in: window, turns: liveTurns)
+        Self.speakerRanges(in: window, turns: displayTurns)
+    }
+
+    /// Which turn collection the OFFICE display draws its labels from: `mossTurns`
+    /// under the MOSS engine, `liveTurns` under pyannote.
+    ///
+    /// A read-only switch on one flag, and only the display path takes it. The
+    /// collections stay separate everywhere else on purpose — `overlapRegions`,
+    /// `applyFinalSpeakers`, `speakerCount`, the profile stores and every
+    /// `officeTurnsOnly` assert keep reading `liveTurns` directly, so under the
+    /// MOSS engine they see an EMPTY pyannote layer rather than foreign ids. That
+    /// is why no assert had to be relaxed for this engine, and why overlap tagging
+    /// simply produces nothing: MOSS makes no overlap claim, so the transcript
+    /// shows none.
+    var displayTurns: [SpeakerTurn] {
+        mossDiarizationActive ? mossTurns : liveTurns
     }
 
     /// The same clipping/merging, parameterised by the turn set — so the Remote
     /// stream can reuse it against `remoteLiveTurns` without any chance of the
     /// two identity spaces meeting (each call sees exactly one of them).
     nonisolated static func speakerRanges(in window: ClosedRange<Double>,
-                                          turns: [DiarizationService.Turn])
+                                          turns: [SpeakerTurn])
         -> [(start: Double, end: Double, id: Int, name: String)] {
         let clipped = turns.compactMap { t -> (start: Double, end: Double, id: Int, name: String)? in
             let s = max(t.start, window.lowerBound)
@@ -383,7 +499,7 @@ extension AudioRecorder {
     /// are appended when their transcription lands, which is chronological today
     /// (one sidecar, one queue) but is not something the merge should depend on.
     nonisolated static func remoteRows(_ segments: [RemoteSegment],
-                                       turns: [DiarizationService.Turn] = [])
+                                       turns: [SpeakerTurn] = [])
         -> [SpeakerUtterance] {
         segments.sorted { $0.window.lowerBound < $1.window.lowerBound }
             .flatMap { seg -> [SpeakerUtterance] in
@@ -396,10 +512,11 @@ extension AudioRecorder {
                                              start: seg.window.lowerBound,
                                              end: seg.window.upperBound,
                                              text: text, confirmed: true, overlapped: false,
-                                             isRemote: true)]
+                                             isRemote: true, asrConf: seg.conf)]
                 }
                 return assignSentences(text, window: seg.window, ranges: ranges,
-                                       segID: seg.id.uuidString, regions: [])
+                                       segID: seg.id.uuidString, regions: [],
+                                       asrConf: seg.conf)
                     .map { row in
                         var row = row
                         row.speaker = row.speaker.map(remoteDisplayName)

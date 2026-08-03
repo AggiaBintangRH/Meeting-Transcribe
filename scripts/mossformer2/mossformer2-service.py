@@ -4,7 +4,7 @@ MossFormer2 overlap-separation sidecar for MeetingTranscriber (persistent).
 
 Overlap attempt #3 (owner-requested 2026-07-14). Uses the STANDALONE
 `alibabasglab/MossFormer2` GitHub repo's vendored PyTorch code
-(scripts/vendor/mossformer2/) with the `mossformer2-librimix-2spk` checkpoint
+(scripts/mossformer2/vendor/mossformer2/) with the `mossformer2-librimix-2spk` checkpoint
 (8 kHz, 2-speaker LibriMix). This is NOT the earlier-removed `clearvoice` /
 `MossFormer2_SS_16K` attempt — different repo, different weights, different code.
 
@@ -34,8 +34,12 @@ import sys
 import time
 import traceback
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(BASE, "scripts", "vendor", "mossformer2"))
+# This file lives at scripts/mossformer2/ (one folder per service, owner
+# 2026-07-29), so the project root — which owns models/ — is THREE levels up,
+# not two. The vendored PyTorch code sits NEXT TO this service, not in a shared
+# scripts/vendor: each service owns its own vendored third-party code.
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(BASE, "scripts", "mossformer2", "vendor", "mossformer2"))
 
 MODEL_DIR = os.path.join(BASE, "models", "mossformer2", "mossformer2-librimix-2spk")
 OUT_SR = 16_000          # tracks written at 16 kHz so downstream ASR gets a normal rate

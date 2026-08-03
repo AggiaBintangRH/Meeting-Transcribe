@@ -22,25 +22,163 @@ PBS_DIR="$CACHE/python-runtime"
 PBS_DICOW_DIR="$CACHE/python-runtime-dicow"
 APP_NAME="Meeting Transcriber"
 
-# Fail the build if any bundled native lib loads from Homebrew/local paths —
-# those do not exist on a client Mac. Used once per bundled interpreter.
+# Fail the build if a bundled native lib cannot actually load on a client Mac.
+# Used once per bundled interpreter.
+#
+# TWO kinds of unportable reference, and checking only the first is how a broken
+# app shipped:
+#   1. LOAD COMMANDS with an ABSOLUTE Homebrew/local path (`otool -L`).
+#   2. An `@rpath/...` dependency that is NOT in the bundle. `otool -L` prints
+#      `@rpath/libavcodec.62.dylib` and nothing about Homebrew — the absolute path
+#      is hidden in an `LC_RPATH` search path — so a lib that is completely
+#      unloadable off this Mac looked clean to the old check. That is exactly
+#      torchcodec: 15 libs, each with one `LC_RPATH` of
+#      `/opt/homebrew/opt/ffmpeg/lib`, and ZERO `libav*` in the bundle. pyannote
+#      4.x routed path-based decoding through it, so diarization died at the first
+#      chunk on any Mac without Homebrew ffmpeg while this guard reported OK.
+#
+# Check 2 tests "is the dependency present?", NOT "does an LC_RPATH mention
+# Homebrew?" — deliberately, because the latter has a real false positive:
+# `scipy/linalg/_fblas...so` carries a vestigial `gcc@13` LC_RPATH from its wheel
+# build while having no `@rpath` dependency at all (it links Accelerate directly,
+# and scipy ships its fortran runtime in `scipy/.dylibs/`). Measured over the
+# bundle's 364 libs, check 2 flags torchcodec and nothing else.
+#
+# A lib's own LC_ID_DYLIB (`otool -D`) is skipped: maturin-built extensions name
+# themselves `@rpath/<module>.abi3.so` and libsndfile's file name differs from its
+# install name, so without this tokenizers, safetensors, cryptography and
+# soundfile all report a missing dependency on themselves.
+#
+# No `head -25` either. That sampled whichever libs `find` happened to return
+# first, which is a coin flip, not a check — torchcodec's were not in the sample.
 check_relocatable() {
-  local root="$1" label="$2" site spot_libs bad=0
+  local root="$1" label="$2" site bundled bad=0 rpaths self dep base missing
   site="$(find "$root/lib" -maxdepth 2 -type d -name site-packages | head -1)"
-  spot_libs="$(find "$site" \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null | head -25 || true)"
+  # Every lib file name present anywhere under this interpreter, for check 2.
+  bundled="$(find "$root" \( -name '*.so' -o -name '*.dylib' \) -exec basename {} \; 2>/dev/null | sort -u)"
   while IFS= read -r lib; do
     [[ -z "$lib" ]] && continue
+
     if otool -L "$lib" 2>/dev/null | grep -qE '/opt/homebrew|/usr/local'; then
-      echo "    NON-RELOCATABLE: $lib" >&2
+      echo "    NON-RELOCATABLE (absolute load command): $lib" >&2
       otool -L "$lib" | grep -E '/opt/homebrew|/usr/local' >&2
       bad=1
     fi
-  done <<< "$spot_libs"
+
+    self="$(otool -D "$lib" 2>/dev/null | tail -1 | tr -d ' \t')"
+    missing=""
+    for dep in $(otool -L "$lib" 2>/dev/null | grep -o '@rpath/[^ ]*' | sort -u); do
+      [[ "$dep" == "$self" ]] && continue
+      base="$(basename "$dep")"
+      grep -qx "$base" <<< "$bundled" || missing="$missing $base"
+    done
+    if [[ -n "$missing" ]]; then
+      echo "    UNRESOLVABLE @rpath DEPENDENCY: $lib" >&2
+      echo "      not in the bundle:$missing" >&2
+      rpaths="$(otool -l "$lib" 2>/dev/null | grep -A2 LC_RPATH | grep -E '^ *path ' || true)"
+      [[ -n "$rpaths" ]] && echo "      LC_RPATHs it would search:" >&2 && echo "$rpaths" >&2
+      bad=1
+    fi
+  done <<< "$(find "$site" \( -name '*.so' -o -name '*.dylib' \) 2>/dev/null || true)"
+
   if [[ "$bad" == "1" ]]; then
-    echo "ERROR: $label libs reference Homebrew/local paths — not portable." >&2
+    echo "ERROR: $label libs cannot load on a Mac without Homebrew — not portable." >&2
+    echo "       Fix by bundling the dependency and rewriting the path, OR by not" >&2
+    echo "       using the code path that needs it (what the sidecars do for ffmpeg:" >&2
+    echo "       they decode with soundfile and never hand a path to torchcodec)." >&2
     exit 1
   fi
-  echo "    Relocatability OK ($label — no /opt/homebrew or /usr/local load commands)."
+  echo "    Relocatability OK ($label — no absolute Homebrew/local load commands, no unresolvable @rpath deps)."
+}
+
+# torchcodec ships 15 libs that need Homebrew's ffmpeg, so in the bundle they are
+# dead weight that `check_relocatable` (correctly) refuses. It is PRUNED rather
+# than exempted by name — exempting the single offender the guard was told to
+# ignore is not a check. Removing it is safe only because nothing reaches it: every
+# sidecar decodes audio itself with soundfile, and pyannote imports torchcodec
+# inside a try/except, degrading to `TORCHCODEC_AVAILABLE = False` — a path we
+# never take because we always pass `{"waveform": ..., "sample_rate": ...}`.
+# Verified by shadowing torchcodec with an unimportable stub: torch, torchaudio and
+# pyannote all still import, and diarization + embedding both still run.
+#
+# The gate below is what keeps that invariant true. If a sidecar ever calls
+# `torchaudio.load` (a torchcodec wrapper since TorchAudio 2.9), `torchcodec`, or
+# `AudioDecoder` directly, the build fails HERE rather than at the first chunk of
+# a client meeting.
+#
+# It reads the sidecars with Python's TOKENIZER, not grep. Comments and
+# docstrings are stripped first, because the files that carry this fix also
+# explain it at length — a plain `grep torchcodec` matches its own documentation
+# and fails the build for describing the bug it prevents. (A grep is also brittle
+# here for a dumber reason: this repo's path contains a space.)
+assert_no_torchcodec_use() {
+  "$ROOT/.venv/bin/python3" - "$ROOT/scripts" <<'PY' || exit 1
+import io, pathlib, re, sys, tokenize
+
+BANNED = re.compile(r"torchaudio\.(load|info)\b|\btorchcodec\b|\bAudioDecoder\b")
+
+# Token types whose text is LITERAL CONTENT, not code. STRING alone is not enough:
+# since Python 3.12 (PEP 701) an f-string is tokenized as FSTRING_START /
+# FSTRING_MIDDLE / FSTRING_END, and the literal parts arrive as FSTRING_MIDDLE —
+# so `f"...{n} AudioDecoder"` sailed past a STRING-only filter and failed the build
+# on a log message. Named via getattr because these types only exist on 3.12+.
+LITERAL_TOKENS = {tokenize.COMMENT, tokenize.STRING, tokenize.NL, tokenize.NEWLINE,
+                  tokenize.INDENT, tokenize.DEDENT}
+for _name in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
+    _type = getattr(tokenize, _name, None)
+    if _type is not None:
+        LITERAL_TOKENS.add(_type)
+
+# sidecar-tests.py is the HARNESS, not a sidecar. It legitimately names these
+# symbols — it contains the AST check that pins this very invariant — so scanning
+# it means the guard fails the build for guarding.
+SKIP_FILES = {"sidecar-tests.py"}
+
+hits = []
+for path in sorted(pathlib.Path(sys.argv[1]).rglob("*.py")):
+    if "vendor" in path.parts or path.name in SKIP_FILES:
+        continue
+    src = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        continue
+    # `torchaudio.load` is THREE tokens (NAME "." NAME), so no single token ever
+    # matches the pattern — testing tokens one at a time silently passes
+    # everything. Slide a small window of concatenated CODE tokens instead;
+    # STRING (docstrings) and COMMENT are dropped, which is the whole point.
+    window = []   # [(row, text), ...] most recent last
+    for tok in toks:
+        if tok.type in LITERAL_TOKENS:
+            continue
+        window.append((tok.start[0], tok.string))
+        window = window[-6:]
+        if BANNED.search("".join(t for _, t in window)):
+            # The NEWEST token is the one that completed the match, so its row is
+            # the offending line. window[0] is up to 5 tokens earlier and pointed
+            # at the enclosing `def` instead of the call.
+            row = window[-1][0]
+            line = src.splitlines()[row - 1] if row <= len(src.splitlines()) else ""
+            hits.append(f"{path}:{row}: {line.strip()[:90]}")
+            break
+if hits:
+    print("ERROR: a sidecar reaches path-based audio decoding via torchcodec.", file=sys.stderr)
+    print("       torchcodec needs Homebrew ffmpeg, which no client Mac has, and", file=sys.stderr)
+    print("       is pruned from the bundle. Decode with soundfile instead.", file=sys.stderr)
+    for h in hits:
+        print("  " + h, file=sys.stderr)
+    sys.exit(1)
+print("    Audio-decode gate OK (no sidecar uses torchaudio.load/torchcodec in code).")
+PY
+}
+
+prune_torchcodec() {
+  local root="$1" label="$2" site n
+  site="$(find "$root/lib" -maxdepth 2 -type d -name site-packages | head -1)"
+  [[ -d "$site/torchcodec" ]] || { echo "    torchcodec absent ($label) — nothing to prune."; return; }
+  n="$(find "$site/torchcodec" \( -name '*.so' -o -name '*.dylib' \) | wc -l | tr -d ' ')"
+  rm -rf "$site/torchcodec" "$site"/torchcodec-*.dist-info
+  echo "    Pruned torchcodec from $label ($n unloadable native libs; needs Homebrew ffmpeg)."
 }
 
 echo "==> Project root: $ROOT"
@@ -53,7 +191,24 @@ echo ""
 echo "==> [B1] Building + signing base bundle via package-app.sh..."
 "$ROOT/package-app.sh"
 
-rm -rf "$ROOT/dist"
+# Wipe dist/ by RENAMING it first, then deleting the renamed copy.
+#
+# A plain `rm -rf "$ROOT/dist"` is racy and really does fail: Finder (or Spotlight)
+# recreates `.DS_Store` inside the directory while rm is emptying it, so the final
+# rmdir gets ENOTEMPTY — `rm: .../dist: Directory not empty` — and under
+# `set -e` that aborts the whole build after B1 has already done its work.
+# Observed exactly that, with `.DS_Store` as the sole survivor.
+#
+# `mv` is atomic, so dist/ is guaranteed gone before we recreate it, and any
+# `.DS_Store` written afterwards lands in the renamed directory instead. Deleting
+# that leftover is then best-effort on purpose: nothing references it, so a second
+# race there must not fail the build.
+if [[ -d "$ROOT/dist" ]]; then
+  STALE_DIST="$ROOT/.dist-stale-$$"
+  mv "$ROOT/dist" "$STALE_DIST"
+  rm -rf "$STALE_DIST" 2>/dev/null || rm -rf "$STALE_DIST" 2>/dev/null || \
+    echo "    (note: could not fully remove $STALE_DIST — safe to delete by hand)"
+fi
 mkdir -p "$ROOT/dist"
 cp -Rc "$ROOT/$APP_NAME.app" "$ROOT/dist/"
 
@@ -154,8 +309,39 @@ cp -Rc "$PBS_DIR" "$RES/python"
 echo "    Import gate..."
 "$RES/python/bin/python3" -c "import mlx.core as mx; print(mx.add(mx.array(1),mx.array(1))); import torch, pyannote.audio, mlx_whisper, silero_vad; print('IMPORTS OK')"
 
-# --- relocatability spot-check ---------------------------------------------
-echo "    Relocatability spot-check (otool -L)..."
+# --- MOSS vendored-helper gate (mandatory) ---------------------------------
+# The MOSS sidecars import their OWN scripts/<service>/vendor/moss_transcribe_diarize,
+# NOT the pip install in .venv: the freeze strip above deletes `git+` lines, so the
+# only way the helper reaches the bundle is by riding scripts/ in [B3]. That makes
+# each vendor directory a silent single point of failure — delete one and the build
+# still succeeds, and MOSS only fails on the client's machine mid-meeting. This
+# is the DiCoW lesson (2026-07-27) applied one step earlier: fail HERE, loudly.
+# Checked against the source tree because [B3] has not copied scripts/ yet, and
+# through the BUNDLED interpreter because that is the one that will run it.
+#
+# TWO services since 2026-07-31 (one-service-per-role): `moss-asr` is the
+# chunked-ASR role, `moss-diar` the diarization role, and they can run AS TWO
+# PROCESSES AT ONCE. Each is listed here so a missing tree fails the build no
+# matter which role it belongs to — this ONE list is the only place the set of
+# MOSS services is named.
+echo "    MOSS vendored-helper gate..."
+for MOSS_SVC in moss-asr moss-diar; do
+  if ! PYTHONPATH="$ROOT/scripts/$MOSS_SVC/vendor" "$RES/python/bin/python3" \
+       -c "from moss_transcribe_diarize import build_transcription_messages, generate_transcription, parse_transcript; print('MOSS VENDOR OK ($MOSS_SVC)')"; then
+    echo "ERROR: scripts/$MOSS_SVC/vendor/moss_transcribe_diarize does not import in the bundled runtime." >&2
+    echo "       MOSS would be missing from the .app. Run ./download-best-models.sh" >&2
+    echo "       (section 2c) and re-vendor the helper, then rebuild." >&2
+    exit 1
+  fi
+done
+
+# --- portability checks -----------------------------------------------------
+# Prune BEFORE checking: torchcodec's libs are genuinely unloadable on a client
+# Mac, so leaving them in and exempting them would mean the guard only ever sees
+# the offender it was told to ignore.
+echo "    Portability checks (load commands + @rpath resolution)..."
+assert_no_torchcodec_use
+prune_torchcodec "$RES/python" "main runtime"
 check_relocatable "$RES/python" "main runtime"
 
 # ===========================================================================
@@ -222,7 +408,8 @@ cp -Rc "$PBS_DICOW_DIR" "$RES/.venv-dicow"
 echo "    Import gate (DiCoW)..."
 "$RES/.venv-dicow/bin/python3" -c "import transformers, torch, pandas; assert transformers.__version__.startswith('4.55.'), 'expected transformers 4.55.x, got ' + transformers.__version__; print('DICOW IMPORTS OK', transformers.__version__)"
 
-echo "    Relocatability spot-check (otool -L)..."
+echo "    Portability checks (DiCoW)..."
+prune_torchcodec "$RES/.venv-dicow" "DiCoW runtime"
 check_relocatable "$RES/.venv-dicow" "DiCoW runtime"
 
 # ===========================================================================
@@ -232,7 +419,10 @@ echo ""
 echo "==> [B3] Bundling scripts + models..."
 rm -rf "$RES/scripts"
 mkdir -p "$RES/scripts"
-# Copy scripts/, excluding caches, the icon tool, and any *-test.py; keep vendor/.
+# Copy scripts/, excluding caches, the icon tool, and any *-test.py. One folder
+# per service (owner, 2026-07-29) — the find below already recreates directories,
+# so each service's own vendor/ rides along with no change here. The -name tests
+# match BASENAMES, so scripts/tools/make-icon-variants.py is still pruned.
 ( cd "$ROOT/scripts" && \
   find . \( -name '__pycache__' -o -name 'make-icon-variants.py' -o -name '*-test.py' \) -prune -o -type f -print \
   | while IFS= read -r f; do
@@ -240,7 +430,14 @@ mkdir -p "$RES/scripts"
       mkdir -p "$(dirname "$dest")"
       cp -c "$f" "$dest"
     done )
-echo "    scripts/ copied (vendor/mossformer2 preserved: $([[ -d "$RES/scripts/vendor/mossformer2" ]] && echo yes || echo NO))"
+echo "    scripts/ copied (mossformer2/vendor/mossformer2 preserved: $([[ -d "$RES/scripts/mossformer2/vendor/mossformer2" ]] && echo yes || echo NO))"
+# Reported separately because it is the ONLY way the MOSS helper reaches the
+# bundle — the freeze strip in [B2] deletes its `git+` line, so there is no pip
+# fallback if this copy is ever lost. The [B2] gate already refuses to build
+# without it; these lines are what make their presence visible in the build log.
+# One per MOSS service (two since 2026-07-31) — each owns its own vendor tree.
+echo "                     (moss-asr/vendor/moss_transcribe_diarize preserved: $([[ -f "$RES/scripts/moss-asr/vendor/moss_transcribe_diarize/inference_utils.py" ]] && echo yes || echo NO))"
+echo "                     (moss-diar/vendor/moss_transcribe_diarize preserved: $([[ -f "$RES/scripts/moss-diar/vendor/moss_transcribe_diarize/inference_utils.py" ]] && echo yes || echo NO))"
 
 if [[ "${MT_SKIP_MODELS:-0}" == "1" ]]; then
   echo "    MT_SKIP_MODELS=1 — skipping 16GB models copy."

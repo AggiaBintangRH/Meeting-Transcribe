@@ -17,8 +17,8 @@ import XCTest
 @MainActor
 final class SpeakerIDSpaceGuardTests: XCTestCase {
 
-    private func turn(_ id: Int) -> DiarizationService.Turn {
-        DiarizationService.Turn(start: 0, end: 1, id: id, name: "S\(id)")
+    private func turn(_ id: Int) -> SpeakerTurn {
+        SpeakerTurn(start: 0, end: 1, id: id, name: "S\(id)")
     }
 
     private func remoteID(_ local: Int) -> Int { AudioRecorder.remoteIDBase + local }

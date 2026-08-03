@@ -16,7 +16,7 @@ AUDIO="$1"
 OUT_DIR="$(mktemp -d)/mossformer2-out"
 
 echo "separating (MossFormer2 librimix-2spk, 8kHz) ..."
-.venv/bin/python3 scripts/mossformer2-test.py "$AUDIO" "$OUT_DIR"
+.venv/bin/python3 scripts/mossformer2/mossformer2-test.py "$AUDIO" "$OUT_DIR"
 
 echo ""
 echo "transcribing each separated track (Whisper large-v3 MLX) ..."

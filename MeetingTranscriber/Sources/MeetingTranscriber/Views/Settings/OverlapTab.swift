@@ -19,6 +19,8 @@ struct OverlapTab: View {
     @AppStorage("overlap.dicow.windowSec")          private var dicowWindowSec = 10
     @AppStorage("overlap.dicow.showDebugRows")      private var dicowShowDebugRows = true
 
+    @AppStorage("diarization.engine") private var diarEngine = "pyannote"
+
     private var dicowSelected: Bool { engine == ModelCatalog.overlapDicow.id }
 
     var body: some View {
@@ -26,6 +28,18 @@ struct OverlapTab: View {
             Text("Engine used to recover speech when two people talk at once.")
                 .font(.system(size: 12))
                 .foregroundColor(Theme.textDim)
+
+            // Both engines locate their windows from pyannote turns, so neither
+            // has anything to work on under the MOSS diarization engine. Said
+            // here because the setting that disables this feature lives on a
+            // different tab, and the engine is not even loaded (ModelLoader
+            // skips the step) — the toggle below would otherwise look active.
+            if diarEngine == ModelLoader.mossEngineID {
+                Text("Not active: overlap repair finds its windows in pyannote's speaker turns, and the diarization engine is currently set to MOSS. Switch it back in Models → Diarization to use this.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             ForEach(ModelCatalog.overlapEngines) { m in
                 Button(action: {

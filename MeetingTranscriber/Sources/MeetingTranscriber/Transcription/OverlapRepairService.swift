@@ -1,7 +1,7 @@
 import Foundation
 
 /// Client for the persistent MossFormer2 overlap-separation sidecar
-/// (scripts/mossformer2-service.py). Overlap attempt #3 (2026-07-14).
+/// (scripts/mossformer2/mossformer2-service.py). Overlap attempt #3 (2026-07-14).
 ///
 /// The model (standalone `alibabasglab/MossFormer2` code + the
 /// `mossformer2-librimix-2spk` 8 kHz checkpoint — NOT the earlier-removed
@@ -25,7 +25,7 @@ final class OverlapRepairService: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .scriptMissing:
-                return "scripts/mossformer2-service.py not found in the project folder."
+                return "scripts/mossformer2/mossformer2-service.py not found in the project folder."
             case .launchFailed(let reason):
                 return "Could not launch overlap-repair sidecar: \(reason)"
             case .startupFailed(let reason):
@@ -53,7 +53,7 @@ final class OverlapRepairService: @unchecked Sendable {
     }
 
     init() throws {
-        let script = PythonRuntime.scriptsDir.appendingPathComponent("mossformer2-service.py")
+        let script = PythonRuntime.scriptsDir.appendingPathComponent("mossformer2/mossformer2-service.py")
         guard FileManager.default.fileExists(atPath: script.path) else {
             throw ServiceError.scriptMissing
         }
@@ -63,7 +63,10 @@ final class OverlapRepairService: @unchecked Sendable {
         process.arguments = command.arguments
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = PythonRuntime.logHandle(name: "overlap-repair-sidecar")
+        // logs/mossformer2.log — one service, one folder, one log, all named for
+        // the model (2026-07-31). NOT logs/overlap-repair-decisions.log, which is
+        // Swift's own decision log and is SHARED with the DiCoW engine.
+        process.standardError = PythonRuntime.logHandle(name: "mossformer2")
 
         process.environment = PythonRuntime.sidecarEnvironment()
 
@@ -117,7 +120,7 @@ final class OverlapRepairService: @unchecked Sendable {
             guard let self else { return }
             let cont = self.withStateLock { self.continuations.removeValue(forKey: id) }
             cont?.resume(throwing: ServiceError.requestFailed(
-                "overlap separation timed out (180s) — see logs/overlap-repair-sidecar.log"))
+                "overlap separation timed out (180s) — see logs/mossformer2.log"))
         }
 
         return try await withCheckedThrowingContinuation { cont in

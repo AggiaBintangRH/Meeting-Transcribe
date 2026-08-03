@@ -188,13 +188,19 @@ struct DualStreamVoxtralWarning: View {
     }
 }
 
-/// Language dropdown fed by Languages.all.
+/// Language dropdown listing exactly one model's languages.
+///
+/// There is no default list any more: the caller states which model's roster to
+/// show (`Languages.pickerEntries(forModel:)` for a chunked model,
+/// `Languages.realtime` for Nemotron). One shared list was wrong in both
+/// directions at once — see the `Languages` doc comment.
 struct LanguagePicker: View {
     @Binding var selection: String
+    let entries: [Languages.Entry]
 
     var body: some View {
         Picker("", selection: $selection) {
-            ForEach(Languages.all, id: \.code) { lang in
+            ForEach(entries, id: \.code) { lang in
                 Text(lang.name).tag(lang.code)
             }
         }

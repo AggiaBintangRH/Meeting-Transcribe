@@ -9,13 +9,15 @@ raw model output only, so the separation quality itself can be judged
 (then each track gets transcribed by Whisper in a second pass, see
 mossformer2-test.sh, to check whether ASR text comes out clean per speaker).
 
-Usage: .venv-mossformer2/bin/python3 scripts/mossformer2-test.py <audio.wav> <out_dir>
+Usage: .venv-mossformer2/bin/python3 scripts/mossformer2/mossformer2-test.py <audio.wav> <out_dir>
 """
 import os
 import sys
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(BASE, "scripts", "vendor", "mossformer2"))
+# scripts/mossformer2/ — one folder per service (owner, 2026-07-29): the project
+# root is THREE levels up, and the vendored PyTorch code sits next to us.
+BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(BASE, "scripts", "mossformer2", "vendor", "mossformer2"))
 
 MODEL_DIR = os.path.join(BASE, "models", "mossformer2", "mossformer2-librimix-2spk")
 

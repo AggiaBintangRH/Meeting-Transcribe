@@ -91,6 +91,42 @@ extension AudioRecorder {
              + "or turn the Remote channel off in Settings → Microphone."
     }
 
+    /// Startup refusal for the one MOSS configuration that cannot keep up:
+    /// Voxtral as the chunked ASR while MOSS is the diarization engine.
+    ///
+    /// The arithmetic, all measured on this M4 per 30 s chunk: Voxtral ~27 s,
+    /// MOSS ~6.4 s on MPS. They are two separate processes but contend for the
+    /// same GPU and are driven from the same chunk boundary, so the work is
+    /// largely serialized — ~33 s against a 30 s budget, i.e. over 100 % duty
+    /// before the meeting even starts, and every chunk after that arrives while
+    /// the previous one is still running. Every other chunked model leaves room
+    /// (Qwen3 4.3 + 6.4, Whisper 4.2 + 6.4, Granite 5.6 + 6.4).
+    ///
+    /// MOSS in BOTH roles is never refused, however slow the model: that is one
+    /// process doing one forward pass (`ModelLoader.needsSecondMossProcess`), so
+    /// there is no second cost to add. `remoteChannel` is taken for the same
+    /// reason `dualStreamRefusalMessage` takes it — a Remote stream doubles the
+    /// MOSS work — but 2 × 6.4 = 12.8 s of 30 s is 43 % duty, which is fine, so
+    /// it only sharpens the message rather than causing a refusal of its own.
+    ///
+    /// Refusal rather than a silent model swap, for exactly the reason the
+    /// dual-stream one is: the owner picks chunked models deliberately, on
+    /// measured WER. Nil = start normally.
+    nonisolated static func mossRefusalMessage(chunkedModelID: String,
+                                               diarizationEngine: String,
+                                               remoteChannel: Int?) -> String? {
+        guard diarizationEngine == ModelLoader.mossEngineID else { return nil }
+        guard chunkedModelID == "voxtral" else { return nil }
+        let remoteNote = remoteChannel != nil
+            ? " The Remote stream doubles the MOSS work on top of that." : ""
+        return "Voxtral cannot run alongside the MOSS diarization engine. Voxtral needs about "
+             + "27 s per 30 s chunk and MOSS about 6.4 s, and they contend for the same GPU from "
+             + "the same chunk boundary — over 100 % of the 30 s budget, so every chunk would "
+             + "arrive before the previous one finished.\(remoteNote) Pick another chunked model "
+             + "in Settings → Models → Chunked (Qwen3 4.3 s, Whisper 4.2 s, Granite 5.6 s), or "
+             + "switch the diarization engine back to pyannote in Settings → Models → Diarization."
+    }
+
     /// Hand the remote audio accumulated since the last boundary to the chunked
     /// sidecar's file-transcribe path, unless the silence gate rejects it.
     /// Always clears `remoteChunkAudio` — a skipped chunk's audio is dropped, not
@@ -123,13 +159,17 @@ extension AudioRecorder {
                 return
             }
             do {
-                let text = try await chunked.transcribeFile(path: url.path)
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let result = try await chunked.transcribeFile(path: url.path)
+                let trimmed = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmed.isEmpty {
                     self.dualStreamLog("remote [\(self.fmt(window.lowerBound))-"
                                        + "\(self.fmt(window.upperBound))] empty transcript")
                 } else {
-                    self.remoteSegments.append(RemoteSegment(text: trimmed, window: window))
+                    // Remote rows carry the same ASR confidence office rows do:
+                    // it is the SAME model over unmixed audio of one real stream,
+                    // so the number means exactly what it means for the room.
+                    self.remoteSegments.append(RemoteSegment(text: trimmed, window: window,
+                                                             conf: result.conf))
                     self.rebuildDisplayRows()
                     self.dualStreamLog("remote [\(self.fmt(window.lowerBound))-"
                                        + "\(self.fmt(window.upperBound))] \(trimmed)")
@@ -172,10 +212,13 @@ extension AudioRecorder {
     /// already has the sidecar client's own 120 s timeout; this is the backstop
     /// for anything that never resolves at all, on the same pattern as
     /// `chunkWatchdog` / `finalDiarWatchdog`.
-    func startRemoteStopWatchdog() {
+    /// `seconds` is scaled up by `stop()` when a full re-transcription runs —
+    /// Remote's windows are re-run inside that pass, which takes minutes, so the
+    /// fixed 180 s would fire while the pass was still working.
+    func startRemoteStopWatchdog(seconds: Double = 180) {
         remoteStopWatchdog?.cancel()
         remoteStopWatchdog = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(180))
+            try? await Task.sleep(for: .seconds(seconds))
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, !self.remoteLastChunkDone else { return }

@@ -11,7 +11,7 @@ extension AudioRecorder {
     /// boundary to the sidecar as a `remote` job. Mirrors `diarizeLiveChunk`,
     /// with no position/ATND involvement of any kind.
     func diarizeRemoteLiveChunk(windowStart: Double) {
-        guard remoteStreamActive, let service = modelLoader.diarization else { return }
+        guard remoteStreamActive, let service = modelLoader.pyannote else { return }
         let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
         guard liveOn else {
             // Exactly `diarizeLiveChunk`'s rule, and for the same reason: with live
@@ -35,7 +35,7 @@ extension AudioRecorder {
     /// `dispatchDiarChunk` — live calls pass no failure handler (silent, as
     /// before); the stop-time tail passes one so the remote gate still settles.
     func dispatchRemoteDiarChunk(samples: [Float], windowStart: Double,
-                                         service: DiarizationService,
+                                         service: PyannoteService,
                                          onDispatchFailure: (() -> Void)? = nil) {
         let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
         Task.detached(priority: .utility) { [weak self] in
@@ -105,10 +105,10 @@ extension AudioRecorder {
         let mode = Self.remoteStopMode(finalPass: finalOn,
                                        continueOnStop: continueOnStop,
                                        remoteStreamActive: remoteStreamActive,
-                                       hasDiarizationService: modelLoader.diarization != nil,
+                                       hasDiarizationService: modelLoader.pyannote != nil,
                                        hasRemoteRecording: remoteRecordingURL != nil,
                                        tailSamples: remoteDiarAudio.count)
-        guard let service = modelLoader.diarization, mode != .none else {
+        guard let service = modelLoader.pyannote, mode != .none else {
             // Nothing dispatched → the gate was never taken (`remoteFinalDiarDone`
             // is still true) and no overlay row is added. Drop any pending tail
             // audio so it cannot outlive the session.
@@ -128,7 +128,7 @@ extension AudioRecorder {
     /// the last remote live boundary, as a `chunk` job on the remote stream, so
     /// every label the live passes assigned survives Stop untouched. Mirrors
     /// `diarizeTailChunk`, including its window-start reasoning.
-    func startRemoteTailDiarization(service: DiarizationService) {
+    func startRemoteTailDiarization(service: PyannoteService) {
         let samples = remoteDiarAudio
         remoteDiarAudio = []
         // Same rule as the office tail: with live labels on, the pending audio
@@ -154,7 +154,7 @@ extension AudioRecorder {
 
     /// `continueOnStop == false`: one batch pass over the whole Remote WAV — the
     /// remote twin of `startDiarization`, and phase 4's original behaviour.
-    func startRemoteFullDiarization(service: DiarizationService) {
+    func startRemoteFullDiarization(service: PyannoteService) {
         guard let recording = remoteRecordingURL else {
             // `remoteStopMode` already proved this non-nil; belt-and-braces so the
             // gate can never be left open by a future edit.
@@ -189,7 +189,7 @@ extension AudioRecorder {
     /// The remote final result replaces the running remote set, exactly as
     /// `applyFinalSpeakers` does for Office — but into `remoteLiveTurns`, so the
     /// two spaces never share a collection.
-    func applyRemoteFinalSpeakers(_ turns: [DiarizationService.Turn]) {
+    func applyRemoteFinalSpeakers(_ turns: [SpeakerTurn]) {
         let turns = Self.remoteTurnsOnly(turns, "applyRemoteFinalSpeakers")
         remoteSpeakerCount = Set(turns.map(\.id)).count
         remoteLiveTurns = turns

@@ -10,13 +10,13 @@ per word. It never sees the ASR, so any of the four chunked models can supply
 the text — that is exactly what this script checks by letting you pick.
 
     # transcribe a 30s slice with Qwen3-ASR, then align it
-    scripts/align-test.py --audio recordings/foo.wav --start 0 --end 30
+    scripts/tools/align-test.py --audio recordings/foo.wav --start 0 --end 30
 
     # align text you already have (no ASR run at all)
-    scripts/align-test.py --audio recordings/foo.wav --text "hello there"
+    scripts/tools/align-test.py --audio recordings/foo.wav --text "hello there"
 
     # same slice through a different ASR, to compare alignment fidelity
-    scripts/align-test.py --audio recordings/foo.wav --end 30 --asr whisper
+    scripts/tools/align-test.py --audio recordings/foo.wav --end 30 --asr whisper
 
 Not part of the app; nothing imports it.
 """
@@ -28,8 +28,10 @@ import sys
 import time
 
 # Pin the model cache to the project's own models/ dir before importing
-# anything that reads HF_HOME, exactly like the sidecars do.
-PROJECT = pathlib.Path(__file__).resolve().parent.parent
+# anything that reads HF_HOME, exactly like the sidecars do. This file lives at
+# scripts/tools/, so the project root is THREE levels up (owner, 2026-07-29:
+# one folder per service).
+PROJECT = pathlib.Path(__file__).resolve().parent.parent.parent
 os.environ.setdefault("HF_HOME", str(PROJECT / "models"))
 
 SR = 16000
@@ -45,9 +47,13 @@ ALIGNER_REPO = "mlx-community/Qwen3-ForcedAligner-0.6B-bf16"
 
 
 def transcribe(audio, asr: str, repo: str) -> str:
-    """Run one chunked-ASR model over `audio`, mirroring chunked-asr-service.py's
-    runtime dispatch (Whisper goes through mlx-whisper, the rest through
-    mlx-audio) so the text this script aligns is the text the app would align."""
+    """Run one chunked-ASR model over `audio`, mirroring what the per-model ASR
+    sidecars do (whisper/ goes through mlx-whisper; qwen3/ granite/ voxtral/ through
+    mlx-audio) so the text this script aligns is the text the app would align.
+
+    The dispatch is kept as ONE branch here on purpose: this is a developer tool
+    driving several models in one run, not the shipped path — which is one
+    standalone sidecar per model since 2026-07-30."""
     import numpy as np
 
     if "whisper" in asr.lower():

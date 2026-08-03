@@ -1,6 +1,6 @@
 import Foundation
 
-/// Client for the Silero VAD v6 Python sidecar (scripts/silero-vad-service.py).
+/// Client for the Silero VAD v6 Python sidecar (scripts/vad/vad-service.py).
 ///
 /// Feed 16 kHz mono samples from the audio thread; read `latestProbability`
 /// (0..1, speech likelihood). Silero is trained to distinguish speech from
@@ -27,7 +27,7 @@ final class SileroVADService: @unchecked Sendable {
     }
 
     init?() {
-        let script = PythonRuntime.scriptsDir.appendingPathComponent("silero-vad-service.py")
+        let script = PythonRuntime.scriptsDir.appendingPathComponent("vad/vad-service.py")
         guard FileManager.default.fileExists(atPath: script.path) else { return nil }
 
         let command = PythonRuntime.command(forScript: script)
@@ -35,7 +35,7 @@ final class SileroVADService: @unchecked Sendable {
         process.arguments = command.arguments
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = PythonRuntime.logHandle(name: "silero-vad")
+        process.standardError = PythonRuntime.logHandle(name: "vad")
 
         process.environment = PythonRuntime.sidecarEnvironment()
 

@@ -16,8 +16,8 @@ import Foundation
 /// and it drops the socket the moment that link goes away.
 ///
 /// Testing therefore needs both sidecars together:
-///   python3 scripts/atnd1061-tcp-simulator.py
-///   python3 scripts/atnd1061-multicast-simulator.py
+///   python3 scripts/atnd/atnd1061-tcp-simulator.py
+///   python3 scripts/atnd/atnd1061-multicast-simulator.py
 ///
 /// Transport is a raw BSD socket rather than `NWMulticastGroup`: this Mac is
 /// multi-homed (the array sits on its own interface), so `imr_interface` has to

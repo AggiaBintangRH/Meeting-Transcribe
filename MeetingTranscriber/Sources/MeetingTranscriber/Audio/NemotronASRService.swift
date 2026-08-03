@@ -1,6 +1,6 @@
 import Foundation
 
-/// Client for the Nemotron 3.5 realtime ASR sidecar (scripts/nemotron-asr-service.py).
+/// Client for the Nemotron 3.5 realtime ASR sidecar (scripts/nemotron/nemotron-service.py).
 ///
 /// ONE process, TWO independent lanes — `office` and `remote`. Feed 16 kHz mono
 /// samples to a lane continuously; call `flush()` on it at utterance end (VAD
@@ -46,7 +46,7 @@ final class NemotronASRService: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .scriptMissing:
-                return "scripts/nemotron-asr-service.py not found in the project folder."
+                return "scripts/nemotron/nemotron-service.py not found in the project folder."
             case .launchFailed(let reason):
                 return "Could not launch Python sidecar: \(reason)"
             case .startupFailed(let reason):
@@ -130,7 +130,7 @@ final class NemotronASRService: @unchecked Sendable {
         self.office = Lane(service: self, isRemote: false)
         self.remote = Lane(service: self, isRemote: true)
 
-        let script = PythonRuntime.scriptsDir.appendingPathComponent("nemotron-asr-service.py")
+        let script = PythonRuntime.scriptsDir.appendingPathComponent("nemotron/nemotron-service.py")
         guard FileManager.default.fileExists(atPath: script.path) else {
             throw ServiceError.scriptMissing
         }
@@ -141,7 +141,7 @@ final class NemotronASRService: @unchecked Sendable {
                                                  "--chunk-ms", String(config.chunkMs)]
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
-        process.standardError = PythonRuntime.logHandle(name: "nemotron-asr")
+        process.standardError = PythonRuntime.logHandle(name: "nemotron")
 
         process.environment = PythonRuntime.sidecarEnvironment()
 
@@ -240,8 +240,8 @@ final class NemotronASRService: @unchecked Sendable {
         let type: String
         let text: String
         /// Which lane produced this line. ABSENT MEANS OFFICE — the same
-        /// convention diarize-service.py uses, chosen so office lines keep their
-        /// exact historical bytes.
+        /// convention pyannote/pyannote-service.py and wespeaker/wespeaker-service.py
+        /// use, chosen so office lines keep their exact historical bytes.
         let stream: String?
     }
 
