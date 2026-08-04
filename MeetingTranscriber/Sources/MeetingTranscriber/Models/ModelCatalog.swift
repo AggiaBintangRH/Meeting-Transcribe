@@ -100,27 +100,62 @@ enum ModelCatalog {
         hfRepo: "OpenMOSS-Team/MOSS-Transcribe-Diarize"
     )
 
+    /// The SPECTRAL engine — the vendored Apache-2.0 `diarize` package
+    /// (github.com/FoxNoseTech/diarize @ 4f25d27): Silero VAD → sliding-window
+    /// WeSpeaker embeddings → GMM-BIC speaker counting → spectral clustering →
+    /// Viterbi smoothing. A WHOLE-FILE pass at Stop and nothing else (v1).
+    ///
+    /// `hfRepo` is the WeSpeaker checkpoint on purpose, and it is not a fudge: the
+    /// engine's ONE modification to upstream (`vendor/diarize/torch_embedder.py`)
+    /// swaps upstream's self-downloading ONNX embedder for exactly these weights,
+    /// so this really is the model the install check must look for. Silero comes
+    /// from the `silero_vad` wheel's own package data, not from `models/`. Two
+    /// catalog entries sharing an `hfRepo` is the `moss` / `moss-diar` precedent.
+    static let spectralDiarization = ModelInfo(
+        id: "spectral",
+        name: "Spectral clustering diarization",
+        detail: "Silero VAD → WeSpeaker embeddings → GMM-BIC + spectral clustering · CPU · whole recording at stop",
+        badges: ["PyTorch CPU", "whole-file only", "Apache 2.0", "vendored"],
+        hfRepo: "pyannote/wespeaker-voxceleb-resnet34-LM"
+    )
+
     /// Engines offered on Settings → Models → Diarization (`diarization.engine`).
-    static let diarizationEngines: [ModelInfo] = [diarization, mossDiarization]
+    static let diarizationEngines: [ModelInfo] = [diarization, spectralDiarization,
+                                                  mossDiarization]
 
     /// The `diarization.engine` VALUE a given engine card selects.
     ///
     /// The catalog id and the setting value are deliberately different strings
     /// for MOSS. Catalog ids are unique across the whole catalog, and the SAME
     /// model already appears as the chunked entry `"moss"` — so the diarization
-    /// entry has to be `"moss-diar"`. The setting, meanwhile, is a plain two-value
-    /// engine choice ("pyannote" | "moss") that the loader and the recorder read
-    /// directly. Both facts are load-bearing, so the conversion lives here, once,
-    /// rather than as a string comparison repeated in each tab — where writing
-    /// `engine = m.id` would silently store a value nothing ever matches.
+    /// entry has to be `"moss-diar"`. The setting, meanwhile, is a plain engine
+    /// choice ("pyannote" | "spectral" | "moss") that the loader and the recorder
+    /// read directly. Both facts are load-bearing, so the conversion lives here,
+    /// once, rather than as a string comparison repeated in each tab — where
+    /// writing `engine = m.id` would silently store a value nothing ever matches.
+    ///
+    /// SPECTRAL DELIBERATELY USES ONE STRING FOR BOTH (`"spectral"`), like
+    /// pyannote and unlike MOSS. The MOSS divergence exists solely because that
+    /// model has a second catalog entry in the CHUNKED list and two entries cannot
+    /// share an id; spectral is a diarizer and only a diarizer, so there is no
+    /// collision to work around. Inventing a `"spectral-diar"` id purely for
+    /// symmetry would add the very indirection that made the MOSS card look
+    /// selected while the engine never switched.
     static func diarizationEngineValue(_ model: ModelInfo) -> String {
-        model.id == mossDiarization.id
-            ? ModelLoader.mossEngineID : ModelLoader.pyannoteEngineID
+        switch model.id {
+        case mossDiarization.id:     return ModelLoader.mossEngineID
+        case spectralDiarization.id: return ModelLoader.spectralEngineID
+        default:                     return ModelLoader.pyannoteEngineID
+        }
     }
 
     /// The inverse: the engine card a stored `diarization.engine` value selects.
     static func diarizationEngine(forEngine engine: String) -> ModelInfo {
-        engine == ModelLoader.mossEngineID ? mossDiarization : diarization
+        switch engine {
+        case ModelLoader.mossEngineID:     return mossDiarization
+        case ModelLoader.spectralEngineID: return spectralDiarization
+        default:                           return diarization
+        }
     }
 
     static let vad = ModelInfo(

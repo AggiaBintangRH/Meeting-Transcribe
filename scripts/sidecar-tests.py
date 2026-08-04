@@ -113,6 +113,14 @@ MOSS_COPIES = [("moss-asr", MOSS_ASR_SERVICE, MOSS_ASR_VENDOR),
 # why the identity checks below need no pipeline load and run in seconds.
 PYANNOTE_SERVICE = "pyannote/pyannote-service.py"
 WESPEAKER_SERVICE = "wespeaker/wespeaker-service.py"
+# The THIRD diarizer (2026-08-03): the vendored, Apache-2.0 `diarize` engine
+# (Silero VAD → WeSpeaker windows → GMM-BIC counting → spectral clustering). It
+# answers the SAME Swift caller as the pyannote service, with the same
+# turns-only wire, so the two must not drift apart — see
+# `spectral/protocol-matches-pyannote`. Its vendored tree lives under it, the
+# MOSS rule.
+SPECTRAL_SERVICE = "spectral/spectral-service.py"
+SPECTRAL_VENDOR = SCRIPTS / "spectral" / "vendor"
 
 # Pin the model cache the same way every sidecar does, so the in-process
 # white-box checks (which import mlx_audio directly) resolve offline too.
@@ -2436,6 +2444,695 @@ def run_pyannote(rep: Report, ctx):
         sc.close()
 
 
+# ============================================================ spectral group
+#
+# The THIRD diarization engine (vendored `diarize`, 2026-08-03). Everything here
+# is PURE — AST, module import and hashes, no model load and no audio, the
+# `pyannote/telemetry-is-off` and `layout/*` precedent. Milliseconds.
+SPECTRAL_CHECKS = [
+    "spectral/protocol-matches-pyannote",
+    "spectral/telemetry-is-off",
+    "spectral/no-live-chunk-branch",
+    "spectral/vendor-is-own",
+    "spectral/vad-reader-is-shimmed",
+]
+
+# The vendored tree, file by file, as SHA-256.
+#
+# PROVENANCE, and what these hashes are: the four upstream-verbatim files and the
+# LICENSE were fetched from github.com/FoxNoseTech/diarize at commit
+# `4f25d27dee54f7e8264a914e705f7cee182151e2` (`src/diarize/`) and hashed when this
+# check was written — they are UPSTREAM's bytes, not merely a fingerprint of
+# whatever happened to be on disk. `embeddings.py` is the ONE modified file
+# (Apache-2.0 §4(b): the ONNX `wespeakerruntime` backend swapped for this
+# project's PyTorch WeSpeaker), so BOTH hashes are recorded: upstream's, which the
+# vendored copy must NOT equal, and ours, which it must.
+#
+# The hashes live HERE, in the check, deliberately: the suite must run air-gapped
+# (client hard requirement #1), so re-fetching upstream at check time is not an
+# option. What this pins is therefore drift SINCE vendoring — an "upgrade" that
+# silently edits an upstream file, a second local modification slipped into a file
+# whose header still claims to be verbatim, or our shim quietly disappearing.
+SPECTRAL_VENDOR_UPSTREAM = {
+    "__init__.py": "ad8dc4bd4e3fc9cb36ba4abf184744d62a6c9f5eee995797b52d3de8bd077835",
+    "clustering.py": "5a6c55ae182aa2858b6a94284660836caa9d3a258623bf6c0d1fa6e8fda1c29d",
+    "utils.py": "5c98305606c6473b73306314f80e78119c90d0a8f2958791fa1311259f9f2b01",
+    "vad.py": "9281e28a6e97a8c51e7961ca094d872ba48c91ed5d2b59fa7cbe9d45b7334a4b",
+    # Apache-2.0 §4(a) requires the licence travel with the copy. It is checked
+    # like any other upstream file so "tidying" it away fails loudly.
+    "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+}
+SPECTRAL_VENDOR_MODIFIED = {
+    # (upstream, ours). The pair is what makes the claim checkable in both
+    # directions: equalling upstream would mean the ONNX backend is back and the
+    # engine would try to download its own weights at runtime; equalling neither
+    # means a second, undocumented edit.
+    "embeddings.py": ("564c72615dad725b0afbfe1101c4ae787a518d1f77e34c02a290b02f80da571d",
+                      "d47cd32499b713075b550f0b5661f35c0341aab8626b12e3c500e39036397023"),
+}
+# Ours, not upstream's. Presence is pinned but NOT its hash: it is this project's
+# own file and may legitimately change (a device, a resample), whereas an upstream
+# file changing is by definition a defect.
+SPECTRAL_VENDOR_OURS = "torch_embedder.py"
+
+
+def _emit_shapes(source: str):
+    """Every `emit({...})` call in a diarization sidecar, by AST.
+
+    Returns a list of (type, key tuple IN ORDER, splices **echo, inside the
+    stdin read loop). The replies of these two services are built as DICT
+    LITERALS at the emit site rather than by a named builder — there is no
+    `emit_final` to call — so the literal is where the wire shape actually lives
+    and the literal is what gets read.
+    """
+    import ast
+    tree = ast.parse(source)
+    main = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+    loop = next((n for n in ast.walk(main) if isinstance(n, ast.For)
+                 and ast.unparse(n.iter) == "sys.stdin"), None) if main else None
+    in_loop = {id(n) for n in ast.walk(loop)} if loop is not None else set()
+
+    shapes = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "emit" and len(node.args) == 1
+                and isinstance(node.args[0], ast.Dict)):
+            continue
+        d = node.args[0]
+        keys = tuple(k.value for k in d.keys
+                     if isinstance(k, ast.Constant) and isinstance(k.value, str))
+        echo = any(k is None and ast.unparse(v) == "echo"
+                   for k, v in zip(d.keys, d.values))
+        kind = next((ast.literal_eval(v) for k, v in zip(d.keys, d.values)
+                     if isinstance(k, ast.Constant) and k.value == "type"
+                     and isinstance(v, ast.Constant)), None)
+        shapes.append((kind, keys, echo, id(node) in in_loop))
+    return shapes
+
+
+def _fn_source(source: str, name: str):
+    """One top-level function's normalised source, for a verbatim comparison."""
+    import ast
+    tree = ast.parse(source)
+    fn = next((n for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name == name), None)
+    return None if fn is None else ast.unparse(fn)
+
+
+def run_spectral(rep: Report, ctx):
+    import ast
+
+    # -- check 1: THE DRIFT DETECTOR, `whisper/protocol-matches-chunked` and
+    #    `moss/asr-matches-moss` applied to the two turns-only diarizers.
+    #
+    #    Both sidecars answer the SAME Swift caller (`DiarizationService`), so a
+    #    reply key added, renamed or reordered in one and not the other is a
+    #    decode that silently drops a field for whichever engine was missed —
+    #    exactly the failure the standalone-services decision accepted and this
+    #    kind of check is the mitigation for. `spectral` is the third copy of a
+    #    protocol that already lives in two.
+    #
+    #    TIMING PRECISION IS DELIBERATELY OUT OF SCOPE, and this is the one place
+    #    where this check must NOT copy `pyannote/local-labels-only`. That check
+    #    asserts pyannote's times are NOT all at 3 dp, i.e. that nothing rounded
+    #    the wire (the identity stage slices the waveform with those floats).
+    #    Spectral's segment times really are 1-decimal — because Silero's
+    #    `get_speech_timestamps` defaults to `time_resolution=1`, UPSTREAM, not
+    #    because anything here rounds them — so a "looks rounded" heuristic would
+    #    false-positive on a correct sidecar. What is shared and therefore pinned
+    #    here is SHAPE: the key sets, the key order, the label field, the
+    #    absent-stream-means-office rule, the `audio` echo, and the fact that a
+    #    segment can never carry identity.
+    if ctx.wants("spectral/protocol-matches-pyannote"):
+        cid = "spectral/protocol-matches-pyannote"
+        try:
+            spec_mod, spec_src = load_sidecar_module(SPECTRAL_SERVICE, "mt_spectral_protocol")
+            pyan_mod, pyan_src = load_sidecar_module(PYANNOTE_SERVICE, "mt_pyannote_protocol")
+            problems = []
+
+            # (1) the shared plumbing, verbatim. These four are the same functions
+            #     in both files; a divergence here is how one engine starts
+            #     writing a different JSON line or a differently shaped log.
+            for name in ("emit", "fail", "brief_traceback", "log"):
+                a, b = _fn_source(pyan_src, name), _fn_source(spec_src, name)
+                if a is None or b is None or a != b:
+                    problems.append(f"{name}(): pyannote={'absent' if a is None else 'differs'}"
+                                    f" vs spectral={'absent' if b is None else 'differs'}")
+
+            # (2) the wire bytes themselves. `emit` is the only builder these
+            #     services have, so the payloads are handed to BOTH modules and
+            #     compared byte for byte — key order and json separators included.
+            wire_cases = [
+                {"type": "status", "text": "LOADED"},
+                {"type": "error", "text": "Audio not found: /nope.wav"},
+                {"type": "result", "audio": "/tmp/m.wav",
+                 "segments": [{"start": 0.5, "end": 1.25, "label": "SPEAKER_00"}]},
+                {"type": "result", "audio": "/tmp/m.wav", "segments": [],
+                 "stream": "remote"},
+            ]
+            for payload in wire_cases:
+                mine = capture_stdout(pyan_mod.emit, payload)
+                theirs = capture_stdout(spec_mod.emit, payload)
+                if mine != theirs:
+                    problems.append(f"emit({payload['type']}): pyannote wrote {mine} "
+                                    f"but spectral wrote {theirs}")
+
+            # (3) the REAL `wire_segments` of each, lifted by AST and driven with
+            #     the input its own engine produces (pyannote: (start, end, label)
+            #     tuples; spectral: the vendored `DiarizeResult`). Different
+            #     inputs, and the output must be the SAME JSON — which is what
+            #     pins {start,end,label}, the key ORDER, and that neither can emit
+            #     id/name/conf. Identity leaking out of a pipeline stage is the
+            #     structural failure the pyannote/wespeaker split exists to make
+            #     impossible, and it must be impossible for this engine too.
+            import types
+            pyan_wire = extract_nested(pyan_mod, pyan_src, "main", "wire_segments", {})
+            spec_wire = extract_nested(spec_mod, spec_src, "main", "wire_segments", {})
+            turns = [(0.5, 1.25, "SPEAKER_00"), (1.25, 3.0, "SPEAKER_01")]
+            result = types.SimpleNamespace(segments=[
+                types.SimpleNamespace(start=s, end=e, speaker=l) for s, e, l in turns])
+            a_json = json.dumps(pyan_wire(turns))
+            b_json = json.dumps(spec_wire(result))
+            if a_json != b_json:
+                problems.append(f"wire_segments: pyannote produced {a_json} but "
+                                f"spectral produced {b_json}")
+            for label, produced in (("pyannote", a_json), ("spectral", b_json)):
+                for banned in ('"id"', '"name"', '"conf"'):
+                    if banned in produced:
+                        problems.append(f"{label}'s segments carry {banned} — identity "
+                                        f"leaked back into a pipeline stage")
+
+            # (4) the reply SHAPES, read out of the emit sites by AST. Only the
+            #     types both services can produce are compared: pyannote also has
+            #     `chunk_result`, which spectral must NOT have — that asymmetry is
+            #     `spectral/no-live-chunk-branch`'s subject, not a drift.
+            pyan_shapes, spec_shapes = _emit_shapes(pyan_src), _emit_shapes(spec_src)
+            for label, shapes in (("pyannote", pyan_shapes), ("spectral", spec_shapes)):
+                result_shapes = {(k, e) for kind, k, e, _ in shapes if kind == "result"}
+                if result_shapes != {(("type", "audio", "segments"), True)}:
+                    problems.append(f"{label}: `result` emit shapes were {result_shapes}, "
+                                    f'expected exactly ("type","audio","segments") in '
+                                    f"that order with **echo — `audio` is load-bearing "
+                                    f"(it is how the app knows which file to hand the "
+                                    f"identity stage)")
+                status_shapes = {k for kind, k, _, _ in shapes if kind == "status"}
+                if status_shapes != {("type", "text")}:
+                    problems.append(f"{label}: `status` emit shapes were {status_shapes}")
+                errors = {k for kind, k, _, _ in shapes if kind == "error"}
+                if errors != {("type", "text")}:
+                    problems.append(f"{label}: `error` emit shapes were {errors}, "
+                                    f'expected only ("type","text")')
+                # ABSENT MEANS OFFICE: every reply raised once the job's stream is
+                # known must splice `**echo`, so an office reply carries no
+                # "stream" key at all and a remote one carries exactly that. The
+                # sole exception in both files is the bad-job-line reply, which is
+                # emitted BEFORE `stream` has been read.
+                naked = [(kind, k) for kind, k, echo, loop in shapes if loop and not echo]
+                if len(naked) != 1:
+                    problems.append(f"{label}: {len(naked)} replies inside the read loop "
+                                    f"do not splice **echo ({naked}) — expected exactly "
+                                    f"one (the bad-job-line reply, emitted before the "
+                                    f"job's stream is known)")
+
+            # (5) and the office/remote rule itself, verbatim across the files.
+            #     The three statements that implement "absent means office" are
+            #     one line each; comparing their source is what stops one engine
+            #     defaulting to remote, or echoing "office" back explicitly and
+            #     changing the single-stream wire bytes.
+            def echo_rule(source):
+                tree = ast.parse(source)
+                return [ast.unparse(n) for n in ast.walk(tree)
+                        if isinstance(n, ast.Assign)
+                        and ast.unparse(n.targets[0]) in ("stream", "is_remote", "echo")]
+
+            a_rule, b_rule = echo_rule(pyan_src), echo_rule(spec_src)
+            if a_rule != b_rule or len(a_rule) != 3:
+                problems.append(f"the stream/echo rule differs: pyannote {a_rule} vs "
+                                f"spectral {b_rule}")
+
+            rep.expect(cid, not problems,
+                       f"4 shared functions verbatim, {len(wire_cases)} wire messages "
+                       f"byte-identical, wire_segments agrees from either engine's own "
+                       f"input, the shared reply shapes are exact, and the "
+                       f"absent-stream-means-office rule is the same 3 statements "
+                       f"(segment TIMES are deliberately not compared — spectral's "
+                       f"1 dp is Silero's time_resolution, upstream)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare spectral with pyannote: {exc!r}")
+
+    # -- check 2: the engine's embedder IS a pyannote model, so pyannote 4.x's
+    #    default-ON OpenTelemetry applies here exactly as it does to
+    #    pyannote-service.py — a network call describing a client meeting, which
+    #    hard requirement #1 forbids. `HF_HUB_OFFLINE` does not cover it.
+    #    The `pyannote/telemetry-is-off` precedent, including its most important
+    #    detail: the DANGEROUS value is forced into the environment FIRST, so a
+    #    sidecar that merely `setdefault`s inherits "true" and is caught.
+    if ctx.wants("spectral/telemetry-is-off"):
+        cid = "spectral/telemetry-is-off"
+        problems, results = [], []
+        previous = os.environ.get("PYANNOTE_METRICS_ENABLED")
+        os.environ["PYANNOTE_METRICS_ENABLED"] = "true"
+        try:
+            load_sidecar_module(SPECTRAL_SERVICE, "mt_spectral_offline")
+            value = os.environ.get("PYANNOTE_METRICS_ENABLED")
+            from pyannote.audio.telemetry.metrics import is_metrics_enabled
+            live = is_metrics_enabled()
+            results.append(f"spectral-service.py={value!r}")
+            if value != "false" or live:
+                problems.append(f"spectral-service left PYANNOTE_METRICS_ENABLED="
+                                f"{value!r} (is_metrics_enabled()={live})")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"spectral-service would not import: {exc!r}")
+        finally:
+            if previous is None:
+                os.environ.pop("PYANNOTE_METRICS_ENABLED", None)
+            else:
+                os.environ["PYANNOTE_METRICS_ENABLED"] = previous
+
+        # The vendored shim is asserted TOO, and this is a judgement call worth
+        # stating. The sidecar's own line is the guarantee for the shipped app: it
+        # runs first, unconditionally, before anything imports the engine. But
+        # `vendor/diarize/torch_embedder.py` is the file that actually imports
+        # pyannote, and it is OURS, so it is the last line of defence for every
+        # OTHER entry point — this suite, `scripts/tools/`, a future service
+        # reusing the embedder — none of which run the sidecar's module body. It
+        # is checked by AST rather than by importing it: an import here would pull
+        # in numpy/soundfile for nothing and could not tell `setdefault` from an
+        # assignment anyway, which is the whole distinction being pinned.
+        shim = SPECTRAL_VENDOR / "diarize" / SPECTRAL_VENDOR_OURS
+        try:
+            assigns, setdefaults = [], []
+            for node in ast.walk(ast.parse(shim.read_text())):
+                if (isinstance(node, ast.Assign)
+                        and ast.unparse(node.targets[0])
+                        == "os.environ['PYANNOTE_METRICS_ENABLED']"):
+                    assigns.append(ast.literal_eval(node.value))
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "setdefault"
+                        and ast.unparse(node.func.value) == "os.environ"
+                        and node.args
+                        and getattr(node.args[0], "value", None)
+                        == "PYANNOTE_METRICS_ENABLED"):
+                    setdefaults.append(ast.unparse(node))
+            if assigns != ["false"]:
+                problems.append(f"{SPECTRAL_VENDOR_OURS} assigns "
+                                f"PYANNOTE_METRICS_ENABLED = {assigns} — expected "
+                                f"exactly one assignment of 'false'")
+            if setdefaults:
+                problems.append(f"{SPECTRAL_VENDOR_OURS} uses setdefault for "
+                                f"PYANNOTE_METRICS_ENABLED ({setdefaults}) — an "
+                                f"inherited 'true' would then win")
+            else:
+                results.append(f"{SPECTRAL_VENDOR_OURS}: assigned, not setdefault")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"could not read {shim}: {exc!r}")
+
+        rep.expect(cid, not problems,
+                   f"the sidecar forced metrics off over an inherited 'true', and the "
+                   f"vendored embedder shim assigns it too ({', '.join(results)})",
+                   "; ".join(problems) + " — pyannote would post meeting durations to "
+                   "otel.pyannote.ai, breaking the 100%-offline requirement")
+
+    # -- check 3: v1 is FINAL-ONLY, and pyannote is not. The
+    #    `moss/diar-has-no-file-branch` precedent, for the same reason and with
+    #    the same both-directions discipline.
+    #
+    #      * ADDING a live/chunk branch here is the symmetry-minded mistake, and
+    #        it is the DANGEROUS one: this engine counts speakers globally
+    #        (GMM-BIC over every embedding in the file) and then clusters
+    #        globally, so a 30 s window would be counted and clustered on its own
+    #        and its labels would mean nothing across windows. That failure is
+    #        already documented on MOSS — two different people both numbered S01
+    #        because the chunk boundary fell on the speaker change — and it is
+    #        SILENT: the rows look continuous and are not.
+    #      * REMOVING pyannote's is the other direction, and the positive half
+    #        below is what makes this check able to fail at all. Without it, a
+    #        pyannote-service that had stopped being a live diarizer entirely
+    #        would sail through.
+    #
+    #    By AST, not grep: BOTH files explain this asymmetry at length in prose
+    #    (spectral's module docstring is largely about it), so a textual search
+    #    matches its own explanation. Note also that spectral's refusal message
+    #    does not contain the word "chunk" as a compared constant — the refusal is
+    #    `mode != "final"`, so only Compare nodes and dict keys are read, never
+    #    message text.
+    if ctx.wants("spectral/no-live-chunk-branch"):
+        cid = "spectral/no-live-chunk-branch"
+        try:
+            def live_shape(source):
+                """(job.get keys, constants compared against, emitted types, dict keys)."""
+                tree = ast.parse(source)
+                gets, compared, dict_keys = set(), set(), set()
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "get"
+                            and ast.unparse(node.func.value) == "job"
+                            and node.args
+                            and isinstance(node.args[0], ast.Constant)):
+                        gets.add(node.args[0].value)
+                    if isinstance(node, ast.Compare):
+                        for c in node.comparators:
+                            if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                                compared.add(c.value)
+                    if isinstance(node, ast.Dict):
+                        dict_keys |= {k.value for k in node.keys
+                                      if isinstance(k, ast.Constant)
+                                      and isinstance(k.value, str)}
+                kinds = {kind for kind, _, _, _ in _emit_shapes(source)}
+                return gets, compared, kinds, dict_keys
+
+            s_gets, s_cmp, s_kinds, s_keys = live_shape(
+                (SCRIPTS / SPECTRAL_SERVICE).read_text())
+            p_gets, p_cmp, p_kinds, p_keys = live_shape(
+                (SCRIPTS / PYANNOTE_SERVICE).read_text())
+            problems = []
+
+            # The NEGATIVE half: no live path anywhere in spectral.
+            if "chunk" in s_cmp:
+                problems.append('spectral compares a command against "chunk" — a '
+                                "windowed pass through a globally-clustering engine "
+                                "returns labels that look continuous and are not")
+            if "chunk_result" in s_kinds or "chunk_result" in s_keys:
+                problems.append("spectral emits a chunk_result reply")
+            if "window_start" in s_gets or "window_start" in s_keys:
+                problems.append("spectral reads or emits window_start — the only "
+                                "reason to know a window's offset is to serve one")
+            # …and that the refusal really is there, so "no chunk branch" is a
+            # deliberate refusal rather than an unhandled command falling through
+            # to the whole-file pass.
+            if "final" not in s_cmp:
+                problems.append("spectral never compares the command against "
+                                '"final" — a non-final job would fall through to '
+                                "the whole-file pass instead of being refused")
+
+            # The POSITIVE half: pyannote really does have the live path this
+            # engine is declining to copy.
+            if "chunk" not in p_cmp:
+                problems.append('pyannote no longer compares a command against '
+                                '"chunk" — its live per-30s path is the thing '
+                                "spectral is being contrasted with")
+            if "chunk_result" not in p_kinds:
+                problems.append("pyannote no longer emits chunk_result")
+            if "window_start" not in p_gets:
+                problems.append("pyannote no longer reads window_start")
+
+            rep.expect(cid, not problems,
+                       "spectral has no chunk comparison, no chunk_result and no "
+                       "window_start, and refuses any cmd != final — while pyannote "
+                       "has all three (so this check can fail in either direction)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare the read loops: {exc!r}")
+
+    # -- check 4: the service inserts its OWN vendor dir, and that tree is still
+    #    the upstream one it claims to be.
+    #
+    #    The `moss/asr-vendor-is-own-and-identical` precedent for the first half:
+    #    a `sys.path.insert` pointing at ANOTHER service's vendor folder works
+    #    today and breaks months later, in a release, the moment that folder
+    #    moves. Read by AST — and, better than reading the literal, EVALUATED, so
+    #    the assertion is about the directory that will really be on sys.path
+    #    rather than about how it was spelled.
+    #
+    #    The second half is provenance, which MOSS did not need (its two trees
+    #    check each other). There is only one spectral tree, so it is checked
+    #    against recorded UPSTREAM hashes instead, with `embeddings.py` pinned as
+    #    the ONE deviation in BOTH directions.
+    if ctx.wants("spectral/vendor-is-own"):
+        cid = "spectral/vendor-is-own"
+        try:
+            source = (SCRIPTS / SPECTRAL_SERVICE).read_text()
+            problems = []
+            inserts = [n for n in ast.walk(ast.parse(source))
+                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                       and n.func.attr == "insert"
+                       and ast.unparse(n.func.value) == "sys.path"]
+            if len(inserts) != 1:
+                problems.append(f"{len(inserts)} sys.path.insert calls, expected exactly 1")
+            else:
+                expr = ast.unparse(inserts[0].args[1])
+                try:
+                    # `BASE` is bound the way the sidecar itself computes it, so a
+                    # BASE-rooted spelling (what the MOSS services use) resolves
+                    # here too and is reported as the WRONG DIRECTORY rather than
+                    # as an unresolvable expression. A negative control pointing
+                    # this at moss-asr/vendor should name that folder.
+                    resolved = pathlib.Path(eval(  # noqa: S307 — our own source, no input
+                        expr, {"os": os, "BASE": str(PROJECT),
+                               "__file__": str(SCRIPTS / SPECTRAL_SERVICE)}))
+                except Exception as exc:  # noqa: BLE001
+                    resolved = None
+                    problems.append(f"sys.path.insert argument {expr!r} could not be "
+                                    f"resolved: {exc!r}")
+                if resolved is not None and resolved.resolve() != SPECTRAL_VENDOR.resolve():
+                    problems.append(f"sys.path.insert resolves to {resolved} — it must "
+                                    f"be this service's OWN {SPECTRAL_VENDOR}; pointing "
+                                    f"at another service's vendor tree works until that "
+                                    f"folder moves")
+                # Any other service's folder named in the literal is wrong even if
+                # the resolution somehow agreed.
+                named = {c.value for c in ast.walk(inserts[0])
+                         if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+                strays = sorted(named - {"vendor", "spectral", "scripts"})
+                if strays:
+                    problems.append(f"sys.path.insert names {strays}")
+
+            pkg = SPECTRAL_VENDOR / "diarize"
+            expected = (set(SPECTRAL_VENDOR_UPSTREAM) | set(SPECTRAL_VENDOR_MODIFIED)
+                        | {SPECTRAL_VENDOR_OURS})
+            found = {p.name for p in pkg.iterdir()
+                     if p.is_file() and "__pycache__" not in p.parts}
+            if found != expected:
+                problems.append(f"vendor tree file set is {sorted(found)}, expected "
+                                f"{sorted(expected)}")
+
+            def digest(name):
+                path = pkg / name
+                return (hashlib.sha256(path.read_bytes()).hexdigest()
+                        if path.exists() else None)
+
+            for name, want in sorted(SPECTRAL_VENDOR_UPSTREAM.items()):
+                got = digest(name)
+                if got != want:
+                    problems.append(f"{name} is NOT upstream's file "
+                                    f"({got} != {want}) — the tree is vendored "
+                                    f"verbatim apart from embeddings.py")
+            for name, (upstream, ours) in sorted(SPECTRAL_VENDOR_MODIFIED.items()):
+                got = digest(name)
+                if got == upstream:
+                    problems.append(f"{name} is back to UPSTREAM's version — the ONNX "
+                                    f"wespeakerruntime backend downloads its own "
+                                    f"weights at runtime, which the offline "
+                                    f"requirement forbids")
+                elif got != ours:
+                    problems.append(f"{name} matches neither upstream nor the recorded "
+                                    f"modification ({got}) — a second, undocumented "
+                                    f"edit to a vendored file")
+            if not (pkg / SPECTRAL_VENDOR_OURS).exists():
+                problems.append(f"{SPECTRAL_VENDOR_OURS} is missing — it is the PyTorch "
+                                f"WeSpeaker shim embeddings.py imports")
+
+            # And the shape of the one modification, so "only embeddings.py
+            # differs" is a statement about WHAT differs, not only about how many
+            # bytes moved: it must import our shim and must not import the ONNX
+            # runtime under any name.
+            emb = ast.parse((pkg / "embeddings.py").read_text())
+            imports = set()
+            for node in ast.walk(emb):
+                if isinstance(node, ast.ImportFrom):
+                    imports.add(f"{'.' * (node.level or 0)}{node.module or ''}")
+                elif isinstance(node, ast.Import):
+                    imports |= {a.name for a in node.names}
+            if ".torch_embedder" not in imports:
+                problems.append("embeddings.py no longer imports .torch_embedder")
+            if any("wespeakerruntime" in i for i in imports):
+                problems.append("embeddings.py imports wespeakerruntime again — that is "
+                                "the ONNX backend the modification exists to remove")
+
+            rep.expect(cid, not problems,
+                       f"the service puts its OWN {SPECTRAL_VENDOR.parent.name}/vendor "
+                       f"on sys.path, and the tree is upstream 4f25d27d "
+                       f"({len(SPECTRAL_VENDOR_UPSTREAM)} files byte-identical incl. "
+                       f"LICENSE) with embeddings.py the ONE deviation, importing our "
+                       f"shim and no ONNX runtime",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not check the vendored tree: {exc!r}")
+
+    # -- check 5: the VAD reader is still shimmed onto soundfile.
+    #
+    #    THE FFMPEG LESSON, and the one copy of it that NO existing gate can see.
+    #    `vendor/diarize/vad.py` calls `silero_vad.read_audio(path)`; on the
+    #    installed torchaudio (2.11) that resolves to `torchaudio.load`, i.e. a
+    #    **torchcodec** wrapper, whose dylibs reach libavcodec/libavformat only
+    #    through a single `LC_RPATH` of `/opt/homebrew/opt/ffmpeg/lib` — and the
+    #    2026-07-30 pyannote audit PRUNES torchcodec from both bundled
+    #    interpreters. So `spectral-service.py` rebinds `silero_vad.read_audio` to
+    #    a soundfile+scipy reader, and without that rebinding the packaged `.app`
+    #    has no decoder for VAD at all.
+    #
+    #    Why this needs its own pin: `build.sh`'s `assert_no_torchcodec_use` reads
+    #    the sidecars' TOKENS for `torchaudio.load` / `torchcodec` / `AudioDecoder`.
+    #    `silero_vad.read_audio(path)` contains none of them, so deleting the shim
+    #    passes that gate cleanly. It also passes on the owner's Mac, which has
+    #    Homebrew ffmpeg — the invisible-until-shipped class
+    #    `pyannote/no-path-to-torchcodec` exists for. Proved both directions in a
+    #    bundle-shaped tree with `torchcodec` shadowed by an unimportable stub:
+    #    WITH the shim, 9 turns / 5 speakers in 3.6 s; WITHOUT it, importing the
+    #    vendored `run_vad` raised `RuntimeError: torchaudio version 2.11.0
+    #    requires torchcodec for audio I/O`.
+    #
+    #    ORDERING — what is actually load-bearing, and what deliberately is NOT.
+    #    The requirement is only that the rebinding happen before the first
+    #    `run_diarize` CALL. It is NOT "before the `diarize` package is imported",
+    #    because `vad.py` does its `from silero_vad import … read_audio` INSIDE
+    #    `run_vad`, so the attribute is looked up on the package at call time and
+    #    a late rebinding is picked up. Asserting import-order would therefore
+    #    forbid a rearrangement that is perfectly correct. But that looseness is a
+    #    property of the VENDORED file, not of ours — so the function-local import
+    #    is itself asserted below. If a future re-vendor hoists it to module
+    #    scope, the ordering requirement TIGHTENS silently, and this check is what
+    #    says so.
+    #
+    #    By AST, not grep: `install_soundfile_vad_reader`'s docstring explains this
+    #    trap at length (torchcodec, ffmpeg and `torchaudio.load` all appear in
+    #    prose), so a textual search matches its own explanation — the
+    #    `pyannote/no-path-to-torchcodec` and build-gate rule.
+    if ctx.wants("spectral/vad-reader-is-shimmed"):
+        cid = "spectral/vad-reader-is-shimmed"
+        try:
+            source = (SCRIPTS / SPECTRAL_SERVICE).read_text()
+            tree = ast.parse(source)
+            problems = []
+
+            # (a) the rebinding itself: an assignment to `silero_vad.read_audio`.
+            binds = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                     for t in n.targets
+                     if isinstance(t, ast.Attribute) and t.attr == "read_audio"
+                     and isinstance(t.value, ast.Name) and t.value.id == "silero_vad"]
+            installer = None
+            if not binds:
+                problems.append("spectral-service.py never assigns "
+                                "silero_vad.read_audio — the vendored VAD would "
+                                "decode through torchaudio.load → torchcodec, which "
+                                "is pruned from both bundled interpreters")
+            else:
+                # Which function holds it, so the call site can be located.
+                for fn in ast.walk(tree):
+                    if isinstance(fn, ast.FunctionDef) and any(
+                            id(b) in {id(x) for x in ast.walk(fn)} for b in binds):
+                        if fn.name != "main":
+                            installer = fn
+                            break
+                if installer is None:
+                    problems.append("the silero_vad.read_audio assignment is not "
+                                    "inside a named installer function, so its "
+                                    "ordering against run_diarize cannot be read")
+
+            # (b) POSITIVE half — the replacement really decodes with soundfile.
+            if installer is not None:
+                reads_sf = any(isinstance(n, ast.Call)
+                               and isinstance(n.func, ast.Attribute)
+                               and n.func.attr == "read"
+                               and isinstance(n.func.value, ast.Name)
+                               and n.func.value.id == "sf"
+                               for n in ast.walk(installer))
+                imports_sf = any(isinstance(n, ast.Import)
+                                 and any(a.name == "soundfile" for a in n.names)
+                                 for n in ast.walk(installer))
+                if not (reads_sf and imports_sf):
+                    problems.append(f"{installer.name} does not decode with soundfile "
+                                    f"(imports soundfile: {imports_sf}, calls sf.read: "
+                                    f"{reads_sf}) — a shim that swaps one "
+                                    f"ffmpeg-dependent reader for another fixes nothing")
+
+            # (c) NEGATIVE half — no banned decode anywhere in the sidecar. Whole
+            #     file, not just the shim: a banned call is wrong wherever it sits.
+            banned = []
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Attribute) and node.attr in ("load", "info")
+                        and isinstance(node.value, ast.Name)
+                        and node.value.id == "torchaudio"):
+                    banned.append(f"line {node.lineno}: torchaudio.{node.attr}")
+                if isinstance(node, ast.Name) and node.id == "AudioDecoder":
+                    banned.append(f"line {node.lineno}: AudioDecoder")
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "read_audio"
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "silero_vad"):
+                    banned.append(f"line {node.lineno}: calls silero_vad.read_audio "
+                                  "(the original, torchcodec-backed reader)")
+            if banned:
+                problems.append("banned decode path in spectral-service.py — "
+                                + "; ".join(banned))
+
+            # (d) ORDERING: installed before the first whole-file pass. The engine
+            #     entry point is read from its import alias rather than assumed, so
+            #     renaming it does not silently make this half vacuous.
+            engine = next((a.asname or a.name for n in ast.walk(tree)
+                           if isinstance(n, ast.ImportFrom) and n.module == "diarize"
+                           for a in n.names if a.name == "diarize"), None)
+            if engine is None:
+                problems.append("no `from diarize import diarize` — the engine entry "
+                                "point this ordering is measured against is gone")
+            elif installer is not None:
+                calls = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+                         and isinstance(n.func, ast.Name) and n.func.id == installer.name]
+                runs = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+                        and isinstance(n.func, ast.Name) and n.func.id == engine]
+                if not calls:
+                    problems.append(f"{installer.name} is defined but never called — "
+                                    f"the shim exists and does nothing")
+                elif runs and min(calls) > min(runs):
+                    problems.append(f"{installer.name} is first called at line "
+                                    f"{min(calls)}, AFTER {engine}() at line "
+                                    f"{min(runs)} — the first job would decode "
+                                    f"through torchcodec")
+
+            # (e) the vendored side of the contract, which is what makes (d)'s
+            #     looseness legitimate AND makes this check self-invalidating: if
+            #     upstream stops calling `silero_vad.read_audio`, the shim is no
+            #     longer the right fix and should be re-derived, not kept passing.
+            vad_tree = ast.parse((SPECTRAL_VENDOR / "diarize" / "vad.py").read_text())
+            run_vad = next((n for n in ast.walk(vad_tree)
+                            if isinstance(n, ast.FunctionDef) and n.name == "run_vad"),
+                           None)
+            if run_vad is None:
+                problems.append("vendor/diarize/vad.py has no run_vad")
+            else:
+                local_import = any(isinstance(n, ast.ImportFrom)
+                                   and n.module == "silero_vad"
+                                   and any(a.name == "read_audio" for a in n.names)
+                                   for n in ast.walk(run_vad))
+                calls_it = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                               and n.func.id == "read_audio"
+                               for n in ast.walk(run_vad))
+                if not calls_it:
+                    problems.append("vendor/diarize/vad.py no longer calls read_audio — "
+                                    "the shim rebinds something nothing uses; re-derive "
+                                    "the fix against the new upstream instead of "
+                                    "keeping this check green")
+                if not local_import:
+                    problems.append("vendor/diarize/vad.py imports read_audio at module "
+                                    "scope, not inside run_vad — late rebinding is no "
+                                    "longer picked up, so the shim must now run BEFORE "
+                                    "`diarize` is imported and this check's ordering "
+                                    "half is too loose")
+
+            rep.expect(cid, not problems,
+                       "spectral-service rebinds silero_vad.read_audio to a soundfile "
+                       "reader before the engine runs, calls no torchaudio.load / "
+                       "AudioDecoder / original read_audio, and the vendored run_vad "
+                       "still imports read_audio inside the function (which is why "
+                       "late rebinding works)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not read the VAD shim: {exc!r}")
+
+
 # =========================================================== wespeaker group
 #
 # The IDENTITY half of the split: the WeSpeaker embedder and BOTH profile stores.
@@ -3184,6 +3881,7 @@ GROUPS = [
     ("aligner", ALIGNER_CHECKS, run_aligner),
     ("moss", MOSS_CHECKS, run_moss),
     ("pyannote", PYANNOTE_CHECKS, run_pyannote),
+    ("spectral", SPECTRAL_CHECKS, run_spectral),
     ("wespeaker", WESPEAKER_CHECKS, run_wespeaker),
 ]
 

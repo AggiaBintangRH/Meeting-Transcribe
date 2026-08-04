@@ -374,6 +374,45 @@ pipi "numpy<2.5" || true
 dl "pyannote/wespeaker-voxceleb-resnet34-LM" "WeSpeaker embeddings (speaker profiles)"
 
 # -------------------------------------------------------------
+# 3b. DIARIZATION ENGINE 2 — spectral (vendored, CPU-only)
+#     Silero VAD -> sliding-window WeSpeaker embeddings -> GMM-BIC speaker
+#     counting -> spectral clustering -> Viterbi smoothing.
+#     Selectable as diarization.engine = spectral.
+#
+#     NO MODEL DOWNLOAD OF ITS OWN, deliberately: it reuses the WeSpeaker
+#     weights fetched directly above and the Silero VAD installed in section 4.
+#     That reuse is the whole reason the vendored tree carries this project's
+#     torch_embedder.py.
+#
+#     THE ENGINE IS NOT PIP-INSTALLED, and must not be. Upstream
+#     (github.com/FoxNoseTech/diarize @ 4f25d27, Apache 2.0) embeds through
+#     `wespeakerruntime`, which downloads its OWN ONNX copy of the same weights
+#     from a hardcoded URL at runtime — a network call the 100%-offline
+#     requirement forbids. scripts/spectral/vendor/diarize/ is that tree with
+#     embeddings.py re-pointed at the PyTorch model (measured cosine 1.0000 vs
+#     the ONNX vector). It rides scripts/ into the .app via build.sh [B3], the
+#     same route as the MOSS helper, and build.sh's vendored-helper gate refuses
+#     to build without it.
+# -------------------------------------------------------------
+echo ""
+echo "==> Installing the spectral engine's one extra dependency (pydantic)..."
+# The vendored tree's utils.py is built on pydantic (five validated models).
+# Everything else it imports — numpy, scipy, soundfile, scikit-learn, torch,
+# pyannote.audio, silero-vad — is already installed by the sections around this
+# one. An ordinary PyPI package, so unlike the MOSS helper it survives build.sh's
+# `git+` strip and really does reach the bundled interpreter.
+pipi "pydantic" || FAILED+=("pydantic (spectral engine)")
+
+# The vendored copy is what runs — fail loudly here rather than at the first
+# meeting if it is missing or broken.
+if "$PY" -c "import sys; sys.path.insert(0, 'scripts/spectral/vendor'); from diarize import diarize, DiarizeResult" 2>/dev/null; then
+  echo "    vendored copy OK (scripts/spectral/vendor/diarize)"
+else
+  echo "!! scripts/spectral/vendor/diarize is missing or broken — the spectral engine will not run"
+  FAILED+=("scripts/spectral/vendor/diarize")
+fi
+
+# -------------------------------------------------------------
 # 4. VAD — Silero VAD v6.2.1 (weights ship inside the pip package)
 # -------------------------------------------------------------
 echo ""
@@ -549,6 +588,10 @@ checks = {
     "mlx_audio.stt.models.nemotron_asr": "mlx-audio Nemotron model support",
     "mlx_whisper": "mlx-whisper (Whisper runtime)",
     "pyannote.audio": "pyannote.audio (diarization runtime)",
+    # Both are the spectral engine's, and NOTHING ELSE in the app imports
+    # pydantic — so if it is ever dropped, this is the only line that notices.
+    "pydantic": "pydantic (spectral engine data models)",
+    "sklearn": "scikit-learn (spectral clustering + GMM speaker counting)",
 }
 failed = []
 for module, label in checks.items():
@@ -662,6 +705,31 @@ except Exception:
     sys.exit(1)
 EOF
 [ $? -eq 0 ] || FAILED+=("pyannote pipeline load test")
+
+# The spectral engine, loaded exactly as its sidecar loads it: the vendored tree
+# imports, Silero VAD loads, and the PyTorch WeSpeaker embedder instantiates.
+# No audio is diarized here — a client machine has no fixture, and the sidecar
+# does the real pass at session start.
+echo ""
+echo "==> Verifying the spectral diarization engine (vendored, CPU)..."
+PYANNOTE_METRICS_ENABLED=false HF_HUB_OFFLINE=1 "$PY" - <<'EOF'
+import sys, traceback
+try:
+    sys.path.insert(0, "scripts/spectral/vendor")
+    import diarize
+    from diarize import diarize as run_diarize  # noqa: F401
+    from silero_vad import load_silero_vad
+    load_silero_vad()
+    from diarize.torch_embedder import Speaker
+    Speaker()
+    print(f"   OK: spectral engine {diarize.__version__} (vendored) + Silero VAD "
+          f"+ PyTorch WeSpeaker embedder all load")
+except Exception:
+    print("   FAILED: spectral engine — full traceback:")
+    traceback.print_exc(file=sys.stdout)
+    sys.exit(1)
+EOF
+[ $? -eq 0 ] || FAILED+=("spectral engine load test")
 
 # DiCoW lives in .venv-dicow, so it must be verified with THAT interpreter.
 # Import check + offline snapshot resolve only — a full 6 GB model load would

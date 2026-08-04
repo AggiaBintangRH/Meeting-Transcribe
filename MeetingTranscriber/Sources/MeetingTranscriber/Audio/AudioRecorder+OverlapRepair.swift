@@ -39,6 +39,19 @@ extension AudioRecorder {
             finishRepairStep(.done)
             return
         }
+        // Same shape, different reason. The spectral engine DOES produce pyannote-
+        // style turns — but it is inherently exclusive (one label per frame), so
+        // no two of its turns ever intersect and `overlapRegions()` is empty by
+        // construction. Skipped explicitly rather than left to return an empty
+        // window list, so the log says "this engine cannot detect overlap" instead
+        // of the ambiguous "no 2-speaker overlap windows to repair", which on
+        // pyannote means "we looked and there weren't any".
+        guard !spectralDiarizationActive else {
+            overlapLog("skipped — diarization engine is SPECTRAL, which assigns exactly one "
+                       + "speaker per instant, so there are no overlap regions to repair")
+            finishRepairStep(.done)
+            return
+        }
         guard stopped, finalDiarDone, lastChunkDone else { return }
         guard repairTask == nil, !overlapRepairing else { return }
         guard let recording = lastRecordingURL else { finishRepairStep(.done); return }

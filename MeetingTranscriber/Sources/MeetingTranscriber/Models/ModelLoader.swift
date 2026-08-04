@@ -70,6 +70,16 @@ final class ModelLoader: ObservableObject {
     /// with run-local labels and `embedding` says who those people are.
     private(set) var pyannote: PyannoteService?
 
+    /// SPECTRAL diarization sidecar (vendored `diarize`, CPU); persistent.
+    /// nil unless `diarization.engine` is `spectral` — which is what makes every
+    /// pyannote-dependent path (live chunks, tail passes, overlap repair) a
+    /// natural no-op under this engine, exactly as it is under MOSS.
+    ///
+    /// It answers a WHOLE-FILE pass and nothing else, so it is asked exactly once
+    /// per stream per session, at Stop. `embedding` is loaded alongside it — see
+    /// `DiarizationStack.usesSpeakerIdentity`.
+    private(set) var spectral: SpectralService?
+
     /// Speaker-identity sidecar (WeSpeaker + the two profile stores); persistent.
     /// The other half of the former `diarize-service.py`.
     ///
@@ -109,6 +119,11 @@ final class ModelLoader: ObservableObject {
     nonisolated static let mossEngineID = "moss"
     /// The pyannote diarization engine id — the default.
     nonisolated static let pyannoteEngineID = "pyannote"
+    /// The SPECTRAL diarization engine id — the third engine (2026-08-04).
+    /// Same string as its catalog id, unlike MOSS; see
+    /// `ModelCatalog.diarizationEngineValue` for why that difference is not an
+    /// inconsistency.
+    nonisolated static let spectralEngineID = "spectral"
 
     /// Whether this session loads the forced aligner.
     ///
@@ -160,17 +175,45 @@ final class ModelLoader: ObservableObject {
                                                    engine: String,
                                                    chunkedID: String) -> DiarizationStack? {
         guard diarizationEnabled else { return nil }
-        guard engine == mossEngineID else { return .pyannote }
-        return needsSecondMossProcess(chunkedID: chunkedID, engine: engine)
-            ? .mossSecondProcess : nil
+        switch engine {
+        case mossEngineID:
+            return needsSecondMossProcess(chunkedID: chunkedID, engine: engine)
+                ? .mossSecondProcess : nil
+        case spectralEngineID:
+            return .spectral
+        default:
+            // An UNKNOWN stored value still resolves to pyannote, which is what
+            // `diarizationEngine(forEngine:)` shows and what the recorder's
+            // `?? pyannoteEngineID` defaults produce. Keeping the fall-through
+            // here (rather than an `== pyannoteEngineID` test) is what stops a
+            // stale/garbage setting from silently loading nothing at all.
+            return .pyannote
+        }
     }
 
-    /// What a session's diarization is served by. `nil` — the third case — means
+    /// What a session's diarization is served by. `nil` — the fourth case — means
     /// "nothing", which is both "switched off" and "MOSS doing both jobs in the
     /// chunked process".
     enum DiarizationStack: Equatable, Hashable {
         case pyannote           // pyannote-service + wespeaker-service
+        case spectral           // spectral-service + wespeaker-service
         case mossSecondProcess  // a second MOSS process, ASR done by another model
+
+        /// Whether this stack needs the WeSpeaker identity sidecar.
+        ///
+        /// TWO stacks do, and that is the point of the 2026-07-30 pyannote/wespeaker
+        /// split paying off: spectral emits run-local labels exactly as pyannote
+        /// does, so saved voice profiles, renaming and `spk` confidence all keep
+        /// working under it with no new identity code. MOSS names its own speakers
+        /// and never reaches the stores.
+        ///
+        /// Read by the teardown so the embedder is dropped only when NEITHER
+        /// pipeline engine is selected — two independent `!=` checks would have
+        /// killed it under spectral, which is the state no code path expects
+        /// (`SpeakerTurn` has no representation for an unidentified turn).
+        var usesSpeakerIdentity: Bool {
+            self == .pyannote || self == .spectral
+        }
     }
 
     /// The overlap-repair engine id this session should keep alive, or nil for
@@ -185,10 +228,26 @@ final class ModelLoader: ObservableObject {
     /// on, because both engines locate their windows from PYANNOTE turns and there
     /// are none in a MOSS session — the load step has always known this, and the
     /// teardown now agrees with it.
+    ///
+    /// SPECTRAL IS EXCLUDED FOR A DIFFERENT REASON, and it is worth stating rather
+    /// than filing under "not pyannote". Both repair engines need OVERLAP REGIONS:
+    /// `AudioRecorder.overlapRegions()` finds them by looking for turns whose spans
+    /// intersect, which requires a diarizer that can put two speakers on the same
+    /// instant. The spectral engine is inherently EXCLUSIVE — its Viterbi smoothing
+    /// assigns exactly one label per frame — so its turns never intersect and
+    /// `repairWindows` would always come back empty. Loading a 6 GB DiCoW to
+    /// discover that once per meeting is the same waste the MOSS branch avoids.
+    ///
+    /// Written as two `!=` tests rather than `== pyannoteEngineID` so an unknown
+    /// stored engine value behaves the same here as it does in
+    /// `wantedDiarizationStack` (which resolves it to pyannote): a session that
+    /// really is running pyannote must not silently lose repair.
     nonisolated static func wantedOverlapEngine(repairEnabled: Bool,
                                                 engineID: String,
                                                 diarEngine: String) -> String? {
-        guard repairEnabled, diarEngine != mossEngineID else { return nil }
+        guard repairEnabled,
+              diarEngine != mossEngineID,
+              diarEngine != spectralEngineID else { return nil }
         return engineID
     }
 
@@ -252,6 +311,17 @@ final class ModelLoader: ObservableObject {
         if wantedDiar != .pyannote {
             pyannote?.terminate()
             pyannote = nil
+        }
+        if wantedDiar != .spectral {
+            spectral?.terminate()
+            spectral = nil
+        }
+        // The embedder serves BOTH pipeline engines, so it is dropped only when
+        // NEITHER is selected. Written as one question — "does this session's
+        // stack use identity?" — rather than as a second `!=` beside each
+        // pipeline's own, because two independent tests would each have dropped
+        // it for the other engine's session.
+        if wantedDiar?.usesSpeakerIdentity != true {
             embedding?.terminate()
             embedding = nil
         }
@@ -364,6 +434,15 @@ final class ModelLoader: ObservableObject {
             break
         case .mossSecondProcess:
             steps.append(Step(model: ModelCatalog.mossDiarization, checkInstalled: true))
+        case .spectral:
+            // Two steps for the same reason the pyannote engine has two: this
+            // engine is the pipeline half only, and identity is a separate
+            // process. Embedder FIRST, again because it is the cheap check —
+            // and here the two steps genuinely check the SAME weights
+            // (`spectralDiarization.hfRepo` IS the WeSpeaker checkpoint), so a
+            // missing download fails at the first row rather than the second.
+            steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
+            steps.append(Step(model: ModelCatalog.spectralDiarization, checkInstalled: true))
         case .pyannote:
             // TWO steps for the pyannote engine since the 2026-07-30 split: the
             // embedder and the pipeline are separate processes now, and the
@@ -512,6 +591,24 @@ final class ModelLoader: ObservableObject {
                     try PyannoteService()
                 }.value
             }
+            return
+        }
+
+        // Diarization: start the persistent SPECTRAL sidecar (Silero + WeSpeaker,
+        // both CPU). Fatal on failure, like every other diarization stack member:
+        // this engine has no live path, so a broken sidecar would otherwise
+        // surface as a meeting that produces no speakers at all, at Stop, with
+        // nothing left to re-run.
+        if step.model.id == ModelCatalog.spectralDiarization.id {
+            let config = SpectralService.Config.fromSettings()
+            if let existing = spectral, existing.config == config {
+                return
+            }
+            spectral?.terminate()
+            spectral = nil
+            spectral = try await Task.detached(priority: .userInitiated) {
+                try SpectralService(config: config)
+            }.value
             return
         }
 

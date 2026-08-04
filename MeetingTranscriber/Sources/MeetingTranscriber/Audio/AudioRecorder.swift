@@ -230,6 +230,17 @@ final class AudioRecorder: ObservableObject {
     /// in `beginCapture` like every other setting, so the engine cannot change
     /// mid-recording and leave half the transcript labelled by each.
     var mossDiarizationActive = false
+
+    /// True when THIS session takes its speaker labels from the SPECTRAL engine.
+    /// Read once in `beginCapture` (via `configureSpectral`) like every other
+    /// setting, so the engine cannot change mid-recording and leave half the
+    /// transcript labelled by each.
+    ///
+    /// Declared here rather than in `AudioRecorder+Spectral` for the plain Swift
+    /// reason the MOSS and remote state above is: an extension cannot hold stored
+    /// properties. Inert for every other session — it stays false, so every guard
+    /// that reads it is a no-op.
+    var spectralDiarizationActive = false
     /// True when the chunked ASR model IS MOSS, so one process fills both roles
     /// and the segments arriving on `onChunkSegments` describe the very text
     /// `onChunkTranscript` is about to deliver.
@@ -353,7 +364,23 @@ final class AudioRecorder: ObservableObject {
             state = .idle
             return
         }
-        // Third refusal, same rule and same place: "Run a transcription pass at stop" with
+        // Third refusal, same rule and same place: the spectral diarization engine
+        // with its stop pass switched off. That engine has no live path at all, so
+        // the stop pass is not a refinement of the labels — it IS the labels, and
+        // without it the meeting produces no speakers whatsoever. Told before the
+        // recording rather than discovered as an unlabelled transcript after it.
+        // See `spectralRefusalMessage`.
+        if let refusal = Self.spectralRefusalMessage(
+            diarizationEngine: diarEngine,
+            diarizationEnabled: UserDefaults.standard.object(forKey: "diarization.enabled") as? Bool ?? true,
+            finalPass: UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true) {
+            spectralLog("REFUSED start — \(refusal)")
+            modelLoader.failStartup(step: "Spectral diarization + stop pass", message: refusal)
+            errorMessage = refusal
+            state = .idle
+            return
+        }
+        // Fourth refusal, same rule and same place: "Run a transcription pass at stop" with
         // "Continue from live text (tail only)" OFF asks for a full re-transcription
         // of the whole recording, which MOSS cannot do at all and Voxtral cannot
         // do in reasonable time. Told before the meeting, not after it — the cost
@@ -628,6 +655,15 @@ final class AudioRecorder: ObservableObject {
         // engine. It also resets every MOSS collection for the session and wires
         // the second process's callbacks when there is one.
         configureMoss()
+        // The third engine, read in exactly the same place and the same way, so
+        // all three are fixed for the whole recording. It is the LAST of the three
+        // deliberately: `configureDiarization` returns immediately when
+        // `modelLoader.pyannote` is nil (which it always is under this engine) and
+        // `configureMoss` sets `mossDiarizationActive = false` for the same reason,
+        // so the three calls in this order leave exactly one of the flags true —
+        // and a spectral session has already had the other two no-op cleanly
+        // rather than half-wiring a service that is not loaded.
+        configureSpectral()
         // The second MOSS process for this session, or nil — captured once, like
         // `chunked`, so the escaping tap closure never touches the recorder to
         // find it.
@@ -1104,12 +1140,29 @@ final class AudioRecorder: ObservableObject {
         // re-diarize the whole recording (best global clustering).
         let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
         let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? false
-        let willRunStopPass = finalOn && modelLoader.pyannote != nil
+        // The SPECTRAL engine's office pass, decided by its own pure rule. The two
+        // are mutually exclusive by construction — `modelLoader.pyannote` is nil
+        // under this engine and `modelLoader.spectral` is nil under the other — but
+        // both are asked explicitly so the overlay's "diarize" row exists for
+        // exactly one of them and can never be listed twice or not at all.
+        let runsSpectralPass = Self.runsSpectralOfficePass(
+            spectralActive: spectralDiarizationActive,
+            finalPass: finalOn,
+            hasService: modelLoader.spectral != nil,
+            hasRecording: lastRecordingURL != nil)
+        let willRunStopPass = runsSpectralPass || (finalOn && modelLoader.pyannote != nil)
         // The remote pass is dispatched HERE, before the overlay is built, so the
         // step list knows whether to show a remote-diarization row. Queued ahead
         // of the office stop pass on the same stdin; the sidecar drains it in
         // order, so both run to completion regardless of who is first.
-        let willRunRemoteDiar = startRemoteDiarization()
+        //
+        // Routed by the engine, not merged into one function: the two dispatchers
+        // talk to DIFFERENT sidecars and take different modes (spectral passes
+        // `supportsTail: false`). Each returns whether it took the remote gate, so
+        // the overlay contract is identical whichever answered.
+        let willRunRemoteDiar = spectralDiarizationActive
+            ? startRemoteSpectralDiarization()
+            : startRemoteDiarization()
 
         // Everything below lands asynchronously; block the controls until it does.
         buildStopSteps(willRunStopPass: willRunStopPass,
@@ -1119,9 +1172,22 @@ final class AudioRecorder: ObservableObject {
         // One place decides how long the overlay may wait — see
         // `stopWatchdogSeconds`, which exists because two watchdogs in a row
         // failed to scale with the work they were guarding.
+        // The spectral legs' own watchdogs are what the overlay must outlast — the
+        // remote one is deliberately DOUBLE the office one (both passes queue on a
+        // single stdin, so the remote job can wait out the office job before it
+        // even starts), so the budget takes the larger of the two whenever a remote
+        // pass was actually dispatched. Zero for every other engine, which is what
+        // keeps all three pre-existing budgets identical.
+        // Either leg alone is enough to need the budget: a dual-stream session can
+        // legitimately dispatch the remote pass while the office one is skipped.
+        let spectralBudget = spectralDiarizationActive && (runsSpectralPass || willRunRemoteDiar)
+            ? Self.spectralWatchdogSeconds(recordingLength: recordingElapsed)
+                * (willRunRemoteDiar ? 2 : 1)
+            : 0
         startStopWatchdog(seconds: Self.stopWatchdogSeconds(
             chunkedFullPassWindows: chunkedPlan.runsFullPass ? fullPassWindowCount : 0,
-            mossFullPassWindows: mossFullPassWindowCount))
+            mossFullPassWindows: mossFullPassWindowCount,
+            spectralPassSeconds: spectralBudget))
 
         // Started AFTER the step list exists, because the pass reports its
         // progress into the "chunk" (and, dual-stream, "remote") rows.
@@ -1140,7 +1206,14 @@ final class AudioRecorder: ObservableObject {
         }
 
         if willRunStopPass {
-            if continueOnStop {
+            // The spectral branch is FIRST and does not consult `continueOnStop`:
+            // there is no tail to continue from, so the whole-file pass is the only
+            // mode. `runsSpectralPass` already proved the service and the recording
+            // exist, which is why this leg has no fallback arm — the `else if`
+            // chain below keeps pyannote's untouched.
+            if runsSpectralPass, let recording = lastRecordingURL {
+                startSpectralDiarization(recording)
+            } else if continueOnStop {
                 diarizeTailChunk()
             } else if let recording = lastRecordingURL {
                 startDiarization(recording)

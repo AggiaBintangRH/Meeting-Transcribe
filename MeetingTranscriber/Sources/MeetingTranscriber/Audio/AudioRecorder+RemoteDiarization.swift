@@ -11,6 +11,15 @@ extension AudioRecorder {
     /// boundary to the sidecar as a `remote` job. Mirrors `diarizeLiveChunk`,
     /// with no position/ATND involvement of any kind.
     func diarizeRemoteLiveChunk(windowStart: Double) {
+        // THE SPECTRAL ENGINE HAS NO LIVE PATH AT ALL — its sidecar serves only
+        // `cmd: "final"` and refuses anything else. Structurally it can never be
+        // reached from here (`modelLoader.pyannote` is nil under that engine and
+        // `SpectralService` has no chunk API), but the early-out below returns
+        // WITHOUT clearing the buffer, so falling through would accumulate the
+        // whole remote stream at ~230 MB/hour for a pass that reads the Remote WAV
+        // and never looks at it. Same shape as the `chunkAudio` leak found on
+        // 2026-07-31, caught here before it could ship.
+        guard !spectralDiarizationActive else { remoteDiarAudio = []; return }
         guard remoteStreamActive, let service = modelLoader.pyannote else { return }
         let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
         guard liveOn else {
@@ -62,14 +71,23 @@ extension AudioRecorder {
     /// The stop-pass decision. Remote now honours `diarization.continueOnStop`
     /// exactly as Office does — see `startRemoteDiarization` for WHY this reverses
     /// the phase-4 rule.
+    ///
+    /// `supportsTail` is FALSE for the spectral engine, and it is a parameter
+    /// rather than a branch at the call site so this stays the one function that
+    /// enumerates the modes. Spectral has no chunk job to send and no live labels
+    /// for a tail to continue from, so `continueOnStop` cannot be honoured there;
+    /// it falls through to the full pass instead, which is the only thing that
+    /// engine can do. It defaults to true so every pyannote call — and every
+    /// existing test — is byte-for-byte unchanged.
     nonisolated static func remoteStopMode(finalPass: Bool,
                                            continueOnStop: Bool,
                                            remoteStreamActive: Bool,
                                            hasDiarizationService: Bool,
                                            hasRemoteRecording: Bool,
-                                           tailSamples: Int) -> RemoteStopMode {
+                                           tailSamples: Int,
+                                           supportsTail: Bool = true) -> RemoteStopMode {
         guard finalPass, remoteStreamActive, hasDiarizationService else { return .none }
-        if continueOnStop {
+        if continueOnStop, supportsTail {
             // < 1 s of tail is not worth a job — the same early-out (and the same
             // 16 000-sample threshold) as `diarizeTailChunk`. Returning `.none`
             // rather than dispatching keeps the stop gate untaken, so there is

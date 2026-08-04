@@ -309,28 +309,53 @@ cp -Rc "$PBS_DIR" "$RES/python"
 echo "    Import gate..."
 "$RES/python/bin/python3" -c "import mlx.core as mx; print(mx.add(mx.array(1),mx.array(1))); import torch, pyannote.audio, mlx_whisper, silero_vad; print('IMPORTS OK')"
 
-# --- MOSS vendored-helper gate (mandatory) ---------------------------------
-# The MOSS sidecars import their OWN scripts/<service>/vendor/moss_transcribe_diarize,
-# NOT the pip install in .venv: the freeze strip above deletes `git+` lines, so the
-# only way the helper reaches the bundle is by riding scripts/ in [B3]. That makes
-# each vendor directory a silent single point of failure — delete one and the build
-# still succeeds, and MOSS only fails on the client's machine mid-meeting. This
-# is the DiCoW lesson (2026-07-27) applied one step earlier: fail HERE, loudly.
+# --- vendored-helper gate (mandatory) --------------------------------------
+# Some sidecars import their OWN scripts/<service>/vendor/<package>, NOT a pip
+# install in .venv, so the ONLY way that package reaches the bundle is by riding
+# scripts/ in [B3]. That makes each vendor directory a silent single point of
+# failure — delete one and the build still succeeds, and the feature only fails
+# on the client's machine mid-meeting. This is the DiCoW lesson (2026-07-27)
+# applied one step earlier: fail HERE, loudly.
 # Checked against the source tree because [B3] has not copied scripts/ yet, and
 # through the BUNDLED interpreter because that is the one that will run it.
 #
-# TWO services since 2026-07-31 (one-service-per-role): `moss-asr` is the
-# chunked-ASR role, `moss-diar` the diarization role, and they can run AS TWO
-# PROCESSES AT ONCE. Each is listed here so a missing tree fails the build no
-# matter which role it belongs to — this ONE list is the only place the set of
-# MOSS services is named.
-echo "    MOSS vendored-helper gate..."
-for MOSS_SVC in moss-asr moss-diar; do
-  if ! PYTHONPATH="$ROOT/scripts/$MOSS_SVC/vendor" "$RES/python/bin/python3" \
-       -c "from moss_transcribe_diarize import build_transcription_messages, generate_transcription, parse_transcript; print('MOSS VENDOR OK ($MOSS_SVC)')"; then
-    echo "ERROR: scripts/$MOSS_SVC/vendor/moss_transcribe_diarize does not import in the bundled runtime." >&2
-    echo "       MOSS would be missing from the .app. Run ./download-best-models.sh" >&2
-    echo "       (section 2c) and re-vendor the helper, then rebuild." >&2
+# The reason a package is vendored differs per service, but the failure mode is
+# identical, so ONE table drives ONE loop:
+#   • moss-asr / moss-diar — `moss_transcribe_diarize` is installable only from
+#     git, and the freeze strip above deletes `git+` lines. TWO services since
+#     2026-07-31 (one-service-per-role): `moss-asr` is the chunked-ASR role,
+#     `moss-diar` the diarization role, and they can run AS TWO PROCESSES AT
+#     ONCE, so a tree missing from either is a broken role.
+#   • spectral — `diarize` (github.com/FoxNoseTech/diarize @ 4f25d27, Apache 2.0)
+#     is vendored so its ONE modification can exist at all: `embeddings.py` is
+#     re-pointed at this project's PyTorch WeSpeaker instead of upstream's
+#     `wespeakerruntime`, which downloads its own ONNX weights at runtime from a
+#     hardcoded URL — a network call the 100 %-offline requirement forbids. A pip
+#     install could therefore never replace this copy, in the bundle or in dev.
+#     Its import doubles as the proof that `pydantic` + `pydantic_core` reached
+#     the bundled interpreter: the vendored `utils.py` is built on pydantic and
+#     NOTHING ELSE in this app imports it, so a normal import gate would miss it.
+#     (They are ordinary PyPI lines — `pydantic==…`, `pydantic_core==…` — so they
+#     survive the `git+` strip; verified, not assumed. `pydantic_core` is a
+#     compiled extension whose only `@rpath` entry is its own LC_ID_DYLIB, the
+#     maturin case `check_relocatable` already skips.) The same import also
+#     covers scikit-learn (the spectral clustering) and soundfile.
+#
+# This table is the ONLY place the set of vendoring services is named.
+# Fields: service | package dir | import statement | remediation hint
+echo "    Vendored-helper gate..."
+MOSS_IMPORT="from moss_transcribe_diarize import build_transcription_messages, generate_transcription, parse_transcript"
+for GATE in \
+  "moss-asr|moss_transcribe_diarize|$MOSS_IMPORT|section 2c" \
+  "moss-diar|moss_transcribe_diarize|$MOSS_IMPORT|section 2c" \
+  "spectral|diarize|from diarize import diarize, DiarizeResult|section 3b"; do
+  IFS='|' read -r SVC PKG IMPORT HINT <<< "$GATE"
+  if ! PYTHONPATH="$ROOT/scripts/$SVC/vendor" "$RES/python/bin/python3" \
+       -c "$IMPORT; print('VENDOR OK ($SVC → $PKG)')"; then
+    echo "ERROR: scripts/$SVC/vendor/$PKG does not import in the bundled runtime." >&2
+    echo "       That feature would be missing from the .app. Run" >&2
+    echo "       ./download-best-models.sh ($HINT) and re-vendor the package," >&2
+    echo "       then rebuild." >&2
     exit 1
   fi
 done
@@ -438,6 +463,10 @@ echo "    scripts/ copied (mossformer2/vendor/mossformer2 preserved: $([[ -d "$R
 # One per MOSS service (two since 2026-07-31) — each owns its own vendor tree.
 echo "                     (moss-asr/vendor/moss_transcribe_diarize preserved: $([[ -f "$RES/scripts/moss-asr/vendor/moss_transcribe_diarize/inference_utils.py" ]] && echo yes || echo NO))"
 echo "                     (moss-diar/vendor/moss_transcribe_diarize preserved: $([[ -f "$RES/scripts/moss-diar/vendor/moss_transcribe_diarize/inference_utils.py" ]] && echo yes || echo NO))"
+# Same for spectral's vendored engine: it has NO pip fallback either — upstream's
+# only installable form pulls `wespeakerruntime`, which downloads ONNX weights at
+# runtime, so this copy is the engine.
+echo "                     (spectral/vendor/diarize preserved: $([[ -f "$RES/scripts/spectral/vendor/diarize/torch_embedder.py" ]] && echo yes || echo NO))"
 
 if [[ "${MT_SKIP_MODELS:-0}" == "1" ]]; then
   echo "    MT_SKIP_MODELS=1 — skipping 16GB models copy."

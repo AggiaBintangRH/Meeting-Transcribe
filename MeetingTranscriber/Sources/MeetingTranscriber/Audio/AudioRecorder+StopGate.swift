@@ -117,6 +117,14 @@ extension AudioRecorder {
         // "Repairing overlapping speech" row on the overlay for work that cannot
         // happen.
         guard !mossDiarizationActive else { return false }
+        // And none under the SPECTRAL engine either, for a different reason worth
+        // naming: that engine is inherently EXCLUSIVE (Viterbi smoothing assigns
+        // one label per frame), so its turns never intersect and `overlapRegions()`
+        // is always empty. `ModelLoader.wantedOverlapEngine` does not load a repair
+        // engine for it — this second test exists because the services outlive a
+        // session, so one left over from a previous pyannote meeting would
+        // otherwise put a row on the overlay for work that cannot happen.
+        guard !spectralDiarizationActive else { return false }
         let engine = d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id
         return engine == ModelCatalog.overlapDicow.id
             ? modelLoader.dicowRepair != nil

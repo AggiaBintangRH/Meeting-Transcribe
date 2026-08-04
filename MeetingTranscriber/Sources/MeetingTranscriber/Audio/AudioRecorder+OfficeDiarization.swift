@@ -271,6 +271,18 @@ extension AudioRecorder {
 
     /// Live: write the current chunk's audio to a temp WAV and diarize it.
     func diarizeLiveChunk(windowStart: Double) {
+        // THE SPECTRAL ENGINE HAS NO LIVE PATH AT ALL. Its sidecar serves only
+        // `cmd: "final"` and refuses anything else loudly, because it counts and
+        // clusters speakers over the WHOLE file — a 30 s window's labels would
+        // look continuous across windows while meaning nothing (the failure MOSS
+        // has when it is called per chunk). `SpectralService` has no chunk API and
+        // `modelLoader.pyannote` is nil under this engine, so a live chunk cannot
+        // be dispatched even by accident; the guard is here anyway because it also
+        // has to CLEAR the buffer. Without it, `willBeConsumed` below is false, so
+        // the audio would be dropped correctly — but stating the rule at the top
+        // keeps a future edit to that condition from resurrecting the ~230 MB/hour
+        // accumulation for a pass that reads the recording file instead.
+        guard !spectralDiarizationActive else { chunkAudio = []; return }
         let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
         guard liveOn, modelLoader.pyannote != nil else {
             // When live labels are off but "continue from live labels (tail only)"
