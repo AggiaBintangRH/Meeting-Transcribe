@@ -283,12 +283,12 @@ extension AudioRecorder {
         // keeps a future edit to that condition from resurrecting the ~230 MB/hour
         // accumulation for a pass that reads the recording file instead.
         guard !spectralDiarizationActive else { chunkAudio = []; chunkAudioStart = lastDiarBoundary; return }
-        let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
+        let liveOn = diarLiveEnabled
         guard liveOn, modelLoader.pyannote != nil else {
             // When live labels are off but "continue from live labels (tail only)"
             // is on, DON'T clear the accumulated audio: the whole recording then
             // becomes the single tail diarized at stop (matches the UI caption).
-            let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? false
+            let continueOnStop = diarContinueOnStop
             // Keep the audio ONLY when something will actually consume it. The
             // condition used to be just `continueOnStop && !liveOn`, which is the
             // live-off tail mode — but it never asked whether a diarizer exists,
@@ -313,6 +313,11 @@ extension AudioRecorder {
     func dispatchDiarChunk(samples: [Float], windowStart: Double,
                                    onDispatchFailure: (() -> Void)? = nil) {
         guard let service = modelLoader.pyannote else { onDispatchFailure?(); return }
+        // Captured on the MainActor BEFORE the detached task: the value is the
+        // session's locked one, and reading it inside the closure would be both a
+        // concurrency error and a second read of a thing that must not be read
+        // twice. See `AudioRecorder.lockDiarizationSettings`.
+        let detectOverlap = diarDetectOverlap
         Task.detached(priority: .utility) { [weak self] in
             guard let url = Self.writeTempWAV(samples: samples) else {
                 await MainActor.run { onDispatchFailure?() }
@@ -321,7 +326,6 @@ extension AudioRecorder {
             await MainActor.run { [weak self] in
                 self?.chunkFileByWindow[windowStart] = url
             }
-            let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
             service.diarizeChunk(audio: url, windowStart: windowStart, exclusive: !detectOverlap)
         }
     }
@@ -406,7 +410,7 @@ extension AudioRecorder {
         diarizing = true
         diarizationError = nil
         let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
-        let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
+        let detectOverlap = diarDetectOverlap
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers, exclusive: !detectOverlap)
         // A final pass over a long meeting legitimately takes a while, so scale
         // the limit with the recording — never below 3 minutes.

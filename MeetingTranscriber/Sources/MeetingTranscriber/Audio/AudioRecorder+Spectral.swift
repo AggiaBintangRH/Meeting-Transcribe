@@ -205,7 +205,7 @@ extension AudioRecorder {
     func startRemoteSpectralDiarization() -> Bool {
         let d = UserDefaults.standard
         let finalOn = d.object(forKey: "diarization.finalPass") as? Bool ?? true
-        let continueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? false
+        let continueOnStop = diarContinueOnStop
         let mode = Self.remoteStopMode(finalPass: finalOn,
                                        continueOnStop: continueOnStop,
                                        remoteStreamActive: remoteStreamActive,

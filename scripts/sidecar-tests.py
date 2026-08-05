@@ -3630,6 +3630,7 @@ LAYOUT_CHECKS = [
     "layout/one-service-per-folder",
     "layout/log-name-matches-folder",
     "layout/tail-window-start-is-recorded-not-derived",
+    "layout/diarization-settings-locked-per-session",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -3974,6 +3975,52 @@ def run_layout(rep: Report, ctx):
         rep.expect(cid, not problems,
                    "the tail pass takes its window start from the recorded "
                    "`chunkAudioStart`, never from a stop-time `diarization.live` read",
+                   "; ".join(problems))
+
+    cid = "layout/diarization-settings-locked-per-session"
+    if ctx.wants(cid):
+        # `diarization.live`, `.continueOnStop` and `.detectOverlap` may be read
+        # in exactly ONE place: `lockDiarizationSettings`, at `beginCapture`.
+        #
+        # They used to be read BOTH per chunk and again at Stop, and Settings is
+        # reachable while recording (the gear button carries no `.disabled`), so
+        # changing one mid-meeting made the two reads DISAGREE about the same
+        # recording: `live`+`continueOnStop` decide per chunk whether `chunkAudio`
+        # is kept for a tail AND decide at Stop which pass runs, so audio was
+        # dropped that the tail then needed; `detectOverlap` becomes `exclusive` on
+        # the wire, so half a meeting could be diarized with overlap detection and
+        # half without, with nothing marking the seam.
+        #
+        # Comments stripped first — the files that carry this fix explain it at
+        # length, and a textual search matches its own documentation (the lesson
+        # this check's sibling learned by failing on its own comment).
+        locked = ("diarization.live", "diarization.continueOnStop",
+                  "diarization.detectOverlap")
+        problems = []
+        audio_dir = SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+        for path in sorted(audio_dir.glob("*.swift")):
+            code = "\n".join(l for l in path.read_text().splitlines()
+                              if not l.strip().startswith("//"))
+            for key in locked:
+                needle = f'forKey: "{key}"'
+                if needle not in code:
+                    continue
+                if path.name != "AudioRecorder.swift":
+                    problems.append(f"{path.name} reads {key} — it must use the "
+                                    f"session-locked property instead")
+                    continue
+                # In AudioRecorder.swift the ONLY legal reader is the locker.
+                start = code.find("func lockDiarizationSettings()")
+                end = code.find("\n    }", start) if start >= 0 else -1
+                body = code[start:end] if start >= 0 and end > 0 else ""
+                if code.count(needle) != body.count(needle):
+                    problems.append(f"{key} is read outside lockDiarizationSettings()")
+        if "func lockDiarizationSettings()" not in (
+                audio_dir / "AudioRecorder.swift").read_text():
+            problems.append("lockDiarizationSettings() is gone")
+        rep.expect(cid, not problems,
+                   "the three session-scoped diarization settings are read once, in "
+                   "lockDiarizationSettings(), and nowhere else",
                    "; ".join(problems))
 
     cid = "layout/log-name-matches-folder"

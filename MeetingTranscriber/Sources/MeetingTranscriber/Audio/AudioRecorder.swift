@@ -129,6 +129,46 @@ final class AudioRecorder: ObservableObject {
     /// retained. A fact about the buffer cannot disagree with the buffer; a
     /// setting read minutes later can.
     var chunkAudioStart: Double = 0
+
+    // MARK: Diarization settings, LOCKED for the session
+    //
+    // These three used to be read from UserDefaults BOTH per chunk and again at
+    // Stop, and Settings is reachable while recording (the gear button carries no
+    // `.disabled`). Changing one mid-meeting therefore did not just alter later
+    // behaviour — it made the two reads DISAGREE about the same recording:
+    //
+    //   * `live` + `continueOnStop` decide per chunk whether `chunkAudio` is kept
+    //     for a tail pass (`willBeConsumed`), and decide again at Stop which pass
+    //     runs. Toggle either mid-meeting and audio is dropped that the tail then
+    //     needs, or kept for a full pass that ignores it.
+    //   * `detectOverlap` becomes `exclusive` on the wire, so half a meeting could
+    //     be diarized with overlap detection and half without — one transcript,
+    //     two rules, nothing saying where the seam is.
+    //
+    // Locked at `beginCapture` for the same reason `configureSpectral` locks the
+    // engine: half a transcript under each rule is not a state any display path
+    // can render honestly. The user's change still applies — to the NEXT session,
+    // which is when a setting can be honoured coherently.
+    //
+    // `finalPass` and `numSpeakers` are deliberately NOT here. They are read only
+    // at Stop, there is no second read to disagree with, and `finalPass` is
+    // documented in `runsSpectralOfficePass` as intentionally late — a rule that
+    // trusted a start-of-session value would dispatch a pass the user had since
+    // switched off.
+    var diarLiveEnabled = true
+    var diarContinueOnStop = false
+    var diarDetectOverlap = true
+
+    /// Read the three session-scoped diarization settings once. Called from
+    /// `beginCapture` before anything can consume them, and unconditionally —
+    /// unlike `configureDiarization`, which returns early when there is no
+    /// pyannote service and so cannot own settings the spectral path also reads.
+    func lockDiarizationSettings() {
+        let d = UserDefaults.standard
+        diarLiveEnabled = d.object(forKey: "diarization.live") as? Bool ?? true
+        diarContinueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? false
+        diarDetectOverlap = d.object(forKey: "diarization.detectOverlap") as? Bool ?? true
+    }
     var chunkFileByWindow: [Double: URL] = [:]
 
     // MARK: Forced alignment (its own sidecar since 2026-07-29)
@@ -704,6 +744,7 @@ final class AudioRecorder: ObservableObject {
         remoteFinalDiarWatchdog?.cancel()
         remoteFinalDiarWatchdog = nil
         awaitingRemoteTailWindowStart = nil
+        lockDiarizationSettings()   // before anything can consume them
         configureDiarization()
         configurePositionDiarization()
         // AFTER the position config: `configureMoss` reads `positionSource` to
@@ -1202,7 +1243,7 @@ final class AudioRecorder: ObservableObject {
         // Who spoke when — either append a tail (continue from live labels) or
         // re-diarize the whole recording (best global clustering).
         let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
-        let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? false
+        let continueOnStop = diarContinueOnStop
         // The SPECTRAL engine's office pass, decided by its own pure rule. The two
         // are mutually exclusive by construction — `modelLoader.pyannote` is nil
         // under this engine and `modelLoader.spectral` is nil under the other — but

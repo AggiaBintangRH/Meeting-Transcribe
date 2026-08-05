@@ -21,7 +21,7 @@ extension AudioRecorder {
         // 2026-07-31, caught here before it could ship.
         guard !spectralDiarizationActive else { remoteDiarAudio = []; return }
         guard remoteStreamActive, let service = modelLoader.pyannote else { return }
-        let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
+        let liveOn = diarLiveEnabled
         guard liveOn else {
             // Exactly `diarizeLiveChunk`'s rule, and for the same reason: with live
             // labels off but "continue from live labels (tail only)" on, the whole
@@ -29,7 +29,7 @@ extension AudioRecorder {
             // audio must be KEPT. (Before the 2026-07-22 tail change this always
             // cleared, because the remote stop pass was always a full re-diarization
             // of the remote WAV — see `startRemoteDiarization`.)
-            let continueOnStop = UserDefaults.standard.object(forKey: "diarization.continueOnStop") as? Bool ?? false
+            let continueOnStop = diarContinueOnStop
             if !(continueOnStop && !liveOn) { remoteDiarAudio = [] }
             return
         }
@@ -46,7 +46,7 @@ extension AudioRecorder {
     func dispatchRemoteDiarChunk(samples: [Float], windowStart: Double,
                                          service: PyannoteService,
                                          onDispatchFailure: (() -> Void)? = nil) {
-        let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
+        let detectOverlap = diarDetectOverlap
         Task.detached(priority: .utility) { [weak self] in
             guard let url = Self.writeTempWAV(samples: samples, prefix: "remote-diar") else {
                 await MainActor.run { onDispatchFailure?() }
@@ -119,7 +119,7 @@ extension AudioRecorder {
     func startRemoteDiarization() -> Bool {
         let d = UserDefaults.standard
         let finalOn = d.object(forKey: "diarization.finalPass") as? Bool ?? true
-        let continueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? false
+        let continueOnStop = diarContinueOnStop
         let mode = Self.remoteStopMode(finalPass: finalOn,
                                        continueOnStop: continueOnStop,
                                        remoteStreamActive: remoteStreamActive,
@@ -155,7 +155,7 @@ extension AudioRecorder {
         // (see `diarizeRemoteLiveChunk`'s call site). With live off (+
         // continueOnStop) nothing was ever cleared, so this is the whole recording
         // and begins at 0.
-        let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
+        let liveOn = diarLiveEnabled
         let windowStart = liveOn ? lastDiarBoundary : 0
         awaitingRemoteTailWindowStart = windowStart
         // The tail is a chunk job, not a full pass, so it is bounded by the office
@@ -180,7 +180,7 @@ extension AudioRecorder {
             return
         }
         let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
-        let detectOverlap = UserDefaults.standard.object(forKey: "diarization.detectOverlap") as? Bool ?? true
+        let detectOverlap = diarDetectOverlap
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers,
                              exclusive: !detectOverlap, stream: .remote)
         // Same scale rule as the office final pass: the remote job is queued BEHIND
