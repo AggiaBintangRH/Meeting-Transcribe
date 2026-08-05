@@ -186,6 +186,7 @@ extension AudioRecorder {
         mossChunkIndex = 0
         mossIncomingSegments = nil
         mossPendingWindows = []
+        mossStaleReplies = 0
         mossChunkWatchdog?.cancel()
         mossChunkWatchdog = nil
         // A stop-time full pass from the PREVIOUS session must not survive into
@@ -235,6 +236,18 @@ extension AudioRecorder {
                     ? nil : self.mossPendingWindows.removeFirst()
                 let segments = self.mossIncomingSegments ?? []
                 self.mossIncomingSegments = nil
+                // A reply queued BEFORE the stop-time full pass began describes
+                // audio the pass is re-labelling right now. Applying it would
+                // duplicate every turn in that span — see `mossStaleReplies`.
+                if self.mossStaleReplies > 0 {
+                    self.mossStaleReplies -= 1
+                    self.mossLog("chunk from before the FULL PASS discarded"
+                                 + (window.map { " [\(self.fmt($0.lowerBound))-"
+                                                 + "\(self.fmt($0.upperBound))]" } ?? "")
+                                 + " — \(segments.count) segments dropped")
+                    self.checkMossChunkDone()
+                    return
+                }
                 if let window { self.applyMossTurns(segments, window: window) }
                 self.checkMossChunkDone()
             }
@@ -250,6 +263,9 @@ extension AudioRecorder {
                 if !self.mossPendingWindows.isEmpty {
                     self.mossPendingWindows.removeFirst()
                 }
+                // A failed reply consumes its stale slot too, or the counter would
+                // never drain and the pass's OWN first reply would be discarded.
+                if self.mossStaleReplies > 0 { self.mossStaleReplies -= 1 }
                 self.mossLog("chunk FAILED — \(message)")
                 self.checkMossChunkDone()
             }

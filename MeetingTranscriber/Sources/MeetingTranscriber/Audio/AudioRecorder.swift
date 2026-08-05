@@ -329,6 +329,36 @@ final class AudioRecorder: ObservableObject {
     /// Its own queue, never `pendingChunkWindows`: two sidecars flush on the same
     /// boundary and each has to pop the window it was actually given.
     var mossPendingWindows: [ClosedRange<Double>] = []
+
+    /// How many replies still in flight belong to the LIVE pass and must be
+    /// thrown away when they land, because the stop-time full pass has already
+    /// replaced the labels they would join.
+    ///
+    /// THE BUG (found 2026-08-05 in a real session's log). `startMossFullPass`
+    /// clears `mossTurns` but not `mossPendingWindows` — that FIFO is only
+    /// emptied in `configureMoss`, at session start. So a live chunk dispatched
+    /// seconds before Stop was still in the sidecar when the full pass began; its
+    /// reply popped the FIFO, was applied to the freshly-cleared set, and the full
+    /// pass then re-labelled the SAME audio. Measured, from the log:
+    ///
+    ///     FULL PASS start — 2 window(s) of 120s over 149.8s
+    ///     chunk #0 [0.0-120.1] 36 turns     <- the live chunk, upper bound 120.1
+    ///     chunk #1 [0.0-120.0] 36 turns     <- full-pass window 1
+    ///     chunk #2 [120.0-149.8] 0 turns
+    ///     FULL PASS done — 72 turns         <- 36 counted twice
+    ///
+    /// The sidecar confirms the duplication: 1886 and 1887 characters, 36
+    /// segments, `S01..S05` — the same audio transcribed twice. And because a
+    /// MOSS id embeds its chunk index ON PURPOSE, the two sets carry different
+    /// ids, so `coalesceAdjacentSameSpeaker` cannot merge them: the first two
+    /// minutes end up with two overlapping sets of speaker spans.
+    ///
+    /// A COUNT rather than a flag, and it is counted BEFORE the pass queues
+    /// anything: it drops exactly the replies that predate the pass and keeps the
+    /// FIFO aligned, where clearing the queue outright would let a late live
+    /// reply pop a FULL-PASS window and be applied under that window's times —
+    /// the same bug wearing better clothes.
+    var mossStaleReplies = 0
     /// Stop gate leg for that second process, mirroring `lastChunkDone`. Starts
     /// true so a session without one is already complete before it is consulted.
     var mossLastChunkDone = true

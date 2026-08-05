@@ -117,6 +117,17 @@ extension AudioRecorder {
 
         // The live labels are about to be replaced wholesale. Cleared up front so
         // a stale set is not shown underneath the transcript for the whole pass.
+        //
+        // Anything ALREADY in flight belongs to the live pass and describes audio
+        // this pass is about to re-label. Counted here, before a single window is
+        // queued, so the replies can be dropped as they land instead of being
+        // merged into the set just cleared. See `AudioRecorder.mossStaleReplies`
+        // for the log that shows what this cost: 36 turns applied twice.
+        mossStaleReplies = mossPendingWindows.count
+        if mossStaleReplies > 0 {
+            mossLog("FULL PASS will discard \(mossStaleReplies) live reply(ies) "
+                    + "still in flight")
+        }
         mossTurns = []
         rebuildDisplayRows()
         mossLog("FULL PASS start — \(windows.count) window(s) of "
