@@ -110,7 +110,26 @@ REPO = "OpenMOSS-Team/MOSS-Transcribe-Diarize"
 SR = 16_000
 MIN_CHUNK_SEC = 0.25      # ignore blips shorter than this
 MAX_BUFFER_SEC = 300      # safety cap
-MAX_NEW_TOKENS = 2048     # upstream app/cli.py's default
+MAX_NEW_TOKENS = 5120     # the model's OWN generation_config.json default
+#
+# RAISED 2026-08-05, from 2048. The old value was copied from upstream's
+# `app/cli.py` default and treated here as if it were a limit of the model. It is
+# not: the checkpoint's own `generation_config.json` says **5120**, that is also
+# upstream's SERVER default, and upstream's README says outright "For longer
+# multi-speaker audio, raise `max_new_tokens`" (its example is 65536).
+#
+# What 2048 actually cost, measured by driving this sidecar directly on a real
+# recording: a 240 s window generated exactly 2048/2048 tokens — TRUNCATED, with
+# the end of that chunk silently missing from the transcript (the gate below is
+# what makes it not silent). At 5120 the same window finishes at 2159/5120 (42 %)
+# and a 300 s window at 2738/5120 (53 %). So the "MOSS cannot take a long window"
+# conclusion recorded earlier in CLAUDE.md was a property of THIS CONSTANT, not
+# of the model.
+#
+# The window size (`mossFullPassWindowSec`) is deliberately NOT changed with it —
+# raising the ceiling is one-directional and can only reduce truncation, while
+# enlarging the window trades fewer speaker seams against peak RAM and total pass
+# time, neither of which has been measured properly yet.
 
 # RMS below which a chunk is not worth a model call. Value and rationale copied
 # verbatim from AudioRecorder.remoteSilenceRMS: 0.004 ≈ −48 dBFS — a digital
