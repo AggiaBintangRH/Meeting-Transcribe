@@ -3629,6 +3629,7 @@ def run_wespeaker(rep: Report, ctx):
 LAYOUT_CHECKS = [
     "layout/one-service-per-folder",
     "layout/log-name-matches-folder",
+    "layout/tail-window-start-is-recorded-not-derived",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -3931,6 +3932,49 @@ def run_layout(rep: Report, ctx):
                    f"<folder>-service.py as a direct child; "
                    f"{len(LAYOUT_EXEMPT)} exemptions hold none; none at scripts/ root",
                    "; ".join(script_problems))
+
+    cid = "layout/tail-window-start-is-recorded-not-derived"
+    if ctx.wants(cid):
+        # `diarizeTailChunk` must NOT ask `diarization.live` where its buffer
+        # started. It used to, and Settings is reachable WHILE RECORDING (the gear
+        # button carries no `.disabled`), while `diarization.live` is re-read per
+        # chunk — so turning live labels off mid-meeting with continue-on-stop on
+        # makes the buffer start accumulating at that MOMENT, and the stop-time
+        # read then declared it started at 0. Every tail turn came out shifted
+        # earlier by however long the meeting had already run, silently.
+        #
+        # The fix records `chunkAudioStart` at each clear, so this check pins the
+        # ABSENCE of the derivation AND the presence of the recorded fact — the
+        # second half matters, since a file that had simply stopped computing a
+        # window start would pass the first half alone.
+        src = (SWIFT_SOURCES / "MeetingTranscriber" / "Audio" / "AudioRecorder+OfficeDiarization.swift").read_text()
+        problems = []
+        start = src.find("func diarizeTailChunk()")
+        if start < 0:
+            problems.append("diarizeTailChunk() is gone — re-derive this check")
+        else:
+            # COMMENTS STRIPPED FIRST, and this check learned that the hard way:
+            # its first version failed on the very comment that explains why the
+            # read is forbidden. Same lesson as `assert_no_torchcodec_use` and the
+            # AST checks — a textual search matches its own documentation. Ended
+            # at the next declaration rather than by a byte count, so the window is
+            # the function and not "the function plus whatever follows".
+            end = src.find("\n    func ", start + 1)
+            body = src[start:end if end > 0 else len(src)]
+            body = "\n".join(l for l in body.splitlines()
+                              if not l.strip().startswith("//"))
+            if "diarization.live" in body:
+                problems.append("diarizeTailChunk reads `diarization.live` again — a "
+                                "setting read at stop time cannot describe when the "
+                                "buffer actually started")
+            if "chunkAudioStart" not in body:
+                problems.append("diarizeTailChunk no longer uses `chunkAudioStart`")
+        if "var chunkAudioStart" not in (SWIFT_SOURCES / "MeetingTranscriber" / "Audio" / "AudioRecorder.swift").read_text():
+            problems.append("`chunkAudioStart` is gone from AudioRecorder")
+        rep.expect(cid, not problems,
+                   "the tail pass takes its window start from the recorded "
+                   "`chunkAudioStart`, never from a stop-time `diarization.live` read",
+                   "; ".join(problems))
 
     cid = "layout/log-name-matches-folder"
     if ctx.wants(cid):

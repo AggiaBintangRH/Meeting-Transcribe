@@ -112,6 +112,23 @@ final class AudioRecorder: ObservableObject {
 
     // Live chunked diarization — runs on its OWN interval, independent of ASR
     var chunkAudio: [Float] = []                       // 16k samples pending diarization
+    /// Recording time at which the FIRST sample now in `chunkAudio` was captured.
+    ///
+    /// Exists because the tail pass used to DERIVE this from a setting instead of
+    /// recording what happened: `diarizeTailChunk` computed
+    /// `windowStart = liveOn ? lastDiarBoundary : 0`, reading `diarization.live`
+    /// at STOP time. Settings are reachable while recording (the gear button is
+    /// not disabled), and `diarization.live` is re-read per chunk, so turning
+    /// live labels OFF mid-meeting with continue-on-stop ON makes the buffer
+    /// start accumulating at that MOMENT — while the stop-time read then says
+    /// "live is off, so this buffer starts at 0". Every turn in the tail would be
+    /// reported shifted earlier by however long the meeting had already run, with
+    /// nothing anywhere saying so.
+    ///
+    /// Updated wherever `chunkAudio` is emptied, and deliberately NOT where it is
+    /// retained. A fact about the buffer cannot disagree with the buffer; a
+    /// setting read minutes later can.
+    var chunkAudioStart: Double = 0
     var chunkFileByWindow: [Double: URL] = [:]
 
     // MARK: Forced alignment (its own sidecar since 2026-07-29)
@@ -654,6 +671,7 @@ final class AudioRecorder: ObservableObject {
         sessionSpeakerIDs = []
         liveTurns = []
         chunkAudio = []
+        chunkAudioStart = 0
         alignChunkAudio = []
         alignAudioByWindow = [:]
         diarElapsed = 0

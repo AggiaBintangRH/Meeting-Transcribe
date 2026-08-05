@@ -127,9 +127,62 @@ final class TranscriptMergeTests: XCTestCase {
 
     /// Punctuation-only tokens have an empty norm and never participate in
     /// matching, so they cannot build an anchoring run of their own.
+    ///
+    /// CORRECTED 2026-08-05. This case used to assert `.replace` — i.e. that
+    /// `"x — — — — y"` may be replaced by `"— — — —"`, DELETING the words `x` and
+    /// `y`. That is the punctuation-only data-loss bug, and this test was pinning
+    /// it, which is a large part of why it survived: the merge behaved exactly as
+    /// the suite said it should.
+    ///
+    /// The stated intent — punctuation cannot anchor a run — is about
+    /// `longestRun`, and that half is unchanged and still the point. Only the
+    /// conclusion drawn from it was wrong: no anchor does not mean "replace with
+    /// this", it means "this track has nothing to say".
     func testPunctuationCannotAnchorARun() {
         let r = TranscriptMerge.merge(existing: "x — — — — y", track: "— — — —")
-        XCTAssertEqual(r.longestRun, 0)
-        XCTAssertEqual(r.kind, .replace, "four matching dashes are not four matching words")
+        XCTAssertEqual(r.longestRun, 0, "four matching dashes are not four matching words")
+        XCTAssertEqual(r.kind, .noop, "a wordless track may never delete real words")
+        XCTAssertEqual(r.text, "x — — — — y")
+    }
+
+    // MARK: - A wordless track may never delete (2026-08-05)
+
+    /// THE BUG: a punctuation-only track REPLACED a real sentence with a full
+    /// stop. Empty norms never match, so no block anchors the two texts,
+    /// `significant` was false, and `.replace(text: ".")` came back. Measured
+    /// before the fix: existing "we should ship it on friday", track "." →
+    /// `kind=replace text="."`.
+    ///
+    /// Reachable, which is why it is a bug and not a footgun: BOTH call sites in
+    /// `AudioRecorder+OverlapRepair` test only `trimmingCharacters(...).isEmpty`,
+    /// which "." passes, and a re-ASR of a near-silent separated track emitting
+    /// bare punctuation is ordinary behaviour.
+    func testAPunctuationOnlyTrackCannotReplaceRealText() {
+        let existing = "we should ship it on friday"
+        for track in [".", ",", " . ", "…", "-", "?!"] {
+            let r = TranscriptMerge.merge(existing: existing, track: track)
+            XCTAssertEqual(r.kind, .noop, "track \(track.debugDescription) must not edit anything")
+            XCTAssertEqual(r.text, existing,
+                           "a wordless track deleted real text (track \(track.debugDescription))")
+            XCTAssertEqual(r.inserted, 0)
+        }
+    }
+
+    /// The empty case, which the callers do gate today — pinned so the type's own
+    /// guarantee does not depend on them continuing to.
+    func testAnEmptyTrackKeepsTheExistingTextVerbatim() {
+        let existing = "we should ship it on friday"
+        let r = TranscriptMerge.merge(existing: existing, track: "")
+        XCTAssertEqual(r.kind, .noop)
+        XCTAssertEqual(r.text, existing)
+    }
+
+    /// The guard must not swallow a track that carries ONE real word alongside
+    /// punctuation — that is genuine recovery, and refusing it would be the
+    /// over-deletion this fix exists to prevent, in the other direction.
+    func testASingleRealWordStillCounts() {
+        let r = TranscriptMerge.merge(existing: "", track: ". friday .")
+        XCTAssertEqual(r.kind, .replace)
+        XCTAssertEqual(r.text, ". friday .")
     }
 }

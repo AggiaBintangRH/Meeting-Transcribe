@@ -282,7 +282,7 @@ extension AudioRecorder {
         // the audio would be dropped correctly — but stating the rule at the top
         // keeps a future edit to that condition from resurrecting the ~230 MB/hour
         // accumulation for a pass that reads the recording file instead.
-        guard !spectralDiarizationActive else { chunkAudio = []; return }
+        guard !spectralDiarizationActive else { chunkAudio = []; chunkAudioStart = lastDiarBoundary; return }
         let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
         guard liveOn, modelLoader.pyannote != nil else {
             // When live labels are off but "continue from live labels (tail only)"
@@ -297,11 +297,12 @@ extension AudioRecorder {
             // a stop pass that can never run. `diarizeTailChunk` bails on a nil
             // pyannote too, so nothing ever drained it.
             let willBeConsumed = continueOnStop && !liveOn && modelLoader.pyannote != nil
-            if !willBeConsumed { chunkAudio = [] }
+            if !willBeConsumed { chunkAudio = []; chunkAudioStart = lastDiarBoundary }
             return
         }
         let samples = chunkAudio
         chunkAudio = []
+        chunkAudioStart = lastDiarBoundary
         guard samples.count > 16_000 else { return } // skip chunks under 1s
         dispatchDiarChunk(samples: samples, windowStart: windowStart)
     }
@@ -354,12 +355,15 @@ extension AudioRecorder {
         guard modelLoader.pyannote != nil else { completeStopDiarization(); return }
         let samples = chunkAudio
         chunkAudio = []
-        // With live labels on, the pending audio began at the last live-chunk
-        // boundary. With live off (+ continueOnStop), nothing was ever cleared so
-        // chunkAudio is the whole recording — it begins at 0, and lastDiarBoundary
-        // (which still advances in the tap) is stale, so don't use it.
-        let liveOn = UserDefaults.standard.object(forKey: "diarization.live") as? Bool ?? true
-        let windowStart = liveOn ? lastDiarBoundary : 0
+        // Where this buffer actually STARTED, recorded at every clear — not
+        // derived from `diarization.live` read here at stop time. See
+        // `chunkAudioStart`: that read produced turns shifted to 0 whenever the
+        // setting was toggled mid-meeting, because the buffer then began at the
+        // toggle while the setting claimed it began at the start of the meeting.
+        // With live labels on this equals the last live-chunk boundary; with live
+        // off plus continue-on-stop, nothing was ever cleared and it is still 0,
+        // i.e. both original cases are preserved exactly.
+        let windowStart = chunkAudioStart
         guard samples.count > 16_000 else { completeStopDiarization(); return } // <1s tail
         diarizing = true
         diarizationError = nil

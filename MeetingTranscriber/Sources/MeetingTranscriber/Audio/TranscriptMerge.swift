@@ -35,6 +35,33 @@ enum TranscriptMerge {
     static func merge(existing: String, track: String, minRunTokens: Int = 4) -> Result {
         let e = tokenize(existing)
         let t = tokenize(track)
+
+        // A track with NO WORD IN IT can only ever delete, so it is refused here
+        // rather than allowed to fall through to `.replace`.
+        //
+        // THE BUG THIS FIXES (measured 2026-08-05). A punctuation-only track —
+        // `"."`, `","`, `"…"` — tokenizes to tokens whose `norm` is empty, and
+        // empty norms never match, so no block is found, `significant` is false
+        // and the guard below returned `.replace(text: ".")`. `applyRepair` then
+        // REPLACED a real sentence with a single full stop. Verified by driving
+        // `merge` directly: existing "we should ship it on friday", track "."
+        // came back `kind=replace text="."`.
+        //
+        // It was reachable: BOTH call sites test only
+        // `trimmingCharacters(in: .whitespacesAndNewlines).isEmpty`, which `"."`
+        // passes, and a re-ASR of a near-silent separated track emitting bare
+        // punctuation is ordinary Whisper/mlx-audio behaviour. The canned-caption
+        // gate does not cover it either — `"."` is not a canned caption.
+        //
+        // Placed INSIDE `merge` on purpose. Two callers each remembering a
+        // precondition is how this class of bug survives; the type should not be
+        // able to delete text no matter who calls it. Over-deletion is the
+        // direction this project treats as dangerous, because a deleted sentence
+        // leaves no trace in the transcript — only in the decisions log.
+        guard t.contains(where: { !$0.norm.isEmpty }) else {
+            return Result(kind: .noop, text: existing, longestRun: 0, inserted: 0)
+        }
+
         let blocks = matchingBlocks(e.map(\.norm), t.map(\.norm))
 
         let longestRun = blocks.map(\.length).max() ?? 0

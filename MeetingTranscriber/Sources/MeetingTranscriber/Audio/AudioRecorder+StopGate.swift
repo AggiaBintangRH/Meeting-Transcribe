@@ -19,6 +19,12 @@ import Foundation
 //   finalDiarDone         +OfficeDiarization  configureDiarization's onFinalResult
 //                                             and onError; completeStopDiarization;
 //                                             startDiarization's watchdog
+//                         +Spectral           startSpectralDiarization: the
+//                                             no-service arm and its own watchdog
+//                                             (the RESULT and ERROR paths settle
+//                                             through +OfficeDiarization, which is
+//                                             the point — one gate for one leg
+//                                             however it is served)
 //                         AudioRecorder       beginCapture (reset); stop() when no
 //                                             stop pass runs
 //   mossLastChunkDone     +Moss               checkMossChunkDone (the only settle;
@@ -33,6 +39,10 @@ import Foundation
 //                                             settle — result, error, dispatch
 //                                             failure and startRemoteDiarWatchdog
 //                                             all route through it
+//                         +Spectral           startRemoteSpectralDiarization TAKES
+//                                             the gate (the spectral twin); it
+//                                             settles through the same
+//                                             completeRemoteDiarization
 //                         AudioRecorder       declared true; beginCapture (reset)
 //   repair flag           +OverlapRepair      `overlapRepairing` + `repairTask`:
 //                                             taken by maybeStartOverlapRepair,
