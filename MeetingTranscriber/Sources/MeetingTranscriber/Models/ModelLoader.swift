@@ -209,8 +209,12 @@ final class ModelLoader: ObservableObject {
         guard diarizationEnabled else { return nil }
         switch engine {
         case mossEngineID:
+            // NEVER nil any more. MOSS+MOSS needs no second process — one sidecar
+            // already returns text and segments — but it does need the embedder,
+            // so that mode has its own case rather than falling through to
+            // "nothing", which used to deny it identity by accident.
             return needsSecondMossProcess(chunkedID: chunkedID, engine: engine)
-                ? .mossSecondProcess : nil
+                ? .mossSecondProcess : .mossOwnASR
         case spectralEngineID:
             return .spectral
         default:
@@ -230,22 +234,28 @@ final class ModelLoader: ObservableObject {
         case pyannote           // pyannote-service + wespeaker-service
         case spectral           // spectral-service + wespeaker-service
         case mossSecondProcess  // a second MOSS process, ASR done by another model
+        case mossOwnASR         // MOSS is ALSO the chunked model — no second
+                                // process to load, but identity is still wanted
 
         /// Whether this stack needs the WeSpeaker identity sidecar.
         ///
-        /// TWO stacks do, and that is the point of the 2026-07-30 pyannote/wespeaker
-        /// split paying off: spectral emits run-local labels exactly as pyannote
-        /// does, so saved voice profiles, renaming and `spk` confidence all keep
-        /// working under it with no new identity code. MOSS names its own speakers
-        /// and never reaches the stores.
+        /// ALL FOUR do, since 2026-08-05. Spectral emits run-local labels exactly
+        /// as pyannote does, so profiles, renaming and `spk` worked under it from
+        /// the day of the pyannote/wespeaker split with no new identity code —
+        /// and MOSS has now joined them for the same reason, one call later:
+        /// its per-call `S01` labels are ALSO run-local, so feeding a whole
+        /// meeting's MOSS turns through `identify` is what makes `Speaker 3` mean
+        /// one person across every window instead of one window.
         ///
-        /// Read by the teardown so the embedder is dropped only when NEITHER
-        /// pipeline engine is selected — two independent `!=` checks would have
-        /// killed it under spectral, which is the state no code path expects
-        /// (`SpeakerTurn` has no representation for an unidentified turn).
-        var usesSpeakerIdentity: Bool {
-            self == .pyannote || self == .spectral
-        }
+        /// Before that, MOSS "named its own speakers and never reached the
+        /// stores", which is why the stop step could only honestly be called
+        /// RE-LABELLING: it re-numbered, it did not recognise. That one gap was
+        /// also why a MOSS session had no saved profiles, no renaming and no `spk`
+        /// — four complaints, one cause.
+        ///
+        /// Read by the teardown so the embedder is dropped only when diarization
+        /// is off entirely.
+        var usesSpeakerIdentity: Bool { true }
     }
 
     /// The overlap-repair engine id this session should keep alive, or nil for
@@ -477,7 +487,14 @@ final class ModelLoader: ObservableObject {
         case .none:
             break
         case .mossSecondProcess:
+            // Embedder FIRST, the same order and the same reason as the other
+            // stacks: it is the cheap check, so a broken one is reported in
+            // seconds rather than after a 3.6 GB load that was going to fail.
+            steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
             steps.append(Step(model: ModelCatalog.mossDiarization, checkInstalled: true))
+        case .mossOwnASR:
+            // The chunked step above IS the MOSS load; only identity is added.
+            steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
         case .spectral:
             // Two steps for the same reason the pyannote engine has two: this
             // engine is the pipeline half only, and identity is a separate

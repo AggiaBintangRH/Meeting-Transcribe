@@ -72,16 +72,20 @@ final class SpectralEngineTests: XCTestCase {
         XCTAssertEqual(stack(engine: ""), .pyannote)
     }
 
-    /// THE SHARED EMBEDDER. Both pipeline engines emit run-local labels and need
-    /// WeSpeaker to say who those people are; MOSS names its own speakers and
-    /// never reaches the stores. Both directions, because the dangerous one is a
-    /// stack claiming identity it has no path to.
-    func testBothPipelineEnginesUseSpeakerIdentityAndMossDoesNot() {
-        XCTAssertTrue(ModelLoader.DiarizationStack.pyannote.usesSpeakerIdentity)
-        XCTAssertTrue(ModelLoader.DiarizationStack.spectral.usesSpeakerIdentity,
-                      "spectral emits local labels exactly as pyannote does — dropping the "
-                      + "embedder for it leaves a stack with no way to name anyone")
-        XCTAssertFalse(ModelLoader.DiarizationStack.mossSecondProcess.usesSpeakerIdentity)
+    /// THE SHARED EMBEDDER — now shared by ALL stacks (2026-08-05).
+    ///
+    /// Both pipeline engines emit run-local labels and need WeSpeaker to say who
+    /// those people are. MOSS used to be the exception, "names its own speakers
+    /// and never reaches the stores" — and that exception WAS the bug: its `S01`
+    /// is run-local too, just per model call rather than per pipeline run, so
+    /// without the embedder its numbering restarted at every window seam and it
+    /// had no profiles, no renaming and no `spk`.
+    func testEveryStackUsesSpeakerIdentity() {
+        for stack: ModelLoader.DiarizationStack in [.pyannote, .spectral,
+                                                    .mossSecondProcess, .mossOwnASR] {
+            XCTAssertTrue(stack.usesSpeakerIdentity,
+                          "\(stack) has no way to name anyone without the embedder")
+        }
     }
 
     /// The catalog id and the setting value must round-trip. This is the MOSS trap

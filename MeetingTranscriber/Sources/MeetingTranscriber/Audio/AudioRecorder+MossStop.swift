@@ -138,7 +138,7 @@ extension AudioRecorder {
             for (index, window) in windows.enumerated() {
                 if Task.isCancelled { break }
                 self.setStopStepName("moss-diarize",
-                                     "Re-labelling speakers (\(index + 1)/\(windows.count))")
+                                     "Identifying speakers (\(index + 1)/\(windows.count))")
                 let samples = await Task.detached(priority: .utility) {
                     Self.loadWindow16k(from: recording,
                                        start: window.lowerBound, end: window.upperBound)
@@ -160,8 +160,74 @@ extension AudioRecorder {
             }
             self.mossFullPassTask = nil
             self.mossLog("FULL PASS done — \(self.mossTurns.count) turns")
+            await self.identifyMossTurns(recording: recording)
             self.setStopStepName("moss-diarize", "Labelling speakers")
             self.checkMossChunkDone()
+        }
+    }
+
+    // MARK: - Identity: what turns RE-LABELLING into RECOGNISING
+
+    /// One `identify` over the WHOLE meeting, after the full pass has produced
+    /// every window's turns.
+    ///
+    /// WHY THIS EXISTS. A MOSS label is anonymous per CALL — `S01` in window 1 is
+    /// not `S01` in window 2, and the model never claimed it was. That single fact
+    /// caused four separate complaints: speaker numbering that goes incoherent at
+    /// every window seam, no saved profiles, no renaming, and no `spk` confidence.
+    /// Feeding the run's turns through WeSpeaker fixes all four at once, because
+    /// the profile store is what decides that two spans are the same person.
+    ///
+    /// ONE call for the whole meeting, not one per window, and that is the
+    /// protocol's own design (`wespeaker-service.py`): `assign()` guarantees that
+    /// two DISTINCT voices within a single run never collapse onto one profile —
+    /// a guarantee that is per RUN, so a per-window call would destroy exactly the
+    /// property being bought.
+    ///
+    /// No temp WAV: the full pass already runs over the recording and its turns
+    /// are in recording time, so the identity stage can read the same file. That
+    /// is what made this small — the earlier estimate assumed a WAV per window.
+    ///
+    /// **An unidentified turn KEEPS its original label.** `composeTurns`
+    /// `compactMap`s those away, which is right for pyannote (a turn with no
+    /// speaker has no meaning there) and would be over-deletion here: a MOSS turn
+    /// under `MIN_EMBED_SEC` carries real transcribed words, and dropping it would
+    /// delete them from the transcript with no trace. Degrading to the old
+    /// per-chunk label is strictly better than losing the row.
+    ///
+    /// Failure is NOT fatal for the same reason: the meeting keeps the labels it
+    /// already had, and the log says why they did not improve.
+    func identifyMossTurns(recording: URL) async {
+        guard mossDiarizationActive, !mossTurns.isEmpty else { return }
+        guard let embedding = modelLoader.embedding else {
+            mossLog("IDENTIFY skipped — no embedder in this session; speaker numbers "
+                    + "stay per-window")
+            return
+        }
+        // The MOSS wire id is already unique per (window, speaker), so it is the
+        // natural local label: two windows' `S01` arrive as two candidates and
+        // the store decides whether they are one person.
+        let locals = mossTurns.map {
+            PyannoteService.LocalTurn(start: $0.start, end: $0.end, label: "M\($0.id)")
+        }
+        let before = Set(mossTurns.map(\.id)).count
+        do {
+            let identity = try await embedding.identify(audio: recording.path,
+                                                        turns: locals, stream: .office)
+            var identified = 0
+            mossTurns = zip(mossTurns, locals).map { turn, local in
+                guard let who = identity[local.label] ?? nil else { return turn }
+                identified += 1
+                return SpeakerTurn(start: turn.start, end: turn.end,
+                                   id: who.id, name: who.name, conf: who.conf)
+            }
+            let after = Set(mossTurns.map(\.id)).count
+            mossLog("IDENTIFY done — \(identified)/\(mossTurns.count) turns matched, "
+                    + "\(before) per-window labels collapsed to \(after) people")
+            rebuildDisplayRows()
+        } catch {
+            mossLog("IDENTIFY FAILED — \(error.localizedDescription); speaker numbers "
+                    + "stay per-window (see logs/\(WeSpeakerService.Config.logName).log)")
         }
     }
 }

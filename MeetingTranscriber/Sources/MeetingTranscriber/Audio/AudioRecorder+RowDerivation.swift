@@ -28,7 +28,7 @@ extension AudioRecorder {
         // caught one word), THEN coalesce — because relabeling restores the
         // adjacency that lets the surrounding rows merge.
         let settled = Self.coalesceAdjacentSameSpeaker(
-            Self.absorbShortSpeakerIslands(merged))
+            Self.absorbShortSpeakerIslands(merged, mossSession: mossDiarizationActive))
         // Speaker confidence is annotated LAST, once the spans are final: the
         // number is a minimum over the turns a row spans, and coalescing changes
         // exactly that span. Computing it earlier would describe a row that no
@@ -107,9 +107,18 @@ extension AudioRecorder {
     /// rejoin. Guarded tightly so a genuine short interjection is not swallowed:
     /// the island must be shorter than `islandMaxDurationSec`, confirmed, same
     /// stream, and flanked by the SAME speaker with a non-nil id on each side.
+    ///
+    /// `mossSession` is what exempts MOSS since 2026-08-05, replacing an id-range
+    /// test. Once a MOSS session's turns go through `identify`, their ids are
+    /// PROFILE ids (< 10 000) and no longer sit above `mossIDBase` — so the old
+    /// `(island.speakerID ?? 0) < mossIDBase` test stopped exempting anything and
+    /// would have started absorbing exactly the rows it was written to protect.
+    /// The session is the honest signal anyway: in a MOSS session `liveTurns` is
+    /// empty and EVERY row comes from `mossTurns`, so there is no ATND-flicker
+    /// case here for the absorber to fix.
     nonisolated static func absorbShortSpeakerIslands(
-        _ rows: [SpeakerUtterance]) -> [SpeakerUtterance] {
-        guard rows.count >= 3 else { return rows }
+        _ rows: [SpeakerUtterance], mossSession: Bool = false) -> [SpeakerUtterance] {
+        guard rows.count >= 3, !mossSession else { return rows }
         var out = rows
         for i in 1..<(out.count - 1) {
             let island = out[i], before = out[i - 1], after = out[i + 1]
@@ -126,7 +135,7 @@ extension AudioRecorder {
                   // one thing this engine is selected for. Measured: a genuine
                   // 0.8 s "Hi." between two turns of S1 was being absorbed and
                   // then coalesced away entirely.
-                  (island.speakerID ?? 0) < mossIDBase,
+                  // (the MOSS exemption moved to `mossSession` above — see there)
                   island.confirmed, before.confirmed, after.confirmed,
                   island.isRemote == before.isRemote, island.isRemote == after.isRemote,
                   let s = island.start, let e = island.end,

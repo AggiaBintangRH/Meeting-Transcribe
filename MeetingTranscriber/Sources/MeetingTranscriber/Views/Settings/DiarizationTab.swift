@@ -86,7 +86,7 @@ struct DiarizationTab: View {
         }
 
         SettingBlock(title: "Labels are per chunk — and they no longer say so") {
-            Text("Speakers are labelled inside each chunk only. Rows read Speaker 1, Speaker 2 … but that numbering RESTARTS every chunk: the Speaker 1 of one chunk and the Speaker 1 of the next are not known to be the same person, because the model makes no claim that they are. Rows are still kept apart internally, so two chunks never merge into one — but the names alone cannot be read as one person across the meeting. Linking a voice across chunks is not attempted rather than guessed at; for that, use pyannote, which keeps saved profiles.")
+            Text("During the meeting, speakers are numbered inside each chunk only — the model labels each call independently, so live names restart at every chunk. At Stop the whole meeting is re-run in longer windows and then matched against your saved voice profiles in ONE pass, which is what makes Speaker 1 mean the same person from the first minute to the last, and the same person again in your next meeting. A voice too short to embed keeps its per-chunk number rather than being dropped.")
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -114,7 +114,7 @@ struct DiarizationTab: View {
         }
 
         SettingBlock(title: "Not available with this engine") {
-            Text("No saved voice profiles and no renaming (a per-chunk label has nothing to save to). No spk confidence and no overlap tags. Remote rows stay “Remote Speaker - Speaker Unknown”. The ATND position layer and overlap repair both work from pyannote turns, so neither runs.")
+            Text("No overlap tags — the model attributes each moment to one speaker. Remote rows stay “Remote Speaker - Speaker Unknown”. The ATND position layer and overlap repair both work from pyannote turns, so neither runs. Live names during the meeting are per-chunk and only settle at Stop, so a long meeting looks unstable until the pass finishes.")
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -158,7 +158,7 @@ struct DiarizationTab: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
 
-        Text("Switch back to pyannote for voice profiles that persist across meetings, speaker renaming, overlap detection and the ATND position layer.")
+        Text("Switch back to pyannote for speaker names DURING the meeting rather than at Stop, plus overlap detection and the ATND position layer. Saved profiles and renaming now work here too.")
             .font(.system(size: 11))
             .foregroundColor(Theme.textDim)
             .fixedSize(horizontal: false, vertical: true)

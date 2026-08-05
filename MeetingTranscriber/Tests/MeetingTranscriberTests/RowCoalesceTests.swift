@@ -135,8 +135,10 @@ final class SpeakerIslandTests: XCTestCase {
             start: s, end: e, text: text, confirmed: confirmed, isRemote: remote,
             speakerConf: speakerConf)
     }
-    private func absorbThenCoalesce(_ r: [AudioRecorder.SpeakerUtterance]) -> [AudioRecorder.SpeakerUtterance] {
-        AudioRecorder.coalesceAdjacentSameSpeaker(AudioRecorder.absorbShortSpeakerIslands(r))
+    private func absorbThenCoalesce(_ r: [AudioRecorder.SpeakerUtterance],
+                                    mossSession: Bool = false) -> [AudioRecorder.SpeakerUtterance] {
+        AudioRecorder.coalesceAdjacentSameSpeaker(
+            AudioRecorder.absorbShortSpeakerIslands(r, mossSession: mossSession))
     }
 
     func testTheToBugFromTheLog() {
@@ -174,22 +176,39 @@ final class SpeakerIslandTests: XCTestCase {
         XCTAssertEqual(out[1].text, "four")
     }
 
-    /// MOSS ids are exempt from the absorber, and this is a behaviour fix rather
-    /// than defensive tidiness — it was caught by an actual failing case during
-    /// integration. Absorbing is an ATND beam-FLICKER heuristic: it assumes a
-    /// sub-second wrong-speaker row is a timing artefact. MOSS is not a timing
+    /// A MOSS SESSION is exempt from the absorber, and this is a behaviour fix
+    /// rather than defensive tidiness — it was caught by an actual failing case
+    /// during integration. Absorbing is an ATND beam-FLICKER heuristic: it assumes
+    /// a sub-second wrong-speaker row is a timing artefact. MOSS is not a timing
     /// source; it attributes the words itself, so a short MOSS row is a short
     /// utterance, not a glitch. Without the exemption a genuine 0.8s "Hi." was
     /// relabelled onto its neighbours and coalesce then merged all three rows
-    /// into one — silently discarding the model's own attribution, which is
-    /// exactly what routing MOSS through the pinned-row path exists to avoid.
+    /// into one — silently discarding the model's own attribution.
+    ///
+    /// KEYED ON THE SESSION since 2026-08-05, not on the id range. Once MOSS turns
+    /// go through `identify`, their ids are PROFILE ids (< 10 000): the old
+    /// `id < mossIDBase` test would have quietly stopped exempting anything and
+    /// started absorbing the very rows it protects. The session is the honest
+    /// signal — in a MOSS session `liveTurns` is empty and every row comes from
+    /// `mossTurns`, so no ATND flicker can be present to fix.
     func testMossIslandsAreNeverAbsorbed() {
+        // Post-identify ids, i.e. ordinary profile ids — the case the id-range
+        // test could not have covered.
+        let identified = absorbThenCoalesce([
+            row(3, "Hello there.", 0, 4.0),
+            row(7, "Hi.", 4.0, 4.8),
+            row(3, "How are you?", 4.8, 9.0),
+        ], mossSession: true)
+        XCTAssertEqual(identified.count, 3,
+                       "a stitched MOSS session must still keep its own short rows")
+        XCTAssertEqual(identified.map(\.speakerID), [3, 7, 3])
+
         let base = AudioRecorder.mossIDBase
         let out = absorbThenCoalesce([
             row(base + 1, "Hello there.", 0, 4.0),
             row(base + 2, "Hi.", 4.0, 4.8),        // 0.8s — well under the absorb limit
             row(base + 1, "How are you?", 4.8, 9.0),
-        ])
+        ], mossSession: true)
         XCTAssertEqual(out.count, 3, "MOSS attributed these itself; nothing may be merged away")
         XCTAssertEqual(out.map(\.speakerID), [base + 1, base + 2, base + 1])
         XCTAssertEqual(out[1].text, "Hi.")

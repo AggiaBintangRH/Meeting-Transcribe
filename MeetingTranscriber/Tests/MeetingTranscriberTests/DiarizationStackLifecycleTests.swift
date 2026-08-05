@@ -71,10 +71,17 @@ final class DiarizationStackLifecycleTests: XCTestCase {
         XCTAssertEqual(stack(enabled: true, engine: moss, chunked: "whisper"), .mossSecondProcess)
     }
 
-    /// MOSS+MOSS ⇒ nothing extra: the chunked process already carries the labels,
-    /// and a second load of the same 3.6 GB model would be pure waste.
-    func testMossPlusMossKeepsNothingExtra() {
-        XCTAssertNil(stack(enabled: true, engine: moss, chunked: "moss"))
+    /// MOSS+MOSS ⇒ no second MOSS PROCESS (the chunked one already carries the
+    /// labels, and a second load of the same 3.6 GB model would be pure waste) —
+    /// but since 2026-08-05 it is no longer `nil`.
+    ///
+    /// `nil` meant "this session keeps no diarization stack", and that quietly
+    /// denied MOSS+MOSS the EMBEDDER too, so its speaker numbers could never be
+    /// stitched across windows. `.mossOwnASR` says the honest thing: no second
+    /// process, identity yes.
+    func testMossPlusMossWantsIdentityButNoSecondProcess() {
+        XCTAssertEqual(stack(enabled: true, engine: moss, chunked: "moss"), .mossOwnASR)
+        XCTAssertTrue(ModelLoader.DiarizationStack.mossOwnASR.usesSpeakerIdentity)
     }
 
     /// The two stacks are mutually exclusive — one session can never want both,
@@ -84,7 +91,8 @@ final class DiarizationStackLifecycleTests: XCTestCase {
             for engine in [pyannote, moss] {
                 for chunked in ["qwen3", "moss"] {
                     let s = stack(enabled: enabled, engine: engine, chunked: chunked)
-                    XCTAssertTrue(s == nil || s == .pyannote || s == .mossSecondProcess)
+                    XCTAssertTrue(s == nil || s == .pyannote
+                                  || s == .mossSecondProcess || s == .mossOwnASR)
                 }
             }
         }
