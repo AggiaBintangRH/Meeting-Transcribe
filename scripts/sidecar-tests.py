@@ -2487,8 +2487,17 @@ SPECTRAL_VENDOR_MODIFIED = {
     # directions: equalling upstream would mean the ONNX backend is back and the
     # engine would try to download its own weights at runtime; equalling neither
     # means a second, undocumented edit.
+    #
+    # OURS updated 2026-08-05 (was d47cd324…) for the SECOND §4(b) modification:
+    # the full-file read is `dtype="float32"` instead of soundfile's float64
+    # default. Both modifications are listed in that file's module docstring, and
+    # both are documented at their own line. The decode was measured
+    # BIT-IDENTICAL either way and whole-pipeline output byte-identical on four
+    # recordings before the hash was moved — a pin is only worth updating with the
+    # evidence that the change was safe, otherwise it just records whatever
+    # happened.
     "embeddings.py": ("564c72615dad725b0afbfe1101c4ae787a518d1f77e34c02a290b02f80da571d",
-                      "d47cd32499b713075b550f0b5661f35c0341aab8626b12e3c500e39036397023"),
+                      "85ca47467379d01388d499746a06c9b0195d2fd7d4bd1d3d4568836ce9dcdbb2"),
 }
 # Ours, not upstream's. Presence is pinned but NOT its hash: it is this project's
 # own file and may legitimately change (a device, a resample), whereas an upstream

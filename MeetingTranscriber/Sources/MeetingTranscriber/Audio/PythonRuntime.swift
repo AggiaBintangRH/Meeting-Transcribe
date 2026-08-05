@@ -156,4 +156,58 @@ enum PythonRuntime {
         handle.seekToEndOfFile()
         return handle
     }
+
+    /// Append one timestamped line to an APP-OWNED log under the data dir.
+    ///
+    /// The Swift twin of `logHandle`, and it exists because the 2026-07-31 log
+    /// rolling protected only half the logs. `logHandle` serves the 13 sidecars,
+    /// whose stderr is redirected once per process start — so rolling at OPEN time
+    /// was enough there. The app's own decision logs are written by five
+    /// byte-identical open-append-close bodies scattered across `AudioRecorder+*`,
+    /// which never touched `logRollBytes` at all:
+    ///
+    ///   `position-diarization` · `moss-diarization` · `spectral-diarization` ·
+    ///   `dual-stream` · `overlap-repair-decisions`
+    ///
+    /// The result, measured 2026-08-05: **`position-diarization.log` had reached
+    /// 13,187,750 bytes and was still growing** — the very file whose 13 MB
+    /// motivated rolling in the first place, left unprotected because it is not a
+    /// service log. These names deliberately do NOT follow
+    /// `scripts/<name>/ → logs/<name>.log`; each is a domain, sometimes shared by
+    /// two engines (`overlap-repair-decisions`), which is why `layout/*` in
+    /// `sidecar-tests.py` scans `logHandle` call sites and not this one.
+    ///
+    /// **The roll check is free, so it can run per line.** `seekToEndOfFile()`
+    /// returns the resulting offset — i.e. the current size — and we have to seek
+    /// before appending anyway. So there is no extra `stat`, and unlike
+    /// `logHandle` this cannot wait for the next process start: the app runs for
+    /// days and would otherwise never re-check.
+    ///
+    /// Rolled, never truncated, for the reason `logRollBytes` documents: these
+    /// files are the project's only record of every dropped chunk and every gate
+    /// decision, so losing the oldest generation is acceptable and losing the
+    /// evidence you are currently reading is not.
+    static func appendAppLog(name: String, message: String) {
+        let dir = dataDir.appendingPathComponent("logs")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("\(name).log")
+        if !FileManager.default.fileExists(atPath: file.path) {
+            FileManager.default.createFile(atPath: file.path, contents: nil)
+        }
+        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none,
+                                                 timeStyle: .medium)
+        guard let data = "[\(stamp)] \(message)\n".data(using: .utf8),
+              var handle = try? FileHandle(forWritingTo: file) else { return }
+        if handle.seekToEndOfFile() >= logRollBytes {
+            try? handle.close()
+            let previous = dir.appendingPathComponent("\(name).log.1")
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: file, to: previous)
+            FileManager.default.createFile(atPath: file.path, contents: nil)
+            guard let fresh = try? FileHandle(forWritingTo: file) else { return }
+            handle = fresh
+        }
+        handle.write(data)
+        try? handle.close()
+    }
 }

@@ -115,6 +115,38 @@ final class ModelLoader: ObservableObject {
         remoteChannel != nil && realtimeEnabled
     }
 
+    /// Whether this session keeps the REALTIME sidecar alive.
+    ///
+    /// One line, and it earns its own function for the same reason `wantsAligner`
+    /// and `wantedOverlapEngine` do: it is read by BOTH `buildSteps` (does the
+    /// overlay show a row, and does the process start?) and the teardown in
+    /// `loadAll` (is a leftover process stopped?). Those two computing the rule
+    /// separately is exactly how the bug below happened, twice now in this
+    /// codebase.
+    ///
+    /// THE BUG (found 2026-08-05, fixed here). `buildSteps` has always loaded
+    /// Nemotron only when `realtime.enabled` is on, but `loadAll` had NO
+    /// `terminate()` for it anywhere — the only one in the file sat INSIDE the
+    /// load step, to replace the process when its settings changed. Services are
+    /// kept alive across sessions, so switching realtime captions off left the
+    /// sidecar resident until the app quit, with nothing able to ask it anything:
+    /// `AudioRecorder` reads `modelLoader.nemotronASR?.office` only when the same
+    /// flag is on, so the behaviour was already correct and ONLY the memory was
+    /// wrong — which is why it never surfaced. Measured on the owner's Mac:
+    /// **1.70 GB**, the second-largest process in a default session.
+    ///
+    /// This was the LAST persistent service without a want/teardown pair. The VAD
+    /// got one on 2026-07-31, the two overlap engines the same day, and both
+    /// diarization stacks with `wantedDiarizationStack`.
+    ///
+    /// `detachRemoteLane` is NOT folded in here. It is the narrower rule — keep
+    /// the process, drop one lane's callback — and it applies only when the
+    /// process survives; see the call site, where terminating makes detaching
+    /// moot.
+    nonisolated static func wantsRealtime(realtimeEnabled: Bool) -> Bool {
+        realtimeEnabled
+    }
+
     /// The MOSS diarization engine id (`diarization.engine`).
     nonisolated static let mossEngineID = "moss"
     /// The pyannote diarization engine id — the default.
@@ -263,14 +295,24 @@ final class ModelLoader: ObservableObject {
         defer { isLoading = false }
 
         let d = UserDefaults.standard
+        let realtimeOn = d.object(forKey: "realtime.enabled") as? Bool ?? true
         let wantsRemote = Self.wantsRemoteRealtime(
             remoteChannel: MicrophoneSettings.current().remoteChannel,
-            realtimeEnabled: d.object(forKey: "realtime.enabled") as? Bool ?? true)
-        // A session that does not want remote captions must not keep a previous
-        // session's remote wiring: there is no second process to orphan any more,
-        // but the lane's callback would still hold the finished recorder, so
-        // detach it here. Nothing feeds the lane afterwards, so it stays silent.
-        if !wantsRemote {
+            realtimeEnabled: realtimeOn)
+        // Realtime off → stop the sidecar, don't merely stop loading it. See
+        // `wantsRealtime` for the bug this fixes and why the rule is a function.
+        //
+        // `else if` rather than two independent tests: `detachRemoteLane` keeps
+        // the process and drops one lane's callback, which is meaningless once
+        // the process is gone. A session that does not want remote captions but
+        // DOES want office ones still takes the second branch — there is no
+        // second process to orphan any more, but the lane's callback would hold
+        // the finished recorder, so detach it. Nothing feeds the lane afterwards,
+        // so it stays silent.
+        if !Self.wantsRealtime(realtimeEnabled: realtimeOn) {
+            nemotronASR?.terminate()
+            nemotronASR = nil
+        } else if !wantsRemote {
             nemotronASR?.detachRemoteLane()
         }
 
@@ -406,7 +448,9 @@ final class ModelLoader: ObservableObject {
         if d.object(forKey: "vad.enabled") as? Bool ?? true {
             steps.append(Step(model: ModelCatalog.vad, checkInstalled: false)) // energy VAD needs no files yet
         }
-        if d.object(forKey: "realtime.enabled") as? Bool ?? true {
+        // Same rule as the teardown in `loadAll`, from the SAME function.
+        if Self.wantsRealtime(
+            realtimeEnabled: d.object(forKey: "realtime.enabled") as? Bool ?? true) {
             // One step whether or not there is a Remote stream — the sidecar's
             // second lane needs no extra weights and no extra process.
             steps.append(Step(model: ModelCatalog.realtime, checkInstalled: true))

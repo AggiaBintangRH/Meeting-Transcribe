@@ -184,8 +184,14 @@ def install_soundfile_vad_reader() -> str:
     import torch
 
     def read_audio(path, sampling_rate: int = 16000):
-        data, rate = sf.read(str(path), dtype="float32", always_2d=True)
-        wav = data.mean(axis=1)
+        # 1-D for mono, and NOT `always_2d=True` + `.mean(axis=1)` — that pair
+        # forces a `(N, 1)` array and then allocates a SECOND full-length array to
+        # collapse it back, for a result identical to the first by definition.
+        # It was one copy of the entire recording (4 bytes/sample) bought for
+        # nothing; see the memory note in `embeddings.py` for the other one.
+        # Multichannel input still collapses, so the contract is unchanged.
+        data, rate = sf.read(str(path), dtype="float32")
+        wav = data if data.ndim == 1 else data.mean(axis=1)
         rate = int(rate)
         if rate != sampling_rate:
             from scipy.signal import resample_poly

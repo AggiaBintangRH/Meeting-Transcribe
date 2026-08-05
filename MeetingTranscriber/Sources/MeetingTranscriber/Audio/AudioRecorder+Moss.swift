@@ -364,17 +364,6 @@ extension AudioRecorder {
     /// collision the overlap-repair logs were split to stop (2026-07-15); one
     /// process per file, no exceptions.
     func mossLog(_ message: String) {
-        let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("moss-diarization.log")
-        if !FileManager.default.fileExists(atPath: file.path) {
-            FileManager.default.createFile(atPath: file.path, contents: nil)
-        }
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(stamp)] \(message)\n"
-        guard let handle = try? FileHandle(forWritingTo: file) else { return }
-        handle.seekToEndOfFile()
-        if let data = line.data(using: .utf8) { handle.write(data) }
-        try? handle.close()
+        PythonRuntime.appendAppLog(name: "moss-diarization", message: message)
     }
 }

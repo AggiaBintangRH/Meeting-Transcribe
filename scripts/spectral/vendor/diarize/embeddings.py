@@ -4,9 +4,12 @@ Extracts 256-dimensional speaker embeddings from audio segments detected
 by VAD.  Long segments are split with a sliding window so that each
 window produces its own embedding, improving clustering granularity.
 
-MODIFIED FROM UPSTREAM (Apache-2.0 §4(b)): the ONNX embedding backend is
-replaced by this project's existing PyTorch WeSpeaker — see the note at the
-substitution point below. Upstream: https://github.com/FoxNoseTech/diarize
+MODIFIED FROM UPSTREAM (Apache-2.0 §4(b)), twice:
+  1. (2026-08-03) the ONNX embedding backend is replaced by this project's
+     existing PyTorch WeSpeaker — see the note at the substitution point below.
+  2. (2026-08-05) the full-file read is float32 instead of soundfile's float64
+     default — see the note at that line.
+Upstream: https://github.com/FoxNoseTech/diarize
 at commit 4f25d27dee54f7e8264a914e705f7cee182151e2 (2026-05-06).
 """
 
@@ -102,7 +105,28 @@ def extract_embeddings(
     model = wespeaker_rt_Speaker()
 
     # Load full audio for segment slicing
-    audio_data, sr = sf.read(str(audio_path))
+    #
+    # ── MODIFIED BY MeetingTranscriber, 2026-08-05 (Apache-2.0 §4(b)) ──────────
+    # `dtype="float32"` added. Upstream takes soundfile's default, which is
+    # **float64** — 8 bytes per sample for audio that is at most 24-bit at the
+    # source, so the extra 32 bits of mantissa are filled with zeros. This is the
+    # single largest memory cost in the whole engine: it is one copy of the ENTIRE
+    # recording, and it is what makes the peak scale with meeting length.
+    #
+    # MEASURED (2026-08-05, on the owner's M4) before changing it:
+    #   * the decode is BIT-IDENTICAL either way — `maxdiff 0.0` on a PCM_16
+    #     fixture AND on a real 44.1 kHz FLOAT recording. float32 holds a 24-bit
+    #     mantissa, and there is nothing beyond 24 bits in the source to lose.
+    #   * the precision is discarded one screen below in any case: the per-window
+    #     temp WAV is written with soundfile's default WAV subtype, which is
+    #     **PCM_16**, and the array the embedder finally sees is identical whether
+    #     this read was float32 or float64 (`beda 0.0`).
+    #   * whole-pipeline output is unchanged — same segment count, same speaker
+    #     count, same boundaries at full `repr()` precision, on four real
+    #     recordings.
+    #   * peak RSS on a 4027 s recording: 4.09 GB → measured again after this
+    #     change together with the VAD shim's redundant copy.
+    audio_data, sr = sf.read(str(audio_path), dtype="float32")
     if audio_data.ndim > 1:
         audio_data = audio_data.mean(axis=1)  # stereo → mono
 

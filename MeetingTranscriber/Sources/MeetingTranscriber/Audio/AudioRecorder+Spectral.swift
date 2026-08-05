@@ -245,17 +245,6 @@ extension AudioRecorder {
     /// logs only: `logs/spectral.log` is the sidecar's stderr and this file is the
     /// app's own decisions. Two writers on one file is the 2026-07-15 mistake.
     func spectralLog(_ message: String) {
-        let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("spectral-diarization.log")
-        if !FileManager.default.fileExists(atPath: file.path) {
-            FileManager.default.createFile(atPath: file.path, contents: nil)
-        }
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(stamp)] \(message)\n"
-        guard let handle = try? FileHandle(forWritingTo: file) else { return }
-        handle.seekToEndOfFile()
-        if let data = line.data(using: .utf8) { handle.write(data) }
-        try? handle.close()
+        PythonRuntime.appendAppLog(name: "spectral-diarization", message: message)
     }
 }

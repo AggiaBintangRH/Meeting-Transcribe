@@ -550,17 +550,6 @@ extension AudioRecorder {
     /// it is NOT a `scripts/<name>/ → logs/<name>.log` service log and is exempt from
     /// that rule (which `layout/*` in sidecar-tests.py pins for the 13 that are).
     private func overlapLog(_ message: String) {
-        let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("overlap-repair-decisions.log")
-        if !FileManager.default.fileExists(atPath: file.path) {
-            FileManager.default.createFile(atPath: file.path, contents: nil)
-        }
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(stamp)] \(message)\n"
-        guard let handle = try? FileHandle(forWritingTo: file) else { return }
-        handle.seekToEndOfFile()
-        if let data = line.data(using: .utf8) { handle.write(data) }
-        try? handle.close()
+        PythonRuntime.appendAppLog(name: "overlap-repair-decisions", message: message)
     }
 }

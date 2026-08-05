@@ -121,18 +121,10 @@ extension AudioRecorder {
 
     /// Append a line to logs/position-diarization.log (position gap-fill decisions).
     /// Mirrors overlapLog: one FILL/SKIP line per display-time gap.
+    /// This is the file that proved app-owned logs were unbounded: it reached
+    /// 13.2 MB and was still growing on 2026-08-05, because it is written per
+    /// display-time gap on every rebuild. `appendAppLog` now rolls it.
     func positionLog(_ message: String) {
-        let dir = PythonRuntime.dataDir.appendingPathComponent("logs")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent("position-diarization.log")
-        if !FileManager.default.fileExists(atPath: file.path) {
-            FileManager.default.createFile(atPath: file.path, contents: nil)
-        }
-        let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-        let line = "[\(stamp)] \(message)\n"
-        guard let handle = try? FileHandle(forWritingTo: file) else { return }
-        handle.seekToEndOfFile()
-        if let data = line.data(using: .utf8) { handle.write(data) }
-        try? handle.close()
+        PythonRuntime.appendAppLog(name: "position-diarization", message: message)
     }
 }
