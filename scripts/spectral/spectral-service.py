@@ -295,6 +295,35 @@ def main() -> None:
             emit({"type": "error", "text": f"Audio not found: {audio}", **echo})
             continue
 
+        # A WAV whose header says ZERO FRAMES is not "a meeting where nobody
+        # spoke" — it is a recording whose `data` chunk size was never written,
+        # because the app went away before `AVAudioFile` was released. The samples
+        # are still in the file; only the count is missing. Measured 2026-08-05:
+        # 13 such recordings (~1.7 GB) on the owner's machine, one holding 34.1
+        # minutes of speech.
+        #
+        # Without this, VAD finds no speech in an empty array and the pass returns
+        # `segments: []` — a whole meeting reported as having no speakers, with no
+        # message anywhere. pyannote already fails loudly on the same file (its
+        # pipeline raises), so this is the one engine that was silent, and silence
+        # is the direction this project treats as dangerous.
+        try:
+            import soundfile as sf
+
+            frames = sf.info(audio).frames
+        except Exception:  # noqa: BLE001 — an unreadable header is its own answer
+            frames = -1
+        if frames == 0:
+            emit({"type": "error",
+                  "text": "This recording's WAV header says 0 frames, so nothing "
+                          "can read it — the audio is almost certainly still in the "
+                          "file and the size field was never written (the app was "
+                          "quit or killed mid-recording). Repair it with "
+                          "scripts/tools/repair-wav-header.py, then run the pass "
+                          "again.",
+                  **echo})
+            continue
+
         # 0 = auto (GMM-BIC decides). min/max only bound the auto search and are
         # upstream's own defaults when absent.
         num_speakers = int(job.get("num_speakers", 0))

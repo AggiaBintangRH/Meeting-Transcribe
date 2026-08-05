@@ -297,6 +297,44 @@ final class AudioRecorder: ObservableObject {
     private var remoteFile: AVAudioFile?
     private var vad: VoiceActivityDetector?
 
+    /// The recorder that currently holds OPEN recording files, or nil when none
+    /// does. Exists solely so `AppDelegate` can reach it while the app is being
+    /// told to quit — `ContentView` owns the instance as a `@StateObject` and the
+    /// delegate has no path to it otherwise.
+    ///
+    /// Weak, so this can never keep a finished recorder alive, and cleared in
+    /// `stop()` as well, so "non-nil" really means "there are files to close".
+    @MainActor private(set) static weak var active: AudioRecorder?
+
+    /// Close the recording files WITHOUT running the stop pipeline.
+    ///
+    /// **THE BUG THIS EXISTS FOR (found 2026-08-05).** `AVAudioFile` writes the
+    /// WAV `data` chunk size when it is released — that is why `stop()` says
+    /// "releasing the AVAudioFile flushes it". If the app goes away while
+    /// recording, that release never happens, the size field stays **0**, and
+    /// every stage in this app then reads the file as having ZERO frames:
+    /// `sf.info` says 0.0 s, the diarizers return no speakers, and the audio
+    /// looks gone. It is not gone — the samples are all there behind a header
+    /// that never learned how many there were.
+    ///
+    /// Measured on the owner's machine when this was found: **13 recordings,
+    /// ~1.7 GB**, one of them 34.1 minutes of real speech (RMS 0.0063, peaks
+    /// ±0.5), every one of them unreadable. Recoverable with
+    /// `scripts/tools/repair-wav-header.py`.
+    ///
+    /// Deliberately NOT `stop()`. Stop starts full passes, watchdogs and overlay
+    /// steps; the user asked to QUIT. The one thing that cannot be undone later
+    /// is the header, so that is the only thing done here.
+    ///
+    /// The 2026-07-31 audit concluded no terminate hook was needed. That was
+    /// right about what it examined — sidecars die on stdin EOF — but it only
+    /// ever asked about SIDECARS, and the recording file was never in scope.
+    @MainActor func finalizeRecordingFiles() {
+        guard file != nil || remoteFile != nil else { return }
+        file = nil
+        remoteFile = nil
+    }
+
     /// Recordings are stored under the data dir (project folder in dev,
     /// Application Support when bundled).
     private var recordingsDir: URL {
@@ -927,6 +965,9 @@ final class AudioRecorder: ObservableObject {
             try engine.start()
             lastRecordingURL = url
             state = .recording
+            // Registered only once the engine really started, so `active` means
+            // "files are open and unflushed" and never merely "a recorder exists".
+            Self.active = self
         } catch {
             errorMessage = "Audio engine failed: \(error.localizedDescription)"
             input.removeTap(onBus: 0)
@@ -1104,6 +1145,10 @@ final class AudioRecorder: ObservableObject {
         engine = nil
         file = nil
         remoteFile = nil   // both files close here; releasing the AVAudioFile flushes it
+        // The headers are written now, so there is nothing left for the quit hook
+        // to rescue. Cleared here rather than in `deinit` so "active != nil"
+        // stays exactly "there are unflushed files".
+        if Self.active === self { Self.active = nil }
         vad = nil
         rms = 0
         isSpeaking = false

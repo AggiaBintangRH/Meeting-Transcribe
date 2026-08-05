@@ -2455,6 +2455,18 @@ SPECTRAL_CHECKS = [
     "spectral/no-live-chunk-branch",
     "spectral/vendor-is-own",
     "spectral/vad-reader-is-shimmed",
+    "spectral/rejects-zero-frame-audio",
+]
+
+# ============================================================== tools group
+#
+# Utilities under scripts/tools/ that the app does not launch but that recover
+# data when something has already gone wrong. They get checks for the same
+# reason the sidecars do: nobody runs them until a bad day, and a repair tool
+# that has quietly stopped working is worse than none — it is reached exactly
+# when the alternative has already failed.
+TOOLS_CHECKS = [
+    "tools/wav-header-repair",
 ]
 
 # The vendored tree, file by file, as SHA-256.
@@ -3141,6 +3153,61 @@ def run_spectral(rep: Report, ctx):
         except Exception as exc:  # noqa: BLE001
             rep.fail(cid, f"could not read the VAD shim: {exc!r}")
 
+    # A recording whose WAV header declares ZERO FRAMES must be REFUSED, not
+    # answered with an empty result.
+    #
+    # THE FAILURE (2026-08-05). `AVAudioFile` writes the `data` chunk size only on
+    # release, so an app killed mid-recording leaves it at 0 over a file full of
+    # audio. VAD then finds no speech in an empty array and this engine returned
+    # `segments: []` — a whole meeting reported as having no speakers, silently.
+    # pyannote already fails loudly on the same file (its pipeline raises), so
+    # spectral was the ONE engine that was quiet, and quiet is the direction this
+    # project treats as dangerous.
+    #
+    # By AST, and the ordering half is the point: a guard that runs AFTER
+    # `run_diarize` would never fire. The message is also required to name the
+    # repair tool — an error that does not say the audio is recoverable would send
+    # the user to delete the file.
+    if ctx.wants("spectral/rejects-zero-frame-audio"):
+        cid = "spectral/rejects-zero-frame-audio"
+        try:
+            tree = ast.parse((SCRIPTS / SPECTRAL_SERVICE).read_text())
+            problems = []
+
+            zero_tests = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)
+                          and isinstance(n.left, ast.Name) and n.left.id == "frames"
+                          and any(isinstance(c, ast.Constant) and c.value == 0
+                                  for c in n.comparators)]
+            if not zero_tests:
+                problems.append("nothing compares a frame count against 0 — an "
+                                "unreadable recording would come back as `segments: []`")
+
+            emits = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Name) and n.func.id == "emit"]
+            guard_emits = [n for n in emits
+                           if any(isinstance(k, ast.Constant)
+                                  and isinstance(k.value, str)
+                                  and "repair-wav-header" in k.value
+                                  for a in n.args if isinstance(a, ast.Dict)
+                                  for k in a.values)]
+            if not guard_emits:
+                problems.append("no error names scripts/tools/repair-wav-header.py — "
+                                "the user is told the recording is empty but not that "
+                                "it is recoverable")
+
+            runs = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "run_diarize"]
+            if zero_tests and runs and min(n.lineno for n in zero_tests) > min(runs):
+                problems.append("the zero-frame guard sits AFTER run_diarize — it "
+                                "could never fire before the pass returns nothing")
+
+            rep.expect(cid, not problems,
+                       "a 0-frame recording is refused with an error that names the "
+                       "repair tool, and the guard runs before run_diarize",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not read the zero-frame guard: {exc!r}")
+
 
 # =========================================================== wespeaker group
 #
@@ -3746,6 +3813,114 @@ def service_layout_problems(scripts_dir: pathlib.Path, swift_sources: pathlib.Pa
     return script_problems + log_problems
 
 
+def run_tools(rep: Report, ctx):
+    """`scripts/tools/repair-wav-header.py`, driven for real on synthetic files.
+
+    WHAT IT RECOVERS. `AVAudioFile` writes the WAV `data` chunk size only when it
+    is released, so an app killed mid-recording leaves that field at 0 over a file
+    full of audio — and every stage here then reads the recording as EMPTY.
+    Measured 2026-08-05: 13 such recordings, ~1.7 GB, one holding 34.1 minutes of
+    speech. The app side now closes the files on ⌘Q and on SIGINT/SIGTERM, but
+    SIGKILL cannot be caught by anyone, so this tool stays the last resort.
+
+    Driven on files this check BUILDS, never on the owner's recordings: a repair
+    tool's test must not need the damage to still exist.
+    """
+    cid = "tools/wav-header-repair"
+    if not ctx.wants(cid):
+        return
+    try:
+        import importlib.util
+        import struct
+
+        import numpy as np
+        import soundfile as sf
+
+        tool = SCRIPTS / "tools" / "repair-wav-header.py"
+        spec = importlib.util.spec_from_file_location("repair_wav_header", tool)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        work = pathlib.Path(ctx.tmp) / "wavrepair"
+        work.mkdir(parents=True, exist_ok=True)
+        rate, frames = 16_000, 8_000
+        tone = (np.sin(np.arange(frames) * 0.01) * 0.5).astype(np.float32)
+
+        def write_healthy(name):
+            path = work / name
+            sf.write(path, tone, rate, subtype="FLOAT")
+            return path
+
+        def break_header(path):
+            """Zero the `data` size field, exactly as an unreleased file leaves it."""
+            info = mod.scan(path)
+            with path.open("r+b") as f:
+                f.seek(info["size_field_at"])
+                f.write(struct.pack("<I", 0))
+            return path
+
+        problems = []
+
+        # (1) A broken file is repaired and becomes readable again — and the
+        #     SAMPLES come back unchanged, which is the whole claim: nothing was
+        #     ever missing except the number.
+        broken = break_header(write_healthy("broken.wav"))
+        if sf.info(broken).frames != 0:
+            problems.append("the fixture did not actually break — "
+                            "scan()/size_field_at is wrong")
+        mod.repair(mod.scan(broken), apply=True)
+        back, back_rate = sf.read(broken, dtype="float32")
+        if back_rate != rate or len(back) != frames:
+            problems.append(f"after repair got {len(back)} frames at {back_rate} Hz, "
+                            f"expected {frames} at {rate}")
+        elif not np.array_equal(back, tone):
+            problems.append("repaired samples differ from the ones written — "
+                            "the tool must touch NO audio byte")
+
+        # (2) A HEALTHY file is refused. This is the only way the tool could
+        #     destroy something, so the refusal matters more than the repair.
+        healthy = write_healthy("healthy.wav")
+        before = healthy.read_bytes()
+        try:
+            mod.repair(mod.scan(healthy), apply=True)
+            problems.append("a healthy file was repaired instead of refused")
+        except mod.NotRepairable:
+            pass
+        if healthy.read_bytes() != before:
+            problems.append("a healthy file was modified despite the refusal")
+
+        # (3) A TORN final frame is dropped, not handed on as a partial sample.
+        #     A kill can land mid-sample; rounding up would be a second, subtler
+        #     corruption than the one being repaired.
+        torn = write_healthy("torn.wav")
+        with torn.open("ab") as f:
+            f.write(b"\x00\x00")          # half a float32 frame
+        break_header(torn)
+        note = mod.repair(mod.scan(torn), apply=True)
+        if sf.info(torn).frames != frames:
+            problems.append(f"torn frame not dropped: {sf.info(torn).frames} frames, "
+                            f"expected {frames}")
+        if "torn frame" not in note:
+            problems.append("the torn-frame case is repaired silently — the note "
+                            "must say bytes were dropped")
+
+        # (4) Dry run writes NOTHING. The tool defaults to it, so a broken default
+        #     would mean every "report" run silently edited the owner's files.
+        dry = break_header(write_healthy("dry.wav"))
+        snapshot = dry.read_bytes()
+        mod.repair(mod.scan(dry), apply=False)
+        if dry.read_bytes() != snapshot:
+            problems.append("a dry run modified the file")
+
+        rep.expect(cid, not problems,
+                   "repairs a zeroed data chunk with samples byte-identical, "
+                   "refuses a healthy file, drops a torn final frame and says so, "
+                   "and writes nothing without --apply",
+                   "; ".join(problems))
+    except Exception as exc:  # noqa: BLE001
+        rep.fail(cid, f"could not drive the repair tool: {exc!r}")
+
+
 def run_layout(rep: Report, ctx):
     services, script_problems, log_problems = service_layout(SCRIPTS, SWIFT_SOURCES)
 
@@ -3883,6 +4058,7 @@ def run_qwen3(rep: Report, ctx):
 # ===================================================================== main
 GROUPS = [
     ("layout", LAYOUT_CHECKS, run_layout),
+    ("tools", TOOLS_CHECKS, run_tools),
     ("nemotron", NEMOTRON_CHECKS, run_nemotron),
     ("chunked", CHUNKED_CHECKS, run_chunked),
     ("whisper", WHISPER_CHECKS, run_whisper),
@@ -3893,6 +4069,46 @@ GROUPS = [
     ("spectral", SPECTRAL_CHECKS, run_spectral),
     ("wespeaker", WESPEAKER_CHECKS, run_wespeaker),
 ]
+
+
+def resolve_fixtures(args):
+    """Pick the audio fixtures and PRINT what was chosen, once, on first need.
+
+    Split out of `main` so it can be deferred — see `Context.audio_a`. The
+    printing moved with it deliberately: the resolved offset must stay on screen,
+    because a run over a fixture whose speech starts at 22 s used to look
+    identical to one over speech at 0 s and produced confident nonsense (the
+    silent-fixture trap, 2026-07-30). Better placed mid-run than dropped.
+    """
+    if not (args.audio_a and args.audio_b and args.audio_diarize):
+        found = find_fixtures()
+        if len(found) >= 2:
+            args.audio_a = args.audio_a or str(found[0])
+            args.audio_b = args.audio_b or str(found[1])
+        args.audio_diarize = args.audio_diarize or (str(found[0]) if found else None)
+
+    print("-" * 72)
+    print(f"  audio A       {args.audio_a or '(none — real-speech checks will SKIP)'}")
+    print(f"  audio B       {args.audio_b or '(none — real-speech checks will SKIP)'}")
+    print(f"  audio diarize {args.audio_diarize or '(none — pyannote+wespeaker checks will SKIP)'}")
+    if args.clip_start is None:
+        for label, path in (("A", args.audio_a), ("B", args.audio_b),
+                            ("diarize", args.audio_diarize)):
+            if not path:
+                continue
+            try:
+                import numpy as np
+                from mlx_audio.stt.utils import load_audio
+                whole = np.asarray(load_audio(str(path), sr=SR), dtype=np.float32)
+                found = first_speech_offset(whole)
+            except Exception:  # noqa: BLE001
+                found = None
+            where = (f"auto {found:.1f}s" if found is not None
+                     else "auto -> 0.0s (NO SPEECH FOUND IN THIS FILE)")
+            print(f"  clip start {label:8s} {where}")
+    else:
+        print(f"  clip start    {args.clip_start:.1f}s (explicit)")
+    print("-" * 72)
 
 
 class Context:
@@ -3906,9 +4122,47 @@ class Context:
         self.load_timeout = args.load_timeout
         self.job_timeout = args.job_timeout
         self.final_timeout = args.final_timeout
-        self.audio_a = args.audio_a
-        self.audio_b = args.audio_b
-        self.audio_diarize = args.audio_diarize
+        self._args = args
+        self._fixtures_resolved = False
+
+    # ------------------------------------------------------------------ audio
+    #
+    # LAZY, and that is the whole design. Resolving fixtures means picking the
+    # largest recordings, auto-seeking each past its leading silence, and then
+    # decoding three WHOLE files just to print where the speech starts — on the
+    # owner's machine that is ~3.5 minutes before a single check runs, and it ran
+    # even for `--only layout`, whose checks are AST and a directory listing.
+    #
+    # It is not merely slow, it has cost real work: three back-to-back negative
+    # controls timed out at 10 minutes on 2026-08-05 and the third left a source
+    # file mid-experiment in a deliberately broken state, because each run paid
+    # the discovery again.
+    #
+    # NO "pure checks" LIST, deliberately. A list would be a second copy of the
+    # truth, and its failure direction is the bad one: a new audio-using check
+    # accidentally listed as pure would SKIP silently. Asking for a fixture is
+    # what a check that needs audio does anyway, so touching the property IS the
+    # declaration — self-maintaining, and a new check cannot get it wrong.
+    def _resolve_fixtures(self):
+        if self._fixtures_resolved:
+            return
+        self._fixtures_resolved = True
+        resolve_fixtures(self._args)
+
+    @property
+    def audio_a(self):
+        self._resolve_fixtures()
+        return self._args.audio_a
+
+    @property
+    def audio_b(self):
+        self._resolve_fixtures()
+        return self._args.audio_b
+
+    @property
+    def audio_diarize(self):
+        self._resolve_fixtures()
+        return self._args.audio_diarize
 
     def wants(self, check_id: str) -> bool:
         if not self.only:
@@ -3955,42 +4209,13 @@ def main() -> int:
         print(f"!! {VENV_PY} not found — run download-best-models.sh", file=sys.stderr)
         return 2
 
-    # Fill in any audio fixture the caller did not name.
-    if not (args.audio_a and args.audio_b and args.audio_diarize):
-        found = find_fixtures()
-        if len(found) >= 2:
-            args.audio_a = args.audio_a or str(found[0])
-            args.audio_b = args.audio_b or str(found[1])
-        args.audio_diarize = args.audio_diarize or (str(found[0]) if found else None)
-
     print("=" * 72)
     print("MeetingTranscriber sidecar integration tests")
     print(f"  python        {VENV_PY}")
     print(f"  HF_HOME       {os.environ['HF_HOME']}  (HF_HUB_OFFLINE="
           f"{os.environ.get('HF_HUB_OFFLINE')})")
-    print(f"  audio A       {args.audio_a or '(none — real-speech checks will SKIP)'}")
-    print(f"  audio B       {args.audio_b or '(none — real-speech checks will SKIP)'}")
-    print(f"  audio diarize {args.audio_diarize or '(none — pyannote+wespeaker checks will SKIP)'}")
-    # Print the offset each fixture will actually be sliced from. A run over a
-    # fixture whose speech starts at 22 s used to look identical to one over
-    # speech at 0 s, and produced confident nonsense; now it is on screen.
-    if args.clip_start is None:
-        for label, path in (("A", args.audio_a), ("B", args.audio_b),
-                            ("diarize", args.audio_diarize)):
-            if not path:
-                continue
-            try:
-                import numpy as np
-                from mlx_audio.stt.utils import load_audio
-                whole = np.asarray(load_audio(str(path), sr=SR), dtype=np.float32)
-                found = first_speech_offset(whole)
-            except Exception:  # noqa: BLE001
-                found = None
-            where = (f"auto {found:.1f}s" if found is not None
-                     else "auto -> 0.0s (NO SPEECH FOUND IN THIS FILE)")
-            print(f"  clip start {label:8s} {where}")
-    else:
-        print(f"  clip start    {args.clip_start:.1f}s (explicit)")
+    print("  audio         resolved on demand — the block below appears only if a "
+          "selected check needs it")
     print("=" * 72)
 
     # SAFETY: fingerprint the owner's real profiles before anything runs.

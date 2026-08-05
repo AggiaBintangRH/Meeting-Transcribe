@@ -395,8 +395,17 @@ def main() -> None:
     # over his own recording, MPS output was identical to CPU to 2 decimal places
     # on every timestamp, so MPS is verified sound FOR THIS MODEL. (DiCoW's
     # "MPS unverified" note is about DiCoW's custom remote code, not this.)
-    # float32 on both: the checkpoint is loaded with dtype="auto" and cast here,
-    # matching upstream's CPU behaviour.
+    # float32 on both, and the old justification here was WRONG (corrected
+    # 2026-08-05): it said this "matches upstream's CPU behaviour", but upstream
+    # forces float32 only when the device IS cpu (`model_runner.py:_ensure_loaded`)
+    # and we are on MPS, where it uses bf16. So this IS a deviation.
+    #
+    # It stays, on measurement rather than on the wrong reason. bf16 was tried:
+    # text, timestamps and speakers came back byte-identical, and the weights do
+    # halve (3.62 -> 1.73 GB) — but RSS does not move at all (5.68 GB either way),
+    # because the allocator pool dominates, not the weights. Verified-identical
+    # output is not a reason to change dtype when the benefit does not survive
+    # measurement.
     device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     # Arm the fuse BEFORE the weights land, so even a bad load cannot run away.

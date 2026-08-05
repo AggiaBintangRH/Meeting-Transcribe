@@ -181,6 +181,30 @@ prune_torchcodec() {
   echo "    Pruned torchcodec from $label ($n unloadable native libs; needs Homebrew ffmpeg)."
 }
 
+# `pyannoteai_sdk` is the CLOUD client for pyannoteAI's premium `precision-2`
+# pipeline. It arrives as a hard pip dependency of pyannote.audio 4.x, so a
+# "100 % offline" build was shipping a second network-capable component — after
+# the 2026-07-30 audit had already found and switched off pyannote's telemetry
+# for exactly that reason. `precision-2` is rejected on this project (it is
+# cloud, which violates client hard requirement #1), so nothing here can ever
+# call it, but "inert" is a weaker promise than "absent" and the requirement is
+# absolute.
+#
+# Safe to remove, verified rather than assumed: `pyannote/audio/core/{model,
+# pipeline}.py` only ever compare a checkpoint NAME against the string
+# `"pyannoteai/"`; the real imports live in `pipelines/pyannoteai/{local,sdk}.py`,
+# which are reached only when that pipeline is requested. Shadowed with an
+# unimportable stub, `pyannote.audio` imports normally AND `pyannote-service.py`
+# diarized a real recording end to end (5 speakers, 2.9 s). 28 KB, so this is
+# about the requirement, not about size.
+prune_pyannoteai_sdk() {
+  local root="$1" label="$2" site
+  site="$(find "$root/lib" -maxdepth 2 -type d -name site-packages | head -1)"
+  [[ -d "$site/pyannoteai" ]] || { echo "    pyannoteai_sdk absent ($label) — nothing to prune."; return; }
+  rm -rf "$site/pyannoteai" "$site"/pyannoteai_sdk-*.dist-info
+  echo "    Pruned pyannoteai_sdk from $label (cloud client; this build is offline-only)."
+}
+
 echo "==> Project root: $ROOT"
 mkdir -p "$CACHE"
 
@@ -367,6 +391,7 @@ done
 echo "    Portability checks (load commands + @rpath resolution)..."
 assert_no_torchcodec_use
 prune_torchcodec "$RES/python" "main runtime"
+prune_pyannoteai_sdk "$RES/python" "main runtime"
 check_relocatable "$RES/python" "main runtime"
 
 # ===========================================================================
@@ -435,6 +460,7 @@ echo "    Import gate (DiCoW)..."
 
 echo "    Portability checks (DiCoW)..."
 prune_torchcodec "$RES/.venv-dicow" "DiCoW runtime"
+prune_pyannoteai_sdk "$RES/.venv-dicow" "DiCoW runtime"
 check_relocatable "$RES/.venv-dicow" "DiCoW runtime"
 
 # ===========================================================================
