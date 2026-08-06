@@ -17,8 +17,10 @@ import Foundation
 //
 // So the whole session is: record with no speaker labels, then one pass over the
 // recording at Stop. That is a real degradation against pyannote and it is stated
-// rather than hidden — see `spectralRefusalMessage` for the one configuration
-// where it becomes a total absence and is refused instead.
+// rather than hidden. It used to be refusable — `diarization.finalPass` off left
+// this engine with no labels at all — but since 2026-08-06 that setting is not
+// shown under spectral and not read by it, so the configuration cannot be
+// expressed and there is nothing left to refuse.
 //
 // WHAT IT KEEPS, which is the payoff of the 2026-07-30 pyannote/wespeaker split:
 // its labels are run-LOCAL (`SPEAKER_00`), so they go through the SAME
@@ -63,68 +65,31 @@ extension AudioRecorder {
         }
     }
 
-    // MARK: - Refusal (refuse loudly, never substitute)
-
-    /// Why this spectral configuration cannot work, or nil to start normally.
-    ///
-    /// **THE ONE REFUSAL: `diarization.finalPass` OFF.**
-    ///
-    /// For pyannote and MOSS, turning the stop pass off is a *degradation* — the
-    /// live labels are kept and the transcript still names its speakers. Spectral
-    /// has no live path, so the stop pass is not a refinement of the labels, it IS
-    /// the labels. With it off the user asks for speaker diarization, waits out a
-    /// model load, records a whole meeting, and gets a transcript with no speakers
-    /// at all — and nothing anywhere says why.
-    ///
-    /// Refusal rather than silently forcing the pass on (which would ignore a
-    /// setting the user deliberately set) and rather than silently substituting
-    /// pyannote (the house rule this project has followed for Voxtral + dual
-    /// stream, Voxtral + MOSS and the chunked full pass). Checked in
-    /// `prepareAndCapture` beside those three, so it is said BEFORE the meeting
-    /// rather than discovered after it.
-    ///
-    /// `diarizationEnabled` gates the whole rule: turning diarization off entirely
-    /// is a coherent choice and must keep working whatever engine is selected.
-    nonisolated static func spectralRefusalMessage(diarizationEngine: String,
-                                                   diarizationEnabled: Bool,
-                                                   finalPass: Bool) -> String? {
-        guard diarizationEnabled, diarizationEngine == ModelLoader.spectralEngineID else {
-            return nil
-        }
-        guard !finalPass else { return nil }
-        return "The spectral engine only diarizes at the end of a recording — it clusters "
-             + "speakers over the whole file at once and has no live pass, so with "
-             + "\"Run a diarization pass at stop\" switched off this meeting would produce no "
-             + "speaker labels at all. Turn that pass back on in Settings → Models → "
-             + "Diarization, pick the pyannote engine (which does label live), or turn speaker "
-             + "diarization off entirely."
-    }
-
     // MARK: - The office whole-file pass
 
     /// Whether a spectral session dispatches its office whole-file pass at Stop.
     ///
     /// PURE and static, like `remoteStopMode` and `mossStopMode`, so the rule can
     /// be tested without a sidecar — and so `stop()` reads ONE condition rather
-    /// than growing a second one that disagrees with `spectralRefusalMessage`.
+    /// than growing a second one that could disagree with it.
     ///
-    /// **`continueOnStop` IS DELIBERATELY NOT A PARAMETER.** Taking it and then
-    /// ignoring it would imply the tail was considered and rejected per session;
-    /// it is not available at all. This engine has no chunk job to send and, since
-    /// it has no live path, no live labels for a tail to continue from — so the
-    /// full pass is the only mode, and the setting simply does not reach here.
-    /// The remote twin says the same thing in its own vocabulary, by passing
-    /// `supportsTail: false` to `remoteStopMode`.
+    /// **NEITHER `continueOnStop` NOR `finalPass` IS A PARAMETER**, and for the
+    /// same reason: taking a setting and then ignoring it would imply it was
+    /// considered and rejected per session, when it is not available at all.
     ///
-    /// `finalPass` is still asked even though `spectralRefusalMessage` refuses that
-    /// combination at start: the settings are re-read at Stop, and a rule that
-    /// trusted an earlier check would dispatch a pass the user had since switched
-    /// off. Asking twice costs nothing; disagreeing would hang a stop leg.
+    /// There is no tail because there are no live labels to continue from, and
+    /// since 2026-08-06 there is no stop-pass switch either — the pass IS the
+    /// labels under this engine, so the Diarization tab shows neither control
+    /// while spectral is selected and nothing here reads them. That also retired
+    /// `spectralRefusalMessage`: the configuration it refused (stop pass off, no
+    /// labels at all) can no longer be expressed.
+    ///
+    /// The stored `diarization.finalPass` deliberately keeps whatever pyannote
+    /// left in it — this engine simply never asks.
     nonisolated static func runsSpectralOfficePass(spectralActive: Bool,
-                                                   finalPass: Bool,
                                                    hasService: Bool,
                                                    hasRecording: Bool) -> Bool {
-        spectralActive && finalPass && hasService && hasRecording
+        spectralActive && hasService && hasRecording
     }
 
     /// Seconds to allow one spectral whole-file pass over `recordingLength`
@@ -161,7 +126,7 @@ extension AudioRecorder {
         }
         diarizing = true
         diarizationError = nil
-        let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
+        let numSpeakers = Self.diarNumSpeakers
         // `diarization.detectOverlap` is NOT sent, and that is not an omission.
         // This engine's Viterbi smoothing assigns exactly one label per frame, so
         // it cannot report two speakers at one instant whatever it is asked. See
@@ -222,7 +187,7 @@ extension AudioRecorder {
         }
         remoteDiarAudio = []
         remoteFinalDiarDone = false
-        let numSpeakers = d.integer(forKey: "diarization.numSpeakers")
+        let numSpeakers = Self.diarNumSpeakers
         spectralLog("REMOTE FINAL PASS start — whole Remote WAV, "
                     + "num_speakers=\(numSpeakers == 0 ? "auto" : String(numSpeakers))")
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers, stream: .remote)
@@ -246,5 +211,67 @@ extension AudioRecorder {
     /// app's own decisions. Two writers on one file is the 2026-07-15 mistake.
     func spectralLog(_ message: String) {
         PythonRuntime.appendAppLog(name: "spectral-diarization", message: message)
+    }
+}
+
+extension AudioRecorder {
+
+    /// Wire the overlap DETECTOR for this session, and run it at Stop.
+    ///
+    /// Deliberately NOT part of the stop GATE. The detector adds a mark to rows
+    /// whose text already exists; holding the blocking overlay for it would make a
+    /// hint cost the user their transcript's arrival. It lands late, exactly as
+    /// aligner words do, and `rebuildDisplayRows` picks it up — the same
+    /// late-arrival pattern diarization turns have always used.
+    ///
+    /// Failure is silent in the transcript and loud in the log: a missing mark is
+    /// a missing hint, never wrong text.
+    func configureOverlapDetect() {
+        guard let service = modelLoader.overlapDetect else { return }
+        service.onResult = { [weak self] regions, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.detectedOverlapRegions = regions
+                let total = regions.reduce(0.0) { $0 + ($1.end - $1.start) }
+                self.overlapDetectLog("DETECT done — \(regions.count) region(s), "
+                                      + "\(String(format: "%.1f", total))s marked")
+                self.rebuildDisplayRows()
+                // Repair waits for this under MOSS and spectral, where these
+                // regions are its ONLY input. Released after the rows are rebuilt
+                // so the mark is on screen either way, even if repair then skips.
+                self.overlapDetectDone = true
+                self.maybeStartOverlapRepair()
+            }
+        }
+        service.onError = { [weak self] message in
+            Task { @MainActor in
+                guard let self else { return }
+                self.overlapDetectLog("DETECT failed — \(message)")
+                // A failed detection must RELEASE repair, not hold it: repair will
+                // find no regions and settle its own leg, which is the difference
+                // between a missing mark and a stop overlay stuck for ten minutes.
+                self.overlapDetectDone = true
+                self.maybeStartOverlapRepair()
+            }
+        }
+    }
+
+    /// At Stop: one pass over the whole recording. ~160x realtime, so a 43-minute
+    /// meeting costs about 16 seconds — measured, not estimated.
+    func startOverlapDetection(_ recording: URL) {
+        // No detector this session: `overlapDetectDone` STAYS true, so repair
+        // never waits for a pass that will not happen.
+        guard let service = modelLoader.overlapDetect else { return }
+        detectedOverlapRegions = []
+        overlapDetectDone = false
+        overlapDetectLog("DETECT start — \(fmt(recordingElapsed))s of audio")
+        service.detect(audio: recording)
+    }
+
+    /// `logs/overlap-detect-decisions.log` — SWIFT-owned, one writer, and named
+    /// apart from the sidecar's own `logs/overlap-detect.log`. Two writers on one
+    /// file is the 2026-07-15 mistake.
+    func overlapDetectLog(_ message: String) {
+        PythonRuntime.appendAppLog(name: "overlap-detect-decisions", message: message)
     }
 }

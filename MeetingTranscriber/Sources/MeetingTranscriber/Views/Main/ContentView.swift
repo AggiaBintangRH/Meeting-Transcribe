@@ -8,7 +8,8 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             HStack(spacing: 0) {
-                SidebarView(recorder: recorder, openSettings: { showSettings = true })
+                SidebarView(recorder: recorder,
+                            openSettings: { showSettings = true })
                 Rectangle()
                     .fill(Theme.divider)
                     .frame(width: 1)

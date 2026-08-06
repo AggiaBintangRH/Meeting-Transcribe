@@ -167,9 +167,14 @@ final class ChunkedASRService: @unchecked Sendable {
                                                   options.logprobThreshold)
                 options.compressionThreshold = number("whisper.compressionThreshold",
                                                       options.compressionThreshold)
-                options.task = d.string(forKey: "whisper.task") ?? options.task
-                options.autoDetectLanguage =
-                    d.object(forKey: "whisper.autoDetectLanguage") as? Bool ?? false
+                // `task` and `autoDetectLanguage` keep their defaults and are
+                // DELIBERATELY not read. Their controls were removed on
+                // 2026-08-06 (owner) and a stored value must not outlive the
+                // control that set it: someone who once picked "Translate to
+                // English" would otherwise keep getting a translation instead of
+                // a record of the words said, with nothing in the UI able to
+                // change it back. `WhisperOptions()` already holds "transcribe"
+                // and false, which is what the app has always defaulted to.
                 options.hallucinationSilenceSec =
                     number("whisper.hallucinationSilenceSec", 0)
                 return options

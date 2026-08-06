@@ -182,6 +182,7 @@ extension AudioRecorder {
 
         mossDiarizationActive = diarOn && engine == ModelLoader.mossEngineID
         mossIsChunkedModel = chunkedID == "moss"
+        mossIdentifyStarted = false
         mossTurns = []
         mossChunkIndex = 0
         mossIncomingSegments = nil

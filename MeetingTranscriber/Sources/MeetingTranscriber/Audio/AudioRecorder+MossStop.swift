@@ -7,7 +7,8 @@ import Foundation
 // SCOPE: this drives the SECOND MOSS process only, i.e. "another model does the
 // ASR, MOSS labels the speakers". In MOSS+MOSS mode `mossDiarService` is nil —
 // one process carries both jobs and its tail is the CHUNKED tail, already
-// governed by `chunked.finalPass` / `chunked.continueOnStop`. Two settings pairs
+// governed by `chunked.finalPass` (the tail/full choice was retired 2026-08-06 —
+// the chunked stop pass is always tail-only now). Two settings pairs
 // for one process would be two answers to one question.
 //
 // WHY THE FULL PASS USES A LONGER WINDOW, AND WHY THAT IS THE WHOLE POINT
@@ -168,35 +169,80 @@ extension AudioRecorder {
 
     // MARK: - Identity: what turns RE-LABELLING into RECOGNISING
 
-    /// One `identify` over the WHOLE meeting, after the full pass has produced
-    /// every window's turns.
+    /// `identify` ONE WINDOW AT A TIME, in order — not once over the meeting.
     ///
-    /// WHY THIS EXISTS. A MOSS label is anonymous per CALL — `S01` in window 1 is
-    /// not `S01` in window 2, and the model never claimed it was. That single fact
-    /// caused four separate complaints: speaker numbering that goes incoherent at
-    /// every window seam, no saved profiles, no renaming, and no `spk` confidence.
-    /// Feeding the run's turns through WeSpeaker fixes all four at once, because
-    /// the profile store is what decides that two spans are the same person.
+    /// WHY THIS EXISTS. A MOSS label is anonymous per model CALL: `S01` in window
+    /// 1 is not `S01` in window 2, and the model never claimed it was. Measured on
+    /// a real 4.3-minute recording, window 1's `S01` turned out to be the same
+    /// person as window 0's **`S02`** (cosine 0.90) and its `S04` the same as
+    /// window 0's `S01` (0.89). Without identity those read as four people; with
+    /// it, 7 per-window labels collapse to 5. That permutation is exactly what
+    /// makes a MOSS transcript look incoherent at every seam.
     ///
-    /// ONE call for the whole meeting, not one per window, and that is the
-    /// protocol's own design (`wespeaker-service.py`): `assign()` guarantees that
-    /// two DISTINCT voices within a single run never collapse onto one profile —
-    /// a guarantee that is per RUN, so a per-window call would destroy exactly the
-    /// property being bought.
+    /// **ONE CALL PER WINDOW, and the first version of this got it backwards.**
+    /// It sent the whole meeting in a single `identify` and stitched NOTHING —
+    /// 7 labels became 7 profiles, every one brand new. The reason is in
+    /// `ProfileStore.assign`: it snapshots `self.centroids` BEFORE scoring and
+    /// enforces a one-to-one mapping, so two labels in the SAME call can never
+    /// land on one profile — by design, since within one diarization run two
+    /// distinct labels really are two distinct voices. That guarantee is what
+    /// makes a per-run call correct for pyannote, where a run is one chunk whose
+    /// labels are already internally consistent. **A MOSS WINDOW IS THE
+    /// EQUIVALENT OF A PYANNOTE CHUNK**, so windows must be separate calls: only
+    /// then do window 0's profiles exist in the store when window 1 is scored.
+    ///
+    /// Grouped by the chunk index already embedded in the MOSS wire id
+    /// (`mossIDBase + chunkIndex * 100 + local`), so no second bookkeeping
+    /// structure is needed and the order is the recording's own.
     ///
     /// No temp WAV: the full pass already runs over the recording and its turns
-    /// are in recording time, so the identity stage can read the same file. That
-    /// is what made this small — the earlier estimate assumed a WAV per window.
+    /// are in recording time, so every call reads the same file.
     ///
-    /// **An unidentified turn KEEPS its original label.** `composeTurns`
-    /// `compactMap`s those away, which is right for pyannote (a turn with no
-    /// speaker has no meaning there) and would be over-deletion here: a MOSS turn
-    /// under `MIN_EMBED_SEC` carries real transcribed words, and dropping it would
-    /// delete them from the transcript with no trace. Degrading to the old
-    /// per-chunk label is strictly better than losing the row.
+    /// **An unidentified turn KEEPS its per-window label.** `composeTurns`
+    /// `compactMap`s unmatched turns away, which is right for pyannote and would
+    /// be over-deletion here: a MOSS turn under `MIN_EMBED_SEC` carries real
+    /// transcribed words, and dropping it would delete them with no trace.
+    /// A failed call is likewise non-fatal — that window keeps the labels it had.
+    /// MOSS+MOSS has NO full pass of its own, so identify had no caller there.
     ///
-    /// Failure is NOT fatal for the same reason: the meeting keeps the labels it
-    /// already had, and the log says why they did not improve.
+    /// THE REGRESSION THIS FIXES, found by the owner's recording on 2026-08-06.
+    /// `identifyMossTurns` is driven by `startMossFullPass`, and `mossStopMode`
+    /// returns `.none` when `hasDiarService` is false — which is exactly the
+    /// MOSS+MOSS case, because one sidecar serves both roles and `mossDiarService`
+    /// is nil by design. So identity ran only in the OTHER mode: MOSS diarizing
+    /// beside a different ASR.
+    ///
+    /// That was survivable until the same day's MOSS⟺MOSS rule made MOSS+MOSS the
+    /// ONLY reachable pairing — at which point stitching, saved profiles, renaming
+    /// and `spk` all became unreachable under MOSS, silently. The log said so:
+    /// `chunk #0 [0.0-48.3] 2 rows` with speaker ids still at 1 000 001, and no
+    /// `IDENTIFY` line at all.
+    ///
+    /// Hooked to the CHUNKED stop pass instead, because in this mode that pass IS
+    /// the last thing to add turns — `applyMossChunk` appends on every chunk
+    /// including the tail. Returns true when it took over, so `checkLastChunkDone`
+    /// knows to let the completion handler finish the gate rather than doing it
+    /// twice.
+    @discardableResult
+    func startMossIdentifyForOwnASR() -> Bool {
+        guard mossDiarizationActive, mossIsChunkedModel,
+              !mossIdentifyStarted, !mossTurns.isEmpty,
+              let recording = lastRecordingURL else { return false }
+        mossIdentifyStarted = true
+        setStopStepName("chunk", "Labelling speakers")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.identifyMossTurns(recording: recording)
+            self.rebuildDisplayRows()
+            // Repair runs AFTER identity on purpose: its windows are attributed by
+            // speaker id, and after this those ids are profile ids that mean the
+            // same person across windows.
+            self.maybeStartOverlapRepair()
+            self.checkStopProcessingDone()
+        }
+        return true
+    }
+
     func identifyMossTurns(recording: URL) async {
         guard mossDiarizationActive, !mossTurns.isEmpty else { return }
         guard let embedding = modelLoader.embedding else {
@@ -204,30 +250,40 @@ extension AudioRecorder {
                     + "stay per-window")
             return
         }
-        // The MOSS wire id is already unique per (window, speaker), so it is the
-        // natural local label: two windows' `S01` arrive as two candidates and
-        // the store decides whether they are one person.
-        let locals = mossTurns.map {
-            PyannoteService.LocalTurn(start: $0.start, end: $0.end, label: "M\($0.id)")
-        }
         let before = Set(mossTurns.map(\.id)).count
-        do {
-            let identity = try await embedding.identify(audio: recording.path,
-                                                        turns: locals, stream: .office)
-            var identified = 0
-            mossTurns = zip(mossTurns, locals).map { turn, local in
-                guard let who = identity[local.label] ?? nil else { return turn }
-                identified += 1
-                return SpeakerTurn(start: turn.start, end: turn.end,
-                                   id: who.id, name: who.name, conf: who.conf)
-            }
-            let after = Set(mossTurns.map(\.id)).count
-            mossLog("IDENTIFY done — \(identified)/\(mossTurns.count) turns matched, "
-                    + "\(before) per-window labels collapsed to \(after) people")
-            rebuildDisplayRows()
-        } catch {
-            mossLog("IDENTIFY FAILED — \(error.localizedDescription); speaker numbers "
-                    + "stay per-window (see logs/\(WeSpeakerService.Config.logName).log)")
+        // Chunk index out of the wire id, so the grouping cannot drift from the
+        // ids the turns already carry.
+        let windows = Dictionary(grouping: mossTurns.indices) {
+            (mossTurns[$0].id - Self.mossIDBase) / 100
         }
+        var identified = 0
+        for key in windows.keys.sorted() {
+            let idxs = windows[key] ?? []
+            let locals = idxs.map {
+                PyannoteService.LocalTurn(start: mossTurns[$0].start,
+                                          end: mossTurns[$0].end,
+                                          label: "M\(mossTurns[$0].id)")
+            }
+            do {
+                let identity = try await embedding.identify(audio: recording.path,
+                                                            turns: locals, stream: .office)
+                for (offset, i) in idxs.enumerated() {
+                    guard let who = identity[locals[offset].label] ?? nil else { continue }
+                    identified += 1
+                    mossTurns[i] = SpeakerTurn(start: mossTurns[i].start,
+                                               end: mossTurns[i].end,
+                                               id: who.id, name: who.name, conf: who.conf)
+                }
+            } catch {
+                mossLog("IDENTIFY window \(key) FAILED — \(error.localizedDescription); "
+                        + "its speaker numbers stay per-window")
+            }
+        }
+        let after = Set(mossTurns.map(\.id)).count
+        mossLog("IDENTIFY done — \(identified)/\(mossTurns.count) turns matched across "
+                + "\(windows.count) window(s), \(before) per-window labels collapsed to "
+                + "\(after) people")
+        rebuildDisplayRows()
     }
+
 }

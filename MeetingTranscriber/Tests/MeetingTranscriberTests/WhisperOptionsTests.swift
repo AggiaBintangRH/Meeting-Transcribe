@@ -130,15 +130,12 @@ final class WhisperOptionsTests: XCTestCase {
         d.set(0.45, forKey: "whisper.noSpeechThreshold")
         d.set(-1.5, forKey: "whisper.logprobThreshold")
         d.set(2.0, forKey: "whisper.compressionThreshold")
-        d.set("translate", forKey: "whisper.task")
-        d.set(true, forKey: "whisper.autoDetectLanguage")
         d.set(2.0, forKey: "whisper.hallucinationSilenceSec")
 
         let arguments = ChunkedASRService.Config.fromSettings().whisper?.processArguments ?? []
         for flag in ["--initial-prompt", "--best-of",
                      "--no-speech-threshold", "--logprob-threshold",
-                     "--compression-threshold", "--task",
-                     "--auto-detect-language", "--hallucination-silence-sec"] {
+                     "--compression-threshold", "--hallucination-silence-sec"] {
             XCTAssertTrue(arguments.contains(flag), "missing \(flag) in \(arguments)")
         }
         XCTAssertEqual(arguments[arguments.firstIndex(of: "--initial-prompt")! + 1],
@@ -160,8 +157,6 @@ final class WhisperOptionsTests: XCTestCase {
             ("whisper.noSpeechThreshold", 0.45),
             ("whisper.logprobThreshold", -1.5),
             ("whisper.compressionThreshold", 2.0),
-            ("whisper.task", "translate"),
-            ("whisper.autoDetectLanguage", true),
             ("whisper.hallucinationSilenceSec", 2.0),
         ]
         for (key, value) in cases {
@@ -171,6 +166,51 @@ final class WhisperOptionsTests: XCTestCase {
             UserDefaults.standard.removeObject(forKey: key)
         }
         XCTAssertEqual(before, ChunkedASRService.Config.fromSettings())
+    }
+
+    // MARK: - The two RETIRED knobs may never come back
+
+    /// `whisper.task` and `whisper.autoDetectLanguage` had controls until
+    /// 2026-08-06, when the owner removed them and fixed both at their defaults.
+    /// A stored value must not outlive the control that set it — someone who once
+    /// picked "Translate to English" would otherwise keep receiving a translation
+    /// instead of a record of the words said, with nothing in the UI able to
+    /// change it back.
+    ///
+    /// The mirror image of `testEachOptionProducesItsFlag`, and it fails in both
+    /// the ways that matter: the flag reappearing on the wire, and the stored
+    /// value merely reaching `WhisperOptions` (which would also recreate the
+    /// sidecar on a value nobody can see).
+    func testRetiredKnobsNeverReachTheSidecar() {
+        selectWhisper()
+        let d = UserDefaults.standard
+        d.set("translate", forKey: "whisper.task")
+        d.set(true, forKey: "whisper.autoDetectLanguage")
+        defer {
+            d.removeObject(forKey: "whisper.task")
+            d.removeObject(forKey: "whisper.autoDetectLanguage")
+        }
+        let config = ChunkedASRService.Config.fromSettings()
+        XCTAssertEqual(config.whisper?.task, "transcribe",
+                       "a stored task outlived the control that set it")
+        XCTAssertEqual(config.whisper?.autoDetectLanguage, false)
+        let args = config.whisper?.processArguments ?? []
+        XCTAssertFalse(args.contains("--task"), "\(args)")
+        XCTAssertFalse(args.contains("--auto-detect-language"), "\(args)")
+    }
+
+    /// And they may not recreate the sidecar either: `Config` is Equatable and
+    /// drives that, so a key nothing reads must leave it identical.
+    func testRetiredKnobsDoNotChangeConfig() {
+        selectWhisper()
+        let before = ChunkedASRService.Config.fromSettings()
+        for (key, value) in [("whisper.task", "translate" as Any),
+                             ("whisper.autoDetectLanguage", true as Any)] {
+            UserDefaults.standard.set(value, forKey: key)
+            XCTAssertEqual(before, ChunkedASRService.Config.fromSettings(),
+                           "\(key) still reaches Config")
+            UserDefaults.standard.removeObject(forKey: key)
+        }
     }
 
     // MARK: - The other models are untouched

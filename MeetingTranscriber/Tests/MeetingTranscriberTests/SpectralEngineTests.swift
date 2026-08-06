@@ -33,10 +33,11 @@ final class SpectralEngineTests: XCTestCase {
 
     // MARK: - 1. The three-way stack rule
 
-    private func stack(enabled: Bool = true, engine: String, chunked: String = "qwen3")
-        -> ModelLoader.DiarizationStack? {
+    private func stack(enabled: Bool = true, engine: String, chunked: String = "qwen3",
+                       chunkedOn: Bool = true) -> ModelLoader.DiarizationStack? {
         ModelLoader.wantedDiarizationStack(diarizationEnabled: enabled,
-                                           engine: engine, chunkedID: chunked)
+                                           engine: engine, chunkedID: chunked,
+                                           chunkedEnabled: chunkedOn)
     }
 
     /// Each engine selects ITS OWN stack, and — the direction that makes this able
@@ -110,19 +111,27 @@ final class SpectralEngineTests: XCTestCase {
 
     // MARK: - 2. Spectral never selects an overlap engine
 
-    /// Neither repair engine is kept alive under spectral — and, the other
-    /// direction, both still are under pyannote, so this cannot pass by refusing
-    /// everything.
-    func testSpectralKeepsNeitherOverlapEngine() {
+    /// Neither repair engine is kept alive under spectral WITHOUT THE DETECTOR —
+    /// and, the other direction, both still are under pyannote, so this cannot
+    /// pass by refusing everything.
+    ///
+    /// The detector-off qualifier is the whole of the exclusion: spectral cannot
+    /// produce an overlap REGION from its own turns (Viterbi assigns one label per
+    /// frame), not that spectral is forbidden repair. Once the standalone detector
+    /// supplies regions the engine loads again — pinned in
+    /// `OverlapEngineLifecycleTests.testTheDetectorGivesMossAndSpectralTheirRepairEngineBack`.
+    func testSpectralKeepsNeitherOverlapEngineWithoutTheDetector() {
         for engineID in [ModelCatalog.overlapSeparation.id, ModelCatalog.overlapDicow.id] {
             XCTAssertNil(ModelLoader.wantedOverlapEngine(repairEnabled: true,
                                                          engineID: engineID,
-                                                         diarEngine: spectral),
+                                                         diarEngine: spectral,
+                                                         detectEnabled: false),
                          "\(engineID) was kept alive for an engine that cannot produce "
                          + "overlap regions at all")
             XCTAssertEqual(ModelLoader.wantedOverlapEngine(repairEnabled: true,
                                                            engineID: engineID,
-                                                           diarEngine: pyannote),
+                                                           diarEngine: pyannote,
+                                                           detectEnabled: false),
                            engineID,
                            "\(engineID) must still load under pyannote — the spectral "
                            + "exclusion must not have widened into every engine")
@@ -183,22 +192,45 @@ final class SpectralEngineTests: XCTestCase {
 
     // MARK: - The stop pass, and the tail that does not exist
 
-    /// The office rule, all four inputs both ways. `continueOnStop` is absent from
-    /// the signature ON PURPOSE — there is no tail — so the only way this engine
-    /// can fail to label a meeting is one of these four being false.
-    func testTheOfficePassNeedsTheEngineTheSettingTheServiceAndTheRecording() {
-        func runs(active: Bool = true, finalPass: Bool = true,
-                  service: Bool = true, recording: Bool = true) -> Bool {
-            AudioRecorder.runsSpectralOfficePass(spectralActive: active, finalPass: finalPass,
+    /// The office rule, all three inputs both ways. NEITHER `continueOnStop` NOR
+    /// `finalPass` is in the signature, and both absences are deliberate: there is
+    /// no tail to continue from, and since 2026-08-06 no stop-pass switch either —
+    /// the pass IS the labels here, so the Diarization tab shows neither control
+    /// under this engine and nothing reads them.
+    ///
+    /// THE DANGEROUS DIRECTION IS A PASS THAT DOES NOT RUN, since this engine has
+    /// no live labels to fall back on: a meeting would simply end with no speakers.
+    /// So the only ways it can fail are the three below.
+    func testTheOfficePassNeedsTheEngineTheServiceAndTheRecording() {
+        func runs(active: Bool = true, service: Bool = true, recording: Bool = true) -> Bool {
+            AudioRecorder.runsSpectralOfficePass(spectralActive: active,
                                                  hasService: service, hasRecording: recording)
         }
         XCTAssertTrue(runs())
         XCTAssertFalse(runs(active: false), "a pyannote session must not take this branch")
-        XCTAssertFalse(runs(finalPass: false),
-                       "the settings are re-read at Stop — a pass the user has since "
-                       + "switched off must not be dispatched")
         XCTAssertFalse(runs(service: false))
         XCTAssertFalse(runs(recording: false))
+    }
+
+    /// `diarization.finalPass` is SHARED with pyannote, and a spectral session
+    /// must be unaffected by whatever pyannote left in it — that value has no
+    /// control under this engine, so honouring it would strand the user with an
+    /// unlabelled meeting and nothing to change. Absent from the signature is what
+    /// guarantees it; this asserts the guarantee rather than trusting the shape.
+    func testAStoredFinalPassCannotReachTheSpectralPass() {
+        let d = UserDefaults.standard
+        let saved = d.object(forKey: "diarization.finalPass")
+        defer {
+            if let saved { d.set(saved, forKey: "diarization.finalPass") }
+            else { d.removeObject(forKey: "diarization.finalPass") }
+        }
+        for stored in [true, false] {
+            d.set(stored, forKey: "diarization.finalPass")
+            XCTAssertTrue(AudioRecorder.runsSpectralOfficePass(spectralActive: true,
+                                                               hasService: true,
+                                                               hasRecording: true),
+                          "a stored finalPass=\(stored) reached the spectral pass")
+        }
     }
 
     /// `continueOnStop` cannot be honoured by an engine with no chunk job and no
@@ -219,75 +251,13 @@ final class SpectralEngineTests: XCTestCase {
                        "pyannote's behaviour must be byte-for-byte what it was")
     }
 
-    /// The startup refusal: this engine with its stop pass off produces NO speaker
-    /// labels whatsoever, so it is refused before the meeting rather than
-    /// discovered as an unlabelled transcript after it. Every other combination
-    /// must start normally — a refusal that fired too widely would block sessions
-    /// that work.
-    func testTheStopPassIsRefusedOnlyWhereItWouldLoseEveryLabel() {
-        XCTAssertNotNil(AudioRecorder.spectralRefusalMessage(diarizationEngine: spectral,
-                                                             diarizationEnabled: true,
-                                                             finalPass: false))
-        XCTAssertNil(AudioRecorder.spectralRefusalMessage(diarizationEngine: spectral,
-                                                          diarizationEnabled: true,
-                                                          finalPass: true))
-        // Diarization off entirely is a coherent choice under any engine.
-        XCTAssertNil(AudioRecorder.spectralRefusalMessage(diarizationEngine: spectral,
-                                                          diarizationEnabled: false,
-                                                          finalPass: false))
-        // And the other engines keep their stop pass optional — for them it is a
-        // degradation, not a total absence.
-        for engine in [pyannote, moss] {
-            XCTAssertNil(AudioRecorder.spectralRefusalMessage(diarizationEngine: engine,
-                                                              diarizationEnabled: true,
-                                                              finalPass: false),
-                         "engine=\(engine) was refused by a spectral-only rule")
-        }
-    }
+    /// THE REFUSAL THIS ENGINE USED TO NEED IS GONE (2026-08-06), and its test with
+    /// it. `spectralRefusalMessage` refused a spectral session with
+    /// `diarization.finalPass` off, because that produced no labels at all. The
+    /// setting is now neither shown nor read under this engine, so the
+    /// configuration cannot be expressed — see
+    /// `testAStoredFinalPassCannotReachTheSpectralPass`, which is what replaced it.
 
-    /// The refusal's TEXT, not just its existence. A refusal the user cannot act on
-    /// is the same dead end as no refusal at all: it lands in the loading overlay
-    /// with no other context, so it has to name the engine, the control, and where
-    /// that control lives. Asserted here because the message is the entire
-    /// user-visible product of this rule — the Bool half is pinned above.
-    func testTheRefusalNamesTheEngineAndTheControlTheUserMustChange() {
-        guard let message = AudioRecorder.spectralRefusalMessage(diarizationEngine: spectral,
-                                                                  diarizationEnabled: true,
-                                                                  finalPass: false) else {
-            return XCTFail("the one configuration that loses every label was not refused")
-        }
-        XCTAssertTrue(message.lowercased().contains("spectral"),
-                      "the overlay shows this alone — it must say which engine refused")
-        XCTAssertTrue(message.contains("Run a diarization pass at stop"),
-                      "the setting to change must be named exactly as the tab labels it, or "
-                      + "the user has to guess which toggle is meant")
-        XCTAssertTrue(message.contains("Diarization"),
-                      "the message must point at the Settings tab holding that toggle")
-        // And it must offer the two ways out this project always offers instead of
-        // silently substituting an engine: use the one that CAN label live, or turn
-        // the feature off deliberately.
-        XCTAssertTrue(message.contains("pyannote"))
-    }
-
-    /// **THE DUAL-STREAM DECISION, pinned as the absence it is.**
-    ///
-    /// Voxtral is refused with a Remote channel because its ~27 s per 30 s chunk
-    /// exceeds 100 % duty for one stream, so a second stream falls permanently
-    /// behind the recording. That arithmetic does not reach this engine: it runs
-    /// ONCE, after the recording has stopped, so a second job cannot fall behind
-    /// anything — it can only be waited for.
-    ///
-    /// MEASURED 2026-08-04 by driving `scripts/spectral/spectral-service.py` with
-    /// both jobs written back to back on ONE stdin, as `stop()` dispatches them:
-    /// a 4027.4 s recording answered 169.3 s after dispatch and a 3630.7 s one
-    /// queued behind it a further 151.1 s — 320.4 s for 2.1 hours of audio, at
-    /// 23.8x and 24.0x realtime. `spectralWatchdogSeconds` allows 2x REALTIME per
-    /// leg and doubles it for the remote one, so the measured need is ~2 % of the
-    /// budget already in place. A refusal would be an unnecessary one, and an
-    /// unnecessary refusal is its own defect — so there is none, and this test is
-    /// what stops one being added by symmetry with Voxtral's.
-    ///
-    /// Both directions: Voxtral + Remote must STILL refuse, which is what proves
     /// this is checking the real rules rather than three functions that return nil.
     func testDualStreamIsAllowedWithSpectralWhileVoxtralIsStillRefused() {
         for chunked in ["qwen3", "whisper", "granite", "moss"] {
@@ -298,12 +268,6 @@ final class SpectralEngineTests: XCTestCase {
                                                           diarizationEngine: spectral,
                                                           remoteChannel: 1),
                          "chunked=\(chunked): the MOSS-engine rule captured spectral")
-            // The engine's own rule is about the stop pass and nothing else — a
-            // Remote channel is not one of its inputs and must never become one.
-            XCTAssertNil(AudioRecorder.spectralRefusalMessage(diarizationEngine: spectral,
-                                                              diarizationEnabled: true,
-                                                              finalPass: true),
-                         "chunked=\(chunked): a working spectral session was refused")
         }
         XCTAssertNotNil(AudioRecorder.dualStreamRefusalMessage(remoteChannel: 1,
                                                                chunkedModelID: "voxtral"),

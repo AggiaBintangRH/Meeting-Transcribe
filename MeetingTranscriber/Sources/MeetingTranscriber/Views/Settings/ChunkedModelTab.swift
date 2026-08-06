@@ -2,15 +2,27 @@ import SwiftUI
 
 /// Models → Chunked: select the batch ASR model for the final transcript.
 struct ChunkedModelTab: View {
+    /// THE MASTER SWITCH — distinct from `chunked.finalPass` below, which reads
+    /// like one and is not: that key governs only the extra pass after Stop, and
+    /// with it off chunked ASR still runs all meeting. This one stops the model
+    /// loading at all. See `ModelLoader.wantsChunked`.
+    @AppStorage("chunked.enabled")     private var enabled = true
     @AppStorage("chunked.model")       private var model = "qwen3"
+    /// Written ONLY by `selectChunkedModel` below — this tab does not otherwise
+    /// own the diarization engine.
+    @AppStorage("diarization.engine")  private var diarizationEngine = "pyannote"
     @AppStorage("chunked.language")    private var language = "auto"
     @AppStorage("chunked.intervalSec") private var intervalSec = 30
-    // Pipeline-level, like the interval and the language above — NOT per-model,
-    // so this pair is shown for every model. Defaults are today's behaviour, and
-    // note that `continueOnStop` defaults to TRUE here while the Diarization
-    // tab's identically-named toggle defaults to FALSE; the copy below says so.
+    // Pipeline-level, NOT per-model, so it is shown for every model. Default is
+    // today's behaviour.
+    //
+    // `chunked.continueOnStop` USED TO SIT BESIDE THIS ("Continue from live text
+    // (tail only)") and was removed on 2026-08-06 at the owner's request. The
+    // stop pass is now ALWAYS tail-only, which was that toggle's default and what
+    // the app has always done — and `AudioRecorder` no longer reads the stored
+    // key, so a value left over from before cannot decide behaviour a control can
+    // no longer change.
     @AppStorage("chunked.finalPass")       private var finalPass = true
-    @AppStorage("chunked.continueOnStop")  private var continueOnStop = true
 
     /// Set when switching models drops the picked language, so the user is told
     /// which one went and why instead of finding the picker quietly on
@@ -19,58 +31,38 @@ struct ChunkedModelTab: View {
 
     var body: some View {
         Group {
-            Text("Accurate rolling transcript during the meeting: every interval, the chunk is re-transcribed with this model (cut at silence, never mid-word).")
-                .font(.system(size: 12))
-                .foregroundColor(Theme.textDim)
+            // The switch comes FIRST and everything it controls follows, the same
+            // shape as Overlap and Detect overlap. The warning is deliberately
+            // ABOVE the toggle, not below it: what is lost here is the transcript
+            // itself, and a consequence printed underneath is read after the
+            // decision instead of before it.
 
-            // Shows only when a Remote channel is configured and Voxtral is picked —
-            // the model choice and the thing that makes it unworkable live on
-            // different tabs, so the warning has to appear on both.
-            DualStreamVoxtralWarning()
+            SettingToggle(label: "Enable Chunked ASR", isOn: $enabled)
 
-            ForEach(ModelCatalog.chunked) { m in
-                Button(action: {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                        model = m.id
-                    }
-                }) {
-                    ModelCardView(model: m, selected: model == m.id)
-                }
-                .buttonStyle(.plain)
-            }
+            chunkedBody
+            
+        }
+    }
 
-            // The transcript shows a per-row `asr` number, and its ABSENCE is the
-            // thing that needs explaining — it looks like a missing feature
-            // otherwise. It is a property of the model, not of the audio.
-            Text("Transcript confidence is available with Whisper only — the other models expose no confidence signal.")
-                .font(.system(size: 11))
-                .foregroundColor(Theme.textFaint)
-                .fixedSize(horizontal: false, vertical: true)
-
-            // MOSS is the one entry above that is not purely a recogniser, so the
-            // consequences of picking it are not the same as picking another
-            // model — and they land on tabs the user is not looking at.
-            if model == "moss" {
-                Text("MOSS also returns speaker labels and timestamps with the words. Those labels are only used if you select MOSS as the diarization engine too (Models → Diarization) — otherwise pyannote splits its text exactly as it does for any other model. MOSS reports no transcript confidence, and the word aligner is not used with it (it already returns its own times).")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            // Per-model options, shown ONLY while that model is selected —
-            // the same rule OverlapTab follows for its two engines, after the
-            // owner found one engine's controls visible while the other was
-            // picked. Two models have them now; the branches are mutually
-            // exclusive, so no two option blocks can ever be on screen at once.
-            if model == "whisper" {
-                WhisperOptionsBlock()
-            }
-
-            if model == "qwen3" {
-                Qwen3OptionsBlock()
-            }
-
-            SettingBlock(title: "Chunk interval — faster updates vs higher accuracy") {
+    /// Model choice and every chunked setting. Only reachable while `enabled` is
+    /// on — with it off no chunked sidecar is loaded at all, so a visible picker
+    /// would be choosing a model for something that does not run.
+    @ViewBuilder
+    private var chunkedBody: some View {
+        Group {
+            // PIPELINE-LEVEL SETTINGS FIRST, directly under the master switch
+            // (owner, 2026-08-06). These four apply to every model identically —
+            // what happens at Stop, which language is asked for, and how long a
+            // chunk is — so they belong with the switch that turns the pass on,
+            // not scattered below a model choice they do not depend on.
+            //
+            // Everything after them is about WHICH model and ITS own options.
+            // The one coupling worth knowing: the language picker's roster is
+            // per-model (Whisper 100, Qwen3 30, Voxtral 13, Granite 5), so
+            // choosing a model below can narrow the list above — `onChange` at
+            // the end of this view resets a code that stops being supported and
+            // says so, rather than leaving the picker quietly on Auto-detect.
+            SettingBlock(title: "Chunked interval — faster updates vs higher accuracy") {
                 Picker("", selection: $intervalSec) {
                     Text("15 s").tag(15)
                     Text("30 s").tag(30)
@@ -86,9 +78,71 @@ struct ChunkedModelTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            languageBlock
+
             stopPassBlock
 
-            languageBlock
+            // THE SELECTED MODEL'S OWN OPTIONS, above the card list rather than
+            // below it (owner, 2026-08-06) and inside a bordered box. Position
+            // and border do the same job: these belong to ONE card, unlike
+            // everything above them, which applies to every model. Loose at the
+            // bottom of a long tab they read as more pipeline settings.
+            //
+            // Shown ONLY while that model is selected — the rule OverlapTab
+            // follows for its two engines. The branches are mutually exclusive,
+            // so two option boxes can never be on screen at once.
+            if model == "whisper" {
+                ModelOptionsBox(
+                    title: "WHISPER OPTIONS",
+                    note: "Every control starts at Whisper's own default — untouched, this "
+                        + "transcribes exactly as before.") {
+                    WhisperOptionsBlock()
+                }
+            }
+
+            if model == "qwen3" {
+                ModelOptionsBox(
+                    title: "QWEN3 OPTIONS",
+                    note: "Every control starts at Qwen3's own default — untouched, this "
+                        + "transcribes exactly as before.") {
+                    Qwen3OptionsBlock()
+                }
+            }
+
+            // Shows only when a Remote channel is configured and Voxtral is picked —
+            // the model choice and the thing that makes it unworkable live on
+            // different tabs, so the warning has to appear on both.
+            DualStreamVoxtralWarning()
+
+            ForEach(ModelCatalog.chunked) { m in
+                Button(action: {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                        selectChunkedModel(m.id)
+                    }
+                }) {
+                    ModelCardView(model: m, selected: model == m.id)
+                }
+                .buttonStyle(.plain)
+            }
+
+            ModelInstallStatus(model: ModelCatalog.chunkedModel(id: model))
+
+            // The transcript shows a per-row `asr` number, and its ABSENCE is the
+            // thing that needs explaining — it looks like a missing feature
+            // otherwise. It is a property of the model, not of the audio.
+            Text("Transcript confidence is available with Whisper only — the other models expose no confidence signal.")
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // NO note for MOSS (owner, 2026-08-06). There were two, then one, now
+            // none. What it said is still true and still happens — picking MOSS
+            // here also sets `diarization.engine` (see `selectChunkedModel`) —
+            // but the Diarization tab shows that selection plainly, and the rail
+            // moves Aligner and Overlap into "NOT USED BY YOUR MODELS" the moment
+            // it takes effect. The consequence is visible; the paragraph was not
+            // carrying it alone.
+
         }
         // The picked language can become unsupported the moment the model
         // changes, so the reset happens here — not at the next recording, where
@@ -117,35 +171,17 @@ struct ChunkedModelTab: View {
     }
 
     /// The stop-time pass — SHARED by every model, deliberately. What happens at
-    /// Stop is a property of the pipeline, exactly like the chunk interval and
-    /// the language above; only the decoding options are per-model. The measured
+    /// Stop is a property of the pipeline, like the language and the chunk
+    /// interval it now sits beside at the top of the tab; only the decoding
+    /// options are per-model, and those stay below the card list. The measured
     /// cost of the full pass does depend on the selected model, so that one line
     /// (`fullPassCostNote`) is the only part that varies.
     @ViewBuilder
     private var stopPassBlock: some View {
-        let refusal = AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: model)
-
-        SettingBlock(title: "Run a transcription pass at stop") {
-            SettingToggle(label: "Run a transcription pass at stop", isOn: $finalPass)
+        SettingBlock(title: "Re-transcribe at stop") {
+            SettingToggle(label: "Re-transcribe at stop", isOn: $finalPass)
             Text("After you stop, transcribe the recording with this model once more so the last "
                  + "seconds — the part no chunk covered yet — are as accurate as the rest.")
-                .font(.system(size: 11))
-                .foregroundColor(Theme.textFaint)
-                .fixedSize(horizontal: false, vertical: true)
-
-            SettingToggle(label: "Continue from live text (tail only)", isOn: $continueOnStop)
-                .disabled(!finalPass)
-            Text(continueOnStop
-                 ? "On: only the audio since the last chunk is transcribed and appended. This is "
-                   + "what the app has always done, and it is the default — note that the "
-                   + "same-named toggle in Models → Diarization defaults to OFF, so the pair look "
-                   + "alike but start differently."
-                 : "Off: the WHOLE recording is transcribed again from start to end, window by "
-                   + "window, replacing the text collected during the meeting. More consistent — "
-                   + "every chunk is decoded by the same model under the same settings — but it "
-                   + "runs after you press Stop and its windows are cut on a fixed clock rather "
-                   + "than at silence, so a boundary can land mid-word. "
-                   + AudioRecorder.fullPassCostNote(chunkedModelID: model))
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
@@ -162,30 +198,6 @@ struct ChunkedModelTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Shown where the choice is made, not only at Stop. The same refusal
-            // is enforced as a hard startup failure, so this is a warning the
-            // user can act on rather than the only thing standing in the way.
-            if finalPass, !continueOnStop, let refusal {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 11, weight: .bold))
-                    Text(refusal + " Recording will not start while this is selected.")
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .font(.system(size: 11))
-                .foregroundColor(Theme.red)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Theme.red.opacity(0.10))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Theme.red.opacity(0.35), lineWidth: 1)
-                        )
-                )
-            }
         }
     }
 
@@ -263,6 +275,111 @@ struct ChunkedModelTab: View {
         default:  return "Best accuracy — maximum context; transcript updates every 2 minutes."
         }
     }
+
+    /// Picking MOSS as the chunked model also selects MOSS as the diarization
+    /// engine, because that pairing is the ONE configuration where MOSS is used
+    /// as its authors built it: a single model returning the words, the speakers
+    /// and the times from ONE forward pass. Any other engine alongside MOSS-as-ASR
+    /// throws that away — MOSS's own attribution is discarded and the text is
+    /// re-split by another diarizer's spans, which is an estimate.
+    ///
+    /// It is a SELECTION, not a lock. The engine card in Models → Diarization
+    /// visibly moves to MOSS and the owner can move it straight back; nothing here
+    /// prevents MOSS-as-ASR with pyannote if that is deliberately wanted. The
+    /// house rule this respects is "never substitute SILENTLY" — the substitution
+    /// is on screen, one tab away, and reversible.
+    ///
+    /// Deliberately NOT symmetric: choosing MOSS as the ENGINE must not force the
+    /// chunked model, because "another model does the ASR, a second MOSS process
+    /// labels" is a real supported mode (`needsSecondMossProcess`).
+    private func selectChunkedModel(_ id: String) {
+        model = id
+        // ONE rule, both directions (2026-08-06): MOSS chunked ⟺ MOSS diarization.
+        // Correcting it here as well as in `DiarizationTab.onAppear` is what stops
+        // an engine staying stored with no card on screen selecting it. Asking
+        // `diarizationEngineIsSelectable` rather than testing for MOSS by hand
+        // means this site cannot drift from the card filter.
+        if !ModelLoader.diarizationEngineIsSelectable(diarizationEngine, chunkedID: id) {
+            diarizationEngine = ModelLoader.fallbackDiarizationEngine(chunkedID: id)
+        }
+    }
+}
+
+/// The BEST-ACCURACY preset for Whisper, and the measurement behind it.
+///
+/// Owner asked for a preset and asked for it to be MEASURED, not assumed. It was,
+/// on `recordings/meeting-2026-07-30T04-53-29Z.wav` (67 min of real meeting
+/// audio), driving `whisper-service.py` directly: 8 consecutive 30 s chunks, then
+/// the 10 LOWEST-CONFIDENCE chunks out of 40 sampled across the whole meeting
+/// (conf 0.766–0.867) so the hard cases were covered, not just the easy ones.
+///
+/// THE RESULT IS THAT THE SHIPPED DEFAULTS ARE THE MOST ACCURATE SETTING. Every
+/// knob measured either did nothing at all or removed real speech:
+///
+/// | knob | measured |
+/// |---|---|
+/// | `best_of` 2 and 5 | **0 of 10 hard chunks changed**, byte-identical, same time. Not broken — the sidecar logs `decoding: best_of=5` and mlx_whisper receives it; it only applies on temperature fallback, and no chunk, however poor, ever fell back |
+/// | `compression_threshold` 2.0 / 3.5 | no change |
+/// | `no_speech_threshold` 0.3 / 0.9 | no change (the silence rule needs a LOW logprob too, and the default never binds) |
+/// | `logprob_threshold` −2.0 | no change |
+/// | `logprob_threshold` −0.5 | changed 3 of 10 — and **deleted real sentences**, at 10× the time (204 s vs 20 s) |
+/// | `hallucination_silence_sec` 2 s | changed 4 of 8 — also **deleted real sentences** |
+///
+/// THE TRAP THIS MEASUREMENT WALKED INTO, recorded because it nearly produced the
+/// opposite preset: both knobs that "worked" RAISED the confidence number.
+/// `logprob −0.5` took conf 0.9056 → 0.9110 and `hallucination_silence` 0.9056 →
+/// 0.9126. Confidence is `exp(word-weighted mean avg_logprob)`, so **deleting the
+/// least-certain words raises it mechanically** — it can always be improved by
+/// removing text. What the diffs actually showed being removed:
+///
+///   "Unfortunately, I never got to listen to them."
+///   "Now one of two things can happen."
+///   "…than be scared by a jobless future I started to realize that I was a little"
+///
+/// Coherent English on audio measured at RMS 0.062–0.092, against this project's
+/// 0.004 silence floor — speech, not silence. That is the over-deletion direction
+/// CLAUDE.md names as the dangerous one, since deleted text leaves no trace in the
+/// transcript. **Confidence is therefore NOT a usable score for comparing decode
+/// settings, and any future preset work here must diff the TEXT.**
+enum WhisperPreset {
+    /// The measured-best values. Identical to the shipped defaults on purpose —
+    /// that is the finding, not a placeholder. Kept as an explicit list anyway so
+    /// the button restores it from any customisation, and so
+    /// `WhisperPresetTests` fails if a default ever drifts away from what was
+    /// measured instead of the two silently disagreeing.
+    static let bestAccuracy: [(key: String, value: Any)] = [
+        ("whisper.initialPrompt", ""),
+        ("whisper.bestOf", 0),
+        ("whisper.noSpeechThreshold", 0.6),
+        ("whisper.logprobThreshold", -1.0),
+        ("whisper.compressionThreshold", 2.4),
+        ("whisper.hallucinationSilenceSec", 0.0),
+    ]
+
+    static func applyBestAccuracy() {
+        let d = UserDefaults.standard
+        for (key, value) in bestAccuracy { d.set(value, forKey: key) }
+    }
+
+    /// Whether the stored options already ARE the preset. Compared with a
+    /// tolerance on the doubles because a slider writes 0.6000000000000001.
+    static var bestAccuracyIsActive: Bool {
+        let d = UserDefaults.standard
+        for (key, value) in bestAccuracy {
+            switch value {
+            case let v as String:
+                if (d.string(forKey: key) ?? "") != v { return false }
+            case let v as Int:
+                if (d.object(forKey: key) as? NSNumber)?.intValue ?? 0 != v { return false }
+            case let v as Double:
+                let stored = (d.object(forKey: key) as? NSNumber)?.doubleValue
+                if abs((stored ?? v) - v) > 0.0001 { return false }
+            default:
+                return false
+            }
+        }
+        return true
+    }
 }
 
 /// Whisper's own decoding options, shown only while Whisper is the selected
@@ -280,15 +397,50 @@ struct WhisperOptionsBlock: View {
     @AppStorage("whisper.noSpeechThreshold")      private var noSpeechThreshold = 0.6
     @AppStorage("whisper.logprobThreshold")       private var logprobThreshold = -1.0
     @AppStorage("whisper.compressionThreshold")   private var compressionThreshold = 2.4
-    @AppStorage("whisper.task")                   private var task = "transcribe"
-    @AppStorage("whisper.autoDetectLanguage")     private var autoDetectLanguage = false
+    // `whisper.task` and `whisper.autoDetectLanguage` had controls here and were
+    // removed on 2026-08-06 (owner) — both are now fixed at their defaults, in
+    // `ChunkedASRService.WhisperOptions.fromSettings`, not merely hidden.
     @AppStorage("whisper.hallucinationSilenceSec") private var hallucinationSilenceSec = 0.0
 
     var body: some View {
         Group {
-            Text("Whisper options — these change how Whisper decodes. Every setting below starts at Whisper's own default, so an untouched block transcribes exactly as before.")
-                .font(.system(size: 12))
-                .foregroundColor(Theme.textDim)
+            SettingBlock(title: "Preset") {
+                HStack(spacing: 10) {
+                    Button(action: {
+                        WhisperPreset.applyBestAccuracy()
+                        // Re-read into this view's @AppStorage mirrors: the
+                        // preset writes UserDefaults directly, and a slider bound
+                        // to a stale @AppStorage would write its old value back.
+                        initialPrompt = ""; bestOf = 0
+                        noSpeechThreshold = 0.6; logprobThreshold = -1.0
+                        compressionThreshold = 2.4; hallucinationSilenceSec = 0.0
+                    }) {
+                        Text("Apply best accuracy")
+                            .font(.system(size: 12, weight: .bold))
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .background(RoundedRectangle(cornerRadius: 7).fill(Theme.chip))
+                    }
+                    .buttonStyle(.plain)
+
+                    if WhisperPreset.bestAccuracyIsActive {
+                        Label("in use", systemImage: "checkmark.circle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(Theme.teal)
+                    }
+                }
+
+                // The honest version. Measured on 67 minutes of the owner's own
+                // meeting audio, including the 10 worst chunks of 40 sampled —
+                // see `WhisperPreset` for the table and the diffs.
+                Text("Measured, not assumed: on real meeting audio the shipped defaults ARE the "
+                     + "most accurate setting. Best-of changed nothing even on the 10 worst "
+                     + "chunks, and the two knobs that did change something deleted real "
+                     + "sentences while making the confidence number look better. This button "
+                     + "restores those values.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             SettingBlock(title: "Initial prompt — vocabulary help, with a real risk") {
                 TextField("e.g. Aggia, ATND1061, pyannote, Qwen3", text: $initialPrompt,
@@ -297,12 +449,7 @@ struct WhisperOptionsBlock: View {
                     .lineLimit(2...4)
                     .font(.system(size: 12))
 
-                Text("Text given to Whisper as if it had just been said, before the chunk. Useful for names, jargon and spellings it keeps getting wrong.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("Risk: this is context, not an instruction. Whisper continues text, so when the audio is unclear it can write words FROM THE PROMPT that nobody said — not just \"no improvement\". Keep it short and factual (a word list, not a sentence about the meeting). While a prompt is set, every chunk logs \"prompt active\" to logs/whisper.log so suspicious text can be traced back to it.")
+                Text("Names and jargon Whisper keeps getting wrong. Risk: it is context, not an instruction — on unclear audio Whisper can write words FROM the prompt that nobody said. Keep it a short word list. Logged per chunk in logs/whisper.log.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -317,12 +464,7 @@ struct WhisperOptionsBlock: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                Text("How many candidates Whisper samples when it falls back to sampling (it only does that after a chunk fails its quality checks below). No effect on a clean chunk; costs time on a difficult one.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("There is no beam-search setting: the MLX Whisper runtime has no beam decoder — asking for one stops the model loading at all. Best-of is the only search width available here.")
+                Text("Candidates sampled only when a chunk fails the checks below. No effect on a clean chunk. (No beam search: this runtime has no beam decoder.)")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -331,12 +473,7 @@ struct WhisperOptionsBlock: View {
             SettingBlock(title: "Silence threshold — \(String(format: "%.2f", noSpeechThreshold))") {
                 Slider(value: $noSpeechThreshold, in: 0.2...0.9, step: 0.05)
 
-                Text("How sure Whisper must be that a window contains no speech before it skips it. Lower drops more audio as silence (risking lost speech); higher transcribes more of it (risking invented text on silence).")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("This is Whisper's own check, inside decoding. The app keeps its separate hallucination filter on the text Whisper does return (short canned captions, repetition loops, implausibly sparse text) — that one is not affected by this slider, and every line it removes is logged with its reason in logs/whisper.log.")
+                Text("How sure Whisper must be a window has no speech before skipping it. Lower risks losing speech; higher risks invented text on silence. The app's own hallucination filter is separate and unaffected.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -345,7 +482,7 @@ struct WhisperOptionsBlock: View {
             SettingBlock(title: "Confidence floor — \(String(format: "%.1f", logprobThreshold))") {
                 Slider(value: $logprobThreshold, in: -3.0...(-0.2), step: 0.1)
 
-                Text("Below this average token log-probability Whisper treats its own output as failed and retries the chunk at a higher temperature. Raising it (towards 0) makes it retry more often — slower, and not always better.")
+                Text("Below this average token log-probability Whisper retries the chunk hotter. Raising it retries more often — slower, not always better.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -354,7 +491,7 @@ struct WhisperOptionsBlock: View {
             SettingBlock(title: "Repetition limit — \(String(format: "%.1f", compressionThreshold))") {
                 Slider(value: $compressionThreshold, in: 1.5...4.0, step: 0.1)
 
-                Text("Text that compresses better than this is looping (\"yeah yeah yeah…\") and the chunk is retried. Lower catches loops sooner but can reject legitimately repetitive speech.")
+                Text("Text compressing better than this is looping, and the chunk is retried. Lower catches loops sooner but can reject genuinely repetitive speech.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -370,42 +507,13 @@ struct WhisperOptionsBlock: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                Text("Makes Whisper jump over silent stretches longer than this instead of decoding them — the stretches where it is most likely to invent a closing caption.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("Turning this on ALSO switches Whisper to its own word timestamps — Whisper only consults this threshold when it is timing words, so the setting would otherwise do nothing at all. Those timings stay internal to this skip and are never used for speaker rows: the word aligner (Models → Aligner) remains the source of word times. This project measured Whisper's native word timing against that aligner and chose the aligner, so this is worth turning on for the silence skip, not for the timings.")
+                Text("Jumps over silent stretches longer than this — where Whisper is most likely to invent a caption. Turning it on also switches Whisper to its own word timing internally; word times for speaker rows still come from the aligner.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            SettingBlock(title: "Task") {
-                Picker("", selection: $task) {
-                    Text("Transcribe").tag("transcribe")
-                    Text("Translate to English").tag("translate")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-
-                Text("Translate outputs English no matter what was spoken. Meetings here are English, so this normally does nothing — and it makes the transcript no longer a record of the words actually said.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            SettingBlock(title: "Language detection") {
-                SettingToggle(label: "Let Whisper detect the language per chunk",
-                              isOn: $autoDetectLanguage)
-
-                Text("On, the Language setting below is ignored and Whisper decides from the audio of each chunk — which can change mid-meeting on a noisy or short chunk. Off (default) sends the language you picked, which is steadier.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Text("Changing any of these restarts the Whisper sidecar at the next recording, and the options in force are written to logs/whisper.log at startup — a run at defaults logs \"decoding: defaults\".")
+            Text("Changing any of these restarts the Whisper sidecar at the next recording; the options in force are written to logs/whisper.log.")
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textDim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -435,10 +543,6 @@ struct Qwen3OptionsBlock: View {
 
     var body: some View {
         Group {
-            Text("Qwen3 options — these change how Qwen3 decodes. Every setting below starts at Qwen3's own default, so an untouched block transcribes exactly as before.")
-                .font(.system(size: 12))
-                .foregroundColor(Theme.textDim)
-
             SettingBlock(title: "Vocabulary prompt — spelling help, with a real risk") {
                 TextField("e.g. Aggia, ATND1061, pyannote, PREP framework",
                           text: $systemPrompt, axis: .vertical)
@@ -446,17 +550,7 @@ struct Qwen3OptionsBlock: View {
                     .lineLimit(2...4)
                     .font(.system(size: 12))
 
-                Text("A short list of names, jargon and spellings, given to Qwen3 as context before the audio. Tested here: listing \"PREP framework\" changed a transcribed \"Prep\" into \"PREP\", which is what this is for.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("Risk: it does not stay where you point it. Testing showed a non-empty prompt ALSO changes wording and punctuation in parts of the audio it says nothing about — in one case merging two sentences into one. Keep it to a short word list, not a sentence describing the meeting. While a prompt is set, every chunk logs \"prompt active\" to logs/qwen3.log so suspicious text can be traced back to it.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("Unlike Whisper's initial prompt, this one is not continued as text: instructions in it are ignored, and made-up words in it did not appear in the transcript. The risk here is the shifted wording above, not invented vocabulary.")
+                Text("A short list of names and spellings, as context before the audio. Risk: it does not stay where you point it — a prompt also shifts wording and punctuation elsewhere in the chunk. Logged per chunk in logs/qwen3.log.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -471,12 +565,7 @@ struct Qwen3OptionsBlock: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
 
-                Text("Pushes Qwen3 away from repeating tokens it has just produced, which can help when a chunk loops on the same phrase. Off is the model's own default and the safe choice.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text("Risk: this penalises ordinary repetition too — English repeats words legitimately. Measured on a clean recording, 1.2 already dropped a real word and a sentence-ending period, and higher values degrade badly (at 2.0 the text came back with broken capitalisation and punctuation scattered mid-word). Nothing above 1.2 is offered for that reason. Turn it on only for a chunk that is actually looping, and compare the result.")
+                Text("Helps when a chunk loops on one phrase. Risk: it penalises ordinary repetition too — measured here, 1.2 already dropped a real word and a full stop. Off is the default and the safe choice.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -496,12 +585,7 @@ struct Qwen3OptionsBlock: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
 
-                    Text("How far back the penalty looks. Smaller punishes only immediate loops and leaves normal speech alone; larger also penalises a word said earlier in the same chunk, which is usually legitimate. 100 is the model's default.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text("This appears only while a penalty is set, because Qwen3 reads it nowhere else — on its own it would be a control that changes nothing.")
+                    Text("How far back the penalty looks. Smaller hits only immediate loops; larger also penalises a word said earlier in the chunk. 100 is the default.")
                         .font(.system(size: 11))
                         .foregroundColor(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
@@ -515,3 +599,4 @@ struct Qwen3OptionsBlock: View {
         }
     }
 }
+

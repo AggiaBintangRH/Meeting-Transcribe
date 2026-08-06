@@ -13,7 +13,12 @@ extension AudioRecorder {
     /// one row per speaker turn; undiarized/realtime text stays a single row.
     func rebuildDisplayRows() {
         var rows: [SpeakerUtterance] = []
-        let regions = overlapRegions()   // genuine simultaneous-speech windows
+        // Pyannote-derived regions PLUS anything the standalone detector found.
+        // The union is used for DISPLAY only; overlap REPAIR still reads
+        // `overlapRegions()` alone, because its engines were built against
+        // pyannote's intersecting turns and feeding them detector output would
+        // change what they operate on without a single measurement behind it.
+        let regions = overlapRegions() + detectedOverlapRegions
         for seg in segments {
             rows.append(contentsOf: derivedRows(for: seg, regions: regions))
         }

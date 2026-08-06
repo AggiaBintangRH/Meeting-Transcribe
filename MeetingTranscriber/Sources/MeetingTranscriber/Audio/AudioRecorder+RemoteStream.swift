@@ -91,6 +91,28 @@ extension AudioRecorder {
              + "or turn the Remote channel off in Settings → Microphone."
     }
 
+    /// Startup refusal for a Remote channel with the chunked pass switched OFF.
+    ///
+    /// The Remote stream's text comes ENTIRELY from chunked ASR — there is no
+    /// realtime-only remote transcript — and `prepareAndCapture` already declines
+    /// to build a remote resampler when no chunked sidecar exists (`remoteWanted`),
+    /// deliberately, so the remote 16 kHz buffer does not grow all meeting for
+    /// audio nothing would consume. That is correct, but on its own it is SILENT:
+    /// the user would configure two streams, record a hybrid meeting, and get one.
+    ///
+    /// So it is refused loudly instead, the same rule as the two refusals above.
+    /// The single-stream case is deliberately NOT refused: switching the pass off
+    /// with one microphone is a legitimate choice (realtime captions only), and
+    /// the Chunked tab states its cost before the toggle.
+    nonisolated static func chunkedOffRefusalMessage(remoteChannel: Int?,
+                                                     chunkedEnabled: Bool) -> String? {
+        guard remoteChannel != nil, !chunkedEnabled else { return nil }
+        return "The Remote stream is transcribed only by the accurate transcript pass, and "
+             + "that pass is switched off in Settings → Models → Chunked. Recording now would "
+             + "capture the Remote channel and produce no text for it at all. Switch the pass "
+             + "back on, or turn the Remote channel off in Settings → Microphone."
+    }
+
     /// Startup refusal for the one MOSS configuration that cannot keep up:
     /// Voxtral as the chunked ASR while MOSS is the diarization engine.
     ///

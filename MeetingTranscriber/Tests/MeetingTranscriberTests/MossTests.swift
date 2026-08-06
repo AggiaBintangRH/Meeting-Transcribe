@@ -187,13 +187,13 @@ final class MossTests: XCTestCase {
     /// The primary mode is ONE process: MOSS in both roles means one 3.6 GB load
     /// and one forward pass per chunk, not two.
     func testNeedsSecondMossProcess() {
-        XCTAssertFalse(ModelLoader.needsSecondMossProcess(chunkedID: "moss", engine: "moss"),
+        XCTAssertFalse(ModelLoader.needsSecondMossProcess(chunkedID: "moss", engine: "moss", chunkedEnabled: true),
                        "One sidecar already carries both the text and the segments")
-        XCTAssertTrue(ModelLoader.needsSecondMossProcess(chunkedID: "whisper", engine: "moss"))
-        XCTAssertTrue(ModelLoader.needsSecondMossProcess(chunkedID: "qwen3", engine: "moss"))
-        XCTAssertFalse(ModelLoader.needsSecondMossProcess(chunkedID: "moss", engine: "pyannote"),
+        XCTAssertTrue(ModelLoader.needsSecondMossProcess(chunkedID: "whisper", engine: "moss", chunkedEnabled: true))
+        XCTAssertTrue(ModelLoader.needsSecondMossProcess(chunkedID: "qwen3", engine: "moss", chunkedEnabled: true))
+        XCTAssertFalse(ModelLoader.needsSecondMossProcess(chunkedID: "moss", engine: "pyannote", chunkedEnabled: true),
                        "MOSS as plain ASR under pyannote loads no diarization MOSS")
-        XCTAssertFalse(ModelLoader.needsSecondMossProcess(chunkedID: "whisper", engine: "pyannote"))
+        XCTAssertFalse(ModelLoader.needsSecondMossProcess(chunkedID: "whisper", engine: "pyannote", chunkedEnabled: true))
     }
 
     // MARK: - Catalog id vs setting value
@@ -376,5 +376,38 @@ final class MossTests: XCTestCase {
         XCTAssertEqual(recorder.displayTurns.map(\.id), [1])
         recorder.mossDiarizationActive = true
         XCTAssertEqual(recorder.displayTurns.map(\.id), recorder.mossTurns.map(\.id))
+    }
+
+    // MARK: - Identity must have a caller in BOTH MOSS modes (2026-08-06)
+
+    /// THE REGRESSION THIS PINS, found by a real recording. `identifyMossTurns` is
+    /// driven by `startMossFullPass`, and `mossStopMode` returns `.none` whenever
+    /// `hasDiarService` is false — which is exactly MOSS+MOSS, where one sidecar
+    /// serves both roles and `mossDiarService` is nil BY DESIGN.
+    ///
+    /// So the MOSS stop plan alone can never run identity in that mode, and since
+    /// the MOSS⟺MOSS rule made it the only reachable pairing, stitching, saved
+    /// profiles, renaming and `spk` were all silently unreachable. The fix hooks
+    /// identity to the CHUNKED stop pass instead; this asserts the premise, so a
+    /// future edit that "simplifies" the second caller away fails here.
+    func testTheMossStopPlanCannotRunIdentityInMossPlusMossMode() {
+        for finalPass in [true, false] {
+            for tail in [true, false] {
+                let mode = AudioRecorder.mossStopMode(finalPass: finalPass,
+                                                      continueOnStop: tail,
+                                                      hasDiarService: false,   // MOSS+MOSS
+                                                      hasRecording: true)
+                XCTAssertEqual(mode, .none,
+                               "MOSS+MOSS has no second process, so its own stop plan is .none")
+                XCTAssertFalse(AudioRecorder.mossStopPlan(mode).runsFullPass,
+                               "identity is driven by the full pass — it cannot run here, which "
+                               + "is why `startMossIdentifyForOwnASR` exists")
+            }
+        }
+        // And the OTHER mode still reaches it, so this cannot pass by the full
+        // pass having been disabled everywhere.
+        let withSecondProcess = AudioRecorder.mossStopMode(finalPass: true, continueOnStop: false,
+                                                          hasDiarService: true, hasRecording: true)
+        XCTAssertTrue(AudioRecorder.mossStopPlan(withSecondProcess).runsFullPass)
     }
 }

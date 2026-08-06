@@ -26,11 +26,12 @@ final class DiarizationStackLifecycleTests: XCTestCase {
     private let pyannote = ModelLoader.pyannoteEngineID
     private let moss = ModelLoader.mossEngineID
 
-    private func stack(enabled: Bool = true, engine: String? = nil, chunked: String = "qwen3")
-        -> ModelLoader.DiarizationStack? {
+    private func stack(enabled: Bool = true, engine: String? = nil, chunked: String = "qwen3",
+                       chunkedOn: Bool = true) -> ModelLoader.DiarizationStack? {
         ModelLoader.wantedDiarizationStack(diarizationEnabled: enabled,
                                            engine: engine ?? pyannote,
-                                           chunkedID: chunked)
+                                           chunkedID: chunked,
+                                           chunkedEnabled: chunkedOn)
     }
 
     // MARK: - The bug

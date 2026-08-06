@@ -201,6 +201,42 @@ enum ModelCatalog {
     /// Engines offered on Settings → Models → Overlap (`overlap.engine`).
     static let overlapEngines: [ModelInfo] = [overlapSeparation, overlapDicow]
 
+    // MARK: - Overlap DETECTION (a different job from repair)
+    //
+    // Detection marks WHERE two people spoke together; repair tries to recover the
+    // words. They need different things: repair works from pyannote turns that
+    // intersect, detection reads the audio directly and needs no turns at all —
+    // which is why it is the only option under MOSS and spectral, engines that
+    // assign exactly one speaker per instant.
+
+    /// pyannote's segmentation network, taken from the community-1 checkpoint this
+    /// app already ships. Its output is a POWERSET over speaker combinations, so
+    /// "two speakers active" is a class it predicts directly rather than something
+    /// inferred from separate per-speaker curves.
+    ///
+    /// Measured on the owner's M4 before this was offered at all: 32 MB, loads in
+    /// ~0 s, scans at ~160x realtime (a 43-minute meeting in 16 s), and — checked
+    /// in BOTH directions — 16.2 % of a clip that genuinely contains overlap,
+    /// 0.0 % of a clean one, 0.1–1.8 % of the owner's real meetings. It does not
+    /// simply fire on room noise.
+    static let overlapDetectPyannote = ModelInfo(
+        id: "pyannote-segmentation",
+        name: "pyannote segmentation",
+        detail: "Powerset speaker-activity network from speaker-diarization-community-1 · needs no speaker turns · ~160x realtime",
+        badges: ["PyTorch", "32 MB", "already installed", "detect only"],
+        hfRepo: "pyannote/speaker-diarization-community-1"
+    )
+
+    /// Every detector the app can offer. ONE today, and the list exists rather
+    /// than a hardcoded reference so a second one can be added without touching
+    /// the tab: the picker, the stored setting and the "installed" check all read
+    /// this array.
+    static let overlapDetectors: [ModelInfo] = [overlapDetectPyannote]
+
+    static func overlapDetector(id: String) -> ModelInfo {
+        overlapDetectors.first { $0.id == id } ?? overlapDetectPyannote
+    }
+
     static func overlapEngine(id: String) -> ModelInfo {
         overlapEngines.first { $0.id == id } ?? overlapSeparation
     }

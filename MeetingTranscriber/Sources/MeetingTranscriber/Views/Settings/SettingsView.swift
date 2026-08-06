@@ -27,14 +27,26 @@ struct SettingsView: View {
         }
     }
 
-    // Sub-tabs inside Models
+    // Sub-tabs inside Models.
+    //
+    // DECLARATION ORDER IS THE RAIL ORDER — `modelRail` reads `allCases` — and it
+    // follows the pipeline: what you hear live, what produces the final text, who
+    // said it, then the two overlap stages, then the two refinements.
+    //
+    // Detect overlap sits immediately ABOVE Overlap because that is the direction
+    // the data flows: under MOSS and spectral the detector is what gives repair
+    // its regions, so a user reading downwards meets the prerequisite first.
     enum ModelTab: String, CaseIterable, SettingsSubTab {
         case realtime = "Realtime"
         case chunked = "Chunked"
+        case diarization = "Diarization"
+        /// Detection is a DIFFERENT job from repair, done by a different model
+        /// that needs no speaker turns — so it gets its own tab rather than a
+        /// block inside Overlap. See `OverlapDetectTab`.
+        case overlapDetect = "Detect overlap"
+        case overlap = "Overlap"
         case aligner = "Aligner"
         case vad = "VAD"
-        case diarization = "Diarization"
-        case overlap = "Overlap"
 
         var title: String { rawValue }
 
@@ -46,6 +58,7 @@ struct SettingsView: View {
             case .vad: return "waveform.and.mic"
             case .diarization: return "person.2.fill"
             case .overlap: return "person.wave.2.fill"
+            case .overlapDetect: return "waveform.badge.magnifyingglass"
             }
         }
 
@@ -57,6 +70,7 @@ struct SettingsView: View {
             case .vad: return "Voice activity detection"
             case .diarization: return "Speaker identification — who spoke when"
             case .overlap: return "Overlap recovery — separate simultaneous speech"
+            case .overlapDetect: return "Mark where two people spoke at once"
             }
         }
     }
@@ -104,6 +118,225 @@ struct SettingsView: View {
 
     // MARK: Left rail
 
+    /// One short word or two for the rail's right-hand column. Deliberately terse:
+    /// the rail is 232 pt wide and the value sits beside the tab name, so anything
+    /// longer would wrap or clip. The full story lives in the tab itself.
+    private func modelTabStatus(_ t: ModelTab) -> (String, Bool) {
+        switch t {
+        case .chunked:
+            return (ModelCatalog.chunkedModel(id: chunkedModel).name, false)
+        case .diarization:
+            guard diarEnabled else { return ("off", false) }
+            switch ModelLoader.wantedDiarizationStack(diarizationEnabled: true,
+                                                      engine: diarEngine,
+                                                      chunkedID: chunkedModel,
+                                                      chunkedEnabled: chunkedEnabled) {
+            case .mossOwnASR:        return ("included", true)
+            case .mossSecondProcess: return ("MOSS", false)
+            case .spectral:          return ("spectral", false)
+            default:                 return ("pyannote", false)
+            }
+        case .aligner:  return (alignEnabled ? "on" : "off", false)
+        case .overlap:  return (repairEnabled ? "on" : "off", false)
+        case .overlapDetect:
+            // pyannote marks overlap itself, so the detector is redundant there —
+            // said in the rail so the user sees it without opening the tab.
+            if diarEnabled, diarEngine == ModelLoader.pyannoteEngineID {
+                return ("built in", true)
+            }
+            return (detectEnabled ? "on" : "off", false)
+        case .realtime: return (realtimeEnabled ? "on" : "off", false)
+        case .vad:      return ("", false)
+        }
+    }
+
+    /// The rail's model list in THREE groups, each in pipeline order (see
+    /// `ModelTab`): what is running, what the owner switched off, and what cannot
+    /// apply at all. The last two are dimmed and moved down, never hidden and
+    /// never disabled — the switch that brings a tab back is INSIDE it.
+    ///
+    /// The two dimmed groups are kept APART rather than merged into one "inactive"
+    /// list, because the difference is the only thing the user can act on:
+    /// SWITCHED OFF is undone by the tab's own toggle, NOT USED BY YOUR MODELS is
+    /// not undone by anything on that page. One heading over both would tell a
+    /// user that turning Aligner on might help under MOSS, which is false.
+    private var modelRail: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            let inapplicable = inapplicableModelTabs
+            let off = switchedOffModelTabs
+            let running = ModelTab.allCases.filter {
+                !inapplicable.contains($0) && !off.contains($0)
+            }
+            ForEach(running, id: \.self) { railRow($0, dim: false) }
+            railGroup("SWITCHED OFF", ModelTab.allCases.filter { off.contains($0) })
+            railGroup("NOT USED BY YOUR MODELS",
+                      ModelTab.allCases.filter { inapplicable.contains($0) })
+        }
+    }
+
+    @ViewBuilder
+    private func railGroup(_ heading: String, _ tabs: [ModelTab]) -> some View {
+        if !tabs.isEmpty {
+            Text(heading)
+                .font(.system(size: 9, weight: .bold)).kerning(0.4)
+                .foregroundColor(Theme.textFaint)
+                .padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 4)
+            ForEach(tabs, id: \.self) { railRow($0, dim: true) }
+        }
+    }
+
+    private func railRow(_ t: ModelTab, dim: Bool) -> some View {
+        // A dimmed tab shows NO status, deliberately, and for a different reason
+        // in each group. Under SWITCHED OFF the value would just be "off" — the
+        // heading already says that, in one place instead of once per row. Under
+        // NOT USED BY YOUR MODELS the raw value actively contradicts the heading:
+        // "Aligner — on" makes it look like it is running, "Overlap — off" like
+        // switching it on would help, and neither is true. The reason is a
+        // sentence either way, and it waits in the tab where there is room for it.
+        let status = dim ? ("", false) : modelTabStatus(t)
+        let active = modelTab == t
+        return Button(action: {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { modelTab = t }
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: t.icon)
+                    .font(.system(size: 11, weight: .bold)).frame(width: 15)
+                Text(t.title)
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                if !status.0.isEmpty {
+                    Text(status.0)
+                        .font(.system(size: 10))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .foregroundColor(active ? Theme.selectedTabText
+                                         : (status.1 ? Theme.teal : Theme.textFaint))
+                }
+            }
+            .foregroundColor(active ? Theme.selectedTabText
+                             : (dim ? Theme.textFaint : Theme.textSecondary))
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill(active ? Theme.selectedTabBackground : .clear))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+
+    // MARK: - Which model tabs can apply to the current choice
+    //
+    // Two of the six sub-tabs can be made irrelevant by the other two: the ALIGNER
+    // has no work when the chunked model attributes its own text, and OVERLAP has
+    // nothing to find when the diarization engine never marks two speakers at one
+    // instant. Until now both sat in the bar looking exactly as usable as the
+    // rest, and a user could spend time on a setting that would never run.
+    //
+    // They are dimmed and moved to the END of the bar, never hidden and never
+    // disabled — the reason is a sentence, and a sentence needs the content area,
+    // which the user only reaches by clicking. See `inapplicabilityNote`.
+    //
+    // Both answers come from the loader's own pure rules, asked with the feature
+    // switched ON, so the question is "could this ever apply?" rather than "is it
+    // on right now".
+
+    @AppStorage("chunked.model")          private var chunkedModel = "qwen3"
+    @AppStorage("diarization.engine")     private var diarEngine = "pyannote"
+    @AppStorage("diarization.enabled")    private var diarEnabled = true
+    @AppStorage("overlap.engine")         private var overlapEngineID = ModelCatalog.overlapSeparation.id
+    @AppStorage("align.enabled")          private var alignEnabled = false
+    @AppStorage("overlap.repair.enabled") private var repairEnabled = false
+    @AppStorage("realtime.enabled")       private var realtimeEnabled = true
+    @AppStorage("overlap.detect.enabled") private var detectEnabled = false
+    @AppStorage("vad.enabled")            private var vadEnabled = true
+    @AppStorage("chunked.enabled")        private var chunkedEnabled = true
+
+    private var inapplicableModelTabs: Set<ModelTab> {
+        var out: Set<ModelTab> = []
+        // Asked with alignment switched ON — "could this ever apply?" — but with
+        // `chunkedEnabled` as the user really has it: with no chunked pass there
+        // are no segments to split into words, whatever the aligner's own toggle
+        // says. That is an inapplicability, not a preference, so it belongs here
+        // rather than in `switchedOffModelTabs`.
+        if !ModelLoader.wantsAligner(alignEnabled: true, chunkedID: chunkedModel,
+                                     chunkedEnabled: chunkedEnabled) {
+            out.insert(.aligner)
+        }
+        // Asked with repair switched ON, so the question is "could this ever
+        // apply?" rather than "is it on right now" — but `detectEnabled` is passed
+        // as the user really has it, because under MOSS and spectral that switch
+        // is what decides whether repair has any regions at all. Turning Detect
+        // overlap on therefore lifts this tab out of the dimmed group, which is
+        // the truth: repair really does start working at that moment.
+        if ModelLoader.wantedOverlapEngine(repairEnabled: true, engineID: overlapEngineID,
+                                           diarEngine: diarEngine,
+                                           detectEnabled: detectEnabled) == nil {
+            out.insert(.overlap)
+        }
+        // Detection needs rows to mark, nothing more — so it applies under every
+        // engine, and is dimmed only when there is no diarization at all.
+        if !diarEnabled { out.insert(.overlapDetect) }
+        return out
+    }
+
+    /// Tabs whose feature is simply SWITCHED OFF: they would work, the owner has
+    /// turned them off. Dimmed and moved down like the inapplicable ones, but
+    /// under their own heading — see `modelRail` for why the two never merge.
+    ///
+
+    /// Subtracting `inapplicableModelTabs` is what keeps a tab out of BOTH lists.
+    /// The stronger statement wins: under MOSS the Aligner cannot run whatever its
+    /// toggle says, so filing it under "switched off" would invite the user to
+    /// turn on something that would still not run.
+    private var switchedOffModelTabs: Set<ModelTab> {
+        var out: Set<ModelTab> = []
+        if !chunkedEnabled  { out.insert(.chunked) }
+        if !realtimeEnabled { out.insert(.realtime) }
+        if !diarEnabled     { out.insert(.diarization) }
+        if !detectEnabled   { out.insert(.overlapDetect) }
+        if !repairEnabled   { out.insert(.overlap) }
+        if !alignEnabled    { out.insert(.aligner) }
+        if !vadEnabled      { out.insert(.vad) }
+        return out.subtracting(inapplicableModelTabs)
+    }
+
+    /// Why the open tab cannot apply — the real reason from the rule that decided
+    /// it, never a generic "not available". nil when the tab applies normally.
+    private var inapplicabilityNote: String? {
+        guard section == .models, inapplicableModelTabs.contains(modelTab) else { return nil }
+        switch modelTab {
+        // Aligner deliberately has NO banner (owner, 2026-08-06). The tab still
+        // sits under "NOT USED BY YOUR MODELS", which already says it, and the
+        // Aligner tab's own copy states the MOSS exclusion — a third place saying
+        // the same thing is noise. It was also the only banner that could go
+        // stale: it named the chunked MODEL as the reason, and since
+        // `chunked.enabled` the aligner is equally inapplicable with the pass
+        // switched off, where that sentence would simply have been wrong.
+        case .overlapDetect:
+            return "Speaker diarization is switched off, so there are no rows to mark."
+        case .overlap:
+            if !diarEnabled {
+                return "Speaker diarization is switched off, so there are no speaker turns "
+                     + "to look for overlap in. Nothing on this page will run."
+            }
+            if diarEngine == ModelLoader.mossEngineID {
+                return "MOSS never marks two speakers at the same instant — its segments "
+                     + "tile exactly, one speaker each — so it cannot tell repair where to "
+                     + "work. Switch on Models → Detect overlap and this page becomes "
+                     + "active: that detector reads the audio directly and hands its "
+                     + "regions to the engine you pick here."
+            }
+            return "The spectral engine assigns exactly one speaker per instant, so its "
+                 + "turns never intersect and it cannot tell repair where to work. Switch "
+                 + "on Models → Detect overlap and this page becomes active: that detector "
+                 + "reads the audio directly and hands its regions to the engine you pick "
+                 + "here."
+        default:
+            return nil
+        }
+    }
+
     private var leftRail: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("SETTINGS")
@@ -136,6 +369,14 @@ struct SettingsView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                // The model sub-tabs live HERE now, nested under their section,
+                // rather than in a horizontal bar above the content: a vertical
+                // list has room for a status beside each name and for a heading
+                // over the ones that cannot apply.
+                if s == .models, section == .models {
+                    modelRail.padding(.leading, 8).padding(.top, 2).padding(.bottom, 6)
+                }
             }
 
             Spacer()
@@ -155,7 +396,7 @@ struct SettingsView: View {
             .buttonStyle(.plain)
         }
         .padding(16)
-        .frame(width: 200)
+        .frame(width: 232)
     }
 
     // MARK: Content
@@ -176,11 +417,7 @@ struct SettingsView: View {
             .padding(.top, 20)
             .padding(.bottom, 14)
 
-            if section == .models {
-                SubTabBar(selection: $modelTab, geometryID: "activeModelTab", namespace: tabIndicator)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 16)
-            } else if section == .atnd {
+            if section == .atnd {
                 SubTabBar(selection: $atndTab, geometryID: "activeATNDTab", namespace: tabIndicator)
                     .padding(.horizontal, 24)
                     .padding(.bottom, 16)
@@ -189,7 +426,22 @@ struct SettingsView: View {
             Rectangle().fill(Theme.divider).frame(height: 1)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: SettingsLayout.row) {
+                    if let note = inapplicabilityNote {
+                        HStack(alignment: .top, spacing: 9) {
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(Theme.amber)
+                            Text(note)
+                                .font(.system(size: 12))
+                                .foregroundColor(Theme.amber)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8)
+                            .fill(Theme.amber.opacity(0.10)))
+                    }
                     switch section {
                     case .models:
                         switch modelTab {
@@ -199,6 +451,7 @@ struct SettingsView: View {
                         case .vad:         VADTab()
                         case .diarization: DiarizationTab()
                         case .overlap:     OverlapTab()
+                        case .overlapDetect: OverlapDetectTab()
                         }
                     case .microphone:
                         MicrophoneTab()

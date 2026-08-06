@@ -8,9 +8,13 @@ struct RealtimeModelTab: View {
 
     var body: some View {
         Group {
+            SettingToggle(label: "Enable realtime transcription", isOn: $enabled)
+
+
             ModelCardView(model: ModelCatalog.realtime, selected: true)
 
-            SettingToggle(label: "Enable realtime transcription", isOn: $enabled)
+            ModelInstallStatus(model: ModelCatalog.realtime)
+
 
             SettingBlock(title: "Chunk size — latency vs accuracy") {
                 Picker("", selection: $chunkMs) {
@@ -29,15 +33,6 @@ struct RealtimeModelTab: View {
 
             SettingBlock(title: "Language") {
                 LanguagePicker(selection: $language, entries: Languages.realtime)
-
-                // The chunked tab now offers a per-model list built from each
-                // model's published roster. Nemotron has none, so this list is
-                // deliberately the old short one — said out loud so the
-                // difference between the two tabs does not read as an oversight.
-                Text("Nemotron's card states 40 locales but does not publish which ones, so this list is not the full set — unlike the chunked models, whose languages come from their published rosters.")
-                    .font(.system(size: 11))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

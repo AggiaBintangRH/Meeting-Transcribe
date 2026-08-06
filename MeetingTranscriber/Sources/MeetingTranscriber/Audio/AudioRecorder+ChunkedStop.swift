@@ -5,11 +5,15 @@ import Foundation
 // (owner-requested 2026-08-03):
 //
 //   chunked.finalPass       "Run a transcription pass at stop"
-//   chunked.continueOnStop  "Continue from live text (tail only)"
+//   chunked.continueOnStop  RETIRED 2026-08-06 (owner). Its toggle was removed
+//                           and the key is no longer read: the pass is always
+//                           tail-only, which was this key's own default. The
+//                           `.full` mode below is KEPT — it is still pinned by
+//                           tests and is what the toggle would restore.
 //
 // They mirror the Diarization tab's existing pair EXACTLY in shape, and
 // deliberately NOT in default: `diarization.continueOnStop` defaults to FALSE
-// (a stop pass re-diarizes the whole recording), `chunked.continueOnStop`
+// (a stop pass re-diarizes the whole recording), the retired `chunked.continueOnStop`
 // defaults to TRUE (the ASR pass covers only the tail). TRUE is what the app has
 // always done, and requirement #1 of this change is that both keys ABSENT
 // reproduce today's stop path exactly — so the default has to follow behaviour,

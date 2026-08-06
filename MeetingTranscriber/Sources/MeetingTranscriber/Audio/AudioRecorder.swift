@@ -77,7 +77,8 @@ final class AudioRecorder: ObservableObject {
     var stopWatchdog: Task<Void, Never>?
     var repairTask: Task<Void, Never>?
 
-    // MARK: The stop-time chunked pass (`chunked.finalPass` / `chunked.continueOnStop`)
+    // MARK: The stop-time chunked pass (`chunked.finalPass`; always tail-only
+    // since 2026-08-06 — see `chunkedTailOnly` in `stop()`)
     //
     // See AudioRecorder+ChunkedStop.swift. All three default to today's
     // behaviour, and `beginCapture` resets them per session.
@@ -130,6 +131,30 @@ final class AudioRecorder: ObservableObject {
     /// setting read minutes later can.
     var chunkAudioStart: Double = 0
 
+    /// Overlap regions found by the standalone detector at Stop, in recording
+    /// seconds. Empty unless `overlap.detect.enabled` is on and a detection ran.
+    ///
+    /// Kept SEPARATE from `overlapRegions()` rather than merged into it: that
+    /// function derives regions from intersecting pyannote turns, and under
+    /// pyannote both sources exist and would double-count. The display path adds
+    /// the two together; overlap REPAIR takes whichever source its engine has —
+    /// turns under pyannote, these under MOSS and spectral, which assign one
+    /// speaker per instant and can never produce an intersecting turn of their own.
+    var detectedOverlapRegions: [(start: Double, end: Double)] = []
+
+    /// Whether the detector has finished (or will never run) this session.
+    ///
+    /// Overlap REPAIR reads `detectedOverlapRegions` under MOSS and spectral, so
+    /// under those engines it must not start until this is true — otherwise it
+    /// reads an empty list, logs "no windows", and the regions land a second later
+    /// with nothing left to use them. Under pyannote repair does not read them at
+    /// all and does not wait.
+    ///
+    /// Set true on the detector's result AND on its error: a failed detection must
+    /// release repair rather than hang the leg. Starts true, so a session with the
+    /// detector switched off never waits for something that will not happen.
+    var overlapDetectDone = true
+
     // MARK: Diarization settings, LOCKED for the session
     //
     // These three used to be read from UserDefaults BOTH per chunk and again at
@@ -159,15 +184,32 @@ final class AudioRecorder: ObservableObject {
     var diarContinueOnStop = false
     var diarDetectOverlap = true
 
+    /// Speakers to ask each diarizer for. ALWAYS 0 = auto (owner, 2026-08-06):
+    /// the "Number of speakers" picker was removed and `diarization.numSpeakers`
+    /// is no longer read anywhere. A constant rather than four literal zeros so
+    /// the four dispatch sites cannot drift, and so pinning a count later is one
+    /// edit — the sidecars still accept it, and B1's measurement (spectral
+    /// auto-counting 20 speakers on a 67-minute recording) is the reason that
+    /// door is left open.
+    static let diarNumSpeakers = 0
+
     /// Read the three session-scoped diarization settings once. Called from
     /// `beginCapture` before anything can consume them, and unconditionally —
     /// unlike `configureDiarization`, which returns early when there is no
     /// pyannote service and so cannot own settings the spectral path also reads.
     func lockDiarizationSettings() {
         let d = UserDefaults.standard
-        diarLiveEnabled = d.object(forKey: "diarization.live") as? Bool ?? true
+        // `diarization.live` and `.detectOverlap` had toggles until 2026-08-06,
+        // when the owner removed both. FIXED here rather than left reading their
+        // keys: a stored value must not outlive the control that set it, or
+        // someone who once switched live labels off would keep getting none with
+        // nothing in the UI able to change it back. Both constants are the
+        // defaults these keys already had, so this is today's behaviour made
+        // fixed. They stay in this function because it is the one place that
+        // answers "what are this session's diarization settings".
+        diarLiveEnabled = true
         diarContinueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? false
-        diarDetectOverlap = d.object(forKey: "diarization.detectOverlap") as? Bool ?? true
+        diarDetectOverlap = true
     }
     var chunkFileByWindow: [Double: URL] = [:]
 
@@ -302,6 +344,10 @@ final class AudioRecorder: ObservableObject {
     /// and the segments arriving on `onChunkSegments` describe the very text
     /// `onChunkTranscript` is about to deliver.
     var mossIsChunkedModel = false
+
+    /// Guards `startMossIdentifyForOwnASR` against running twice — `checkLastChunkDone`
+    /// is re-entered by its own completion handler. Reset per session in `configureMoss`.
+    var mossIdentifyStarted = false
     /// MOSS turns — the engine's own per-chunk speaker spans, in recording time.
     /// A SEPARATE collection from `liveTurns` on purpose: office-only state must
     /// stay pure pyannote, so every `officeTurnsOnly` assert, `overlapRegions`,
@@ -474,6 +520,18 @@ final class AudioRecorder: ObservableObject {
             state = .idle
             return
         }
+        // Same rule, same place: a Remote channel while the accurate transcript
+        // pass is off. The remote stream has no other source of text, and the
+        // existing `remoteWanted` guard would drop it SILENTLY.
+        let chunkedOn = UserDefaults.standard.object(forKey: "chunked.enabled") as? Bool ?? true
+        if let refusal = Self.chunkedOffRefusalMessage(remoteChannel: mic.remoteChannel,
+                                                       chunkedEnabled: chunkedOn) {
+            dualStreamLog("REFUSED start — \(refusal)")
+            modelLoader.failStartup(step: "Remote stream + chunked pass off", message: refusal)
+            errorMessage = refusal
+            state = .idle
+            return
+        }
         // Same rule, same place, for the other combination that cannot keep up:
         // Voxtral as the chunked model while MOSS is the diarization engine.
         // Checked before `loadAll` for the same reason — the user should not
@@ -489,22 +547,6 @@ final class AudioRecorder: ObservableObject {
             state = .idle
             return
         }
-        // Third refusal, same rule and same place: the spectral diarization engine
-        // with its stop pass switched off. That engine has no live path at all, so
-        // the stop pass is not a refinement of the labels — it IS the labels, and
-        // without it the meeting produces no speakers whatsoever. Told before the
-        // recording rather than discovered as an unlabelled transcript after it.
-        // See `spectralRefusalMessage`.
-        if let refusal = Self.spectralRefusalMessage(
-            diarizationEngine: diarEngine,
-            diarizationEnabled: UserDefaults.standard.object(forKey: "diarization.enabled") as? Bool ?? true,
-            finalPass: UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true) {
-            spectralLog("REFUSED start — \(refusal)")
-            modelLoader.failStartup(step: "Spectral diarization + stop pass", message: refusal)
-            errorMessage = refusal
-            state = .idle
-            return
-        }
         // Fourth refusal, same rule and same place: "Run a transcription pass at stop" with
         // "Continue from live text (tail only)" OFF asks for a full re-transcription
         // of the whole recording, which MOSS cannot do at all and Voxtral cannot
@@ -514,7 +556,15 @@ final class AudioRecorder: ObservableObject {
         // asked for the whole recording and would have no way to know they did
         // not get it.
         let chunkedFinalPass = UserDefaults.standard.object(forKey: "chunked.finalPass") as? Bool ?? true
-        let chunkedTailOnly = UserDefaults.standard.object(forKey: "chunked.continueOnStop") as? Bool ?? true
+        // ALWAYS tail-only. The "Continue from live text (tail only)" toggle was
+        // removed on 2026-08-06 (owner), and its stored key is deliberately NOT
+        // read any more: leaving the read in place would let a value set before
+        // the control disappeared keep choosing the full pass, with nothing in
+        // the UI able to change it back. `true` is that toggle's own default and
+        // what the app has always done, so this is today's behaviour made fixed
+        // rather than a new one. `.full` and its machinery are kept — they are
+        // still covered by tests and reachable if the toggle ever returns.
+        let chunkedTailOnly = true
         if chunkedFinalPass, !chunkedTailOnly,
            let refusal = Self.chunkedFullPassRefusalMessage(chunkedModelID: chunkedID) {
             chunkedStopLog("REFUSED start — \(refusal)")
@@ -791,6 +841,7 @@ final class AudioRecorder: ObservableObject {
         // and a spectral session has already had the other two no-op cleanly
         // rather than half-wiring a service that is not loaded.
         configureSpectral()
+        configureOverlapDetect()
         // The second MOSS process for this session, or nil — captured once, like
         // `chunked`, so the escaping tap closure never touches the recorder to
         // find it.
@@ -820,9 +871,9 @@ final class AudioRecorder: ObservableObject {
         // no profiles to reset any more. Semantics are unchanged: the reset rides
         // the same FIFO stdin as the identify jobs, so it is necessarily handled
         // before the first job of this session, exactly as before.
-        if UserDefaults.standard.object(forKey: "diarization.resetOnStart") as? Bool ?? true {
-            modelLoader.embedding?.resetProfiles()
-        }
+        // ALWAYS fresh (owner, 2026-08-06). `diarization.resetOnStart` had a
+        // toggle and is no longer read — same rule as the two above.
+        modelLoader.embedding?.resetProfiles()
         let chunkInterval = Double(
             UserDefaults.standard.object(forKey: "chunked.intervalSec") as? Int ?? 30
         )
@@ -997,17 +1048,32 @@ final class AudioRecorder: ObservableObject {
                     self.remoteDiarAudio.append(contentsOf: remoteSamples16k)
                 }
 
-                if boundary, chunked != nil {
+                // The ASR boundary is also what feeds the SECOND MOSS process, so
+                // the condition is "does anything ride this cadence?", not "is
+                // there a chunked model?". With the chunked pass switched off and
+                // the MOSS engine selected, `needsSecondMossProcess` loads that
+                // process precisely because there is no chunked one to borrow
+                // segments from — and the old `chunked != nil` test would then
+                // have starved it, producing a meeting with no speakers at all
+                // and nothing in any log to say why.
+                if boundary, chunked != nil || self.mossDiarService != nil {
                     self.chunkElapsed = 0
                     // Flush Nemotron too — keeps both services aligned at the
-                    // same audio position so replacement is exact.
+                    // same audio position so replacement is exact. Worth doing
+                    // even with no chunked model: its text is then the transcript.
                     asr?.flush()
                     let windowStart = self.lastChunkBoundary
-                    self.pendingChunkWindows.append(windowStart...self.recordingElapsed)
                     self.lastChunkBoundary = self.recordingElapsed
-                    // Park this chunk's audio under its window BEFORE the flush,
-                    // so it is already there when the transcript comes back.
-                    self.stashAlignAudio(windowStart: windowStart)
+                    // Queued ONLY when a chunk is really dispatched. `pendingChunkWindows`
+                    // is drained by chunked replies, so an entry with no request
+                    // behind it is never removed and every later reply is paired
+                    // with the wrong window.
+                    if chunked != nil {
+                        self.pendingChunkWindows.append(windowStart...self.recordingElapsed)
+                        // Park this chunk's audio under its window BEFORE the flush,
+                        // so it is already there when the transcript comes back.
+                        self.stashAlignAudio(windowStart: windowStart)
+                    }
                     self.startChunkFlush(chunked)
                     // The second MOSS process rides the SAME boundary and gets the
                     // SAME window — deliberately, not `diarization.intervalSec`:
@@ -1162,7 +1228,15 @@ final class AudioRecorder: ObservableObject {
         // early-out is now `.none`, decided in the same place rather than by an
         // `if` here. See AudioRecorder+ChunkedStop.swift.
         let chunkedFinalPass = UserDefaults.standard.object(forKey: "chunked.finalPass") as? Bool ?? true
-        let chunkedTailOnly = UserDefaults.standard.object(forKey: "chunked.continueOnStop") as? Bool ?? true
+        // ALWAYS tail-only. The "Continue from live text (tail only)" toggle was
+        // removed on 2026-08-06 (owner), and its stored key is deliberately NOT
+        // read any more: leaving the read in place would let a value set before
+        // the control disappeared keep choosing the full pass, with nothing in
+        // the UI able to change it back. `true` is that toggle's own default and
+        // what the app has always done, so this is today's behaviour made fixed
+        // rather than a new one. `.full` and its machinery are kept — they are
+        // still covered by tests and reachable if the toggle ever returns.
+        let chunkedTailOnly = true
         let chunkedMode = Self.chunkedStopMode(
             finalPass: chunkedFinalPass,
             continueOnStop: chunkedTailOnly,
@@ -1281,7 +1355,6 @@ final class AudioRecorder: ObservableObject {
         // exactly one of them and can never be listed twice or not at all.
         let runsSpectralPass = Self.runsSpectralOfficePass(
             spectralActive: spectralDiarizationActive,
-            finalPass: finalOn,
             hasService: modelLoader.spectral != nil,
             hasRecording: lastRecordingURL != nil)
         let willRunStopPass = runsSpectralPass || (finalOn && modelLoader.pyannote != nil)
@@ -1338,6 +1411,10 @@ final class AudioRecorder: ObservableObject {
                 checkLastChunkDone()
             }
         }
+
+        // Independent of every stop-gate leg: it marks rows that already exist,
+        // so it must not be able to hold the overlay.
+        if let recording = lastRecordingURL { startOverlapDetection(recording) }
 
         if willRunStopPass {
             // The spectral branch is FIRST and does not consult `continueOnStop`:

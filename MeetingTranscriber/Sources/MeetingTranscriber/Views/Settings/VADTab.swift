@@ -9,10 +9,13 @@ struct VADTab: View {
 
     var body: some View {
         Group {
-            ModelCardView(model: ModelCatalog.vad, selected: true)
-
             SettingToggle(label: "Enable VAD (skip silence before ASR)", isOn: $enabled)
 
+            ModelCardView(model: ModelCatalog.vad, selected: true)
+
+            ModelInstallStatus(model: ModelCatalog.vad)
+
+            
             SettingBlock(title: "Speech threshold — \(String(format: "%.2f", threshold))") {
                 Slider(value: $threshold, in: 0.1...0.9, step: 0.05)
                     .tint(Theme.teal)

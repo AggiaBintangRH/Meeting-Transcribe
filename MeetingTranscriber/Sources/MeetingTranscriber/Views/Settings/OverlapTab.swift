@@ -19,23 +19,84 @@ struct OverlapTab: View {
     @AppStorage("overlap.dicow.windowSec")          private var dicowWindowSec = 10
     @AppStorage("overlap.dicow.showDebugRows")      private var dicowShowDebugRows = true
 
-    @AppStorage("diarization.engine") private var diarEngine = "pyannote"
+    @AppStorage("diarization.engine")     private var diarEngine = "pyannote"
+    @AppStorage("overlap.detect.enabled") private var detectOn = false
 
     private var dicowSelected: Bool { engine == ModelCatalog.overlapDicow.id }
 
+    private var windowBinding: Binding<Int> { dicowSelected ? $dicowWindowSec : $mossWindowSec }
+    private var debugRowsBinding: Binding<Bool> {
+        dicowSelected ? $dicowShowDebugRows : $mossShowDebugRows
+    }
+
+    /// Engines that assign exactly one speaker per instant, and so depend on the
+    /// standalone detector to locate overlap. Mirrors
+    /// `ModelLoader.wantedOverlapEngine`'s own two-engine test.
+    private var needsDetector: Bool {
+        diarEngine == ModelLoader.mossEngineID || diarEngine == ModelLoader.spectralEngineID
+    }
+
+    private var diarEngineName: String {
+        diarEngine == ModelLoader.mossEngineID ? "MOSS" : "the spectral engine"
+    }
+
     var body: some View {
         Group {
-            Text("Engine used to recover speech when two people talk at once.")
-                .font(.system(size: 12))
-                .foregroundColor(Theme.textDim)
+            // The switch comes FIRST, and everything it controls appears only once
+            // it is on — the same shape as Detect overlap. Previously the engine
+            // cards sat ABOVE their own switch and the settings below it were
+            // merely `.disabled`, so the page showed a model choice, then a row of
+            // greyed controls, and only in the middle the one control that decides
+            // whether any of it runs. Nothing is hidden that is still in effect:
+            // while this is off, no engine is loaded at all.
+            SettingToggle(label: "Repair overlap regions at stop (experimental)", isOn: $enabled)
 
-            // Both engines locate their windows from pyannote turns, so neither
-            // has anything to work on under the MOSS diarization engine. Said
-            // here because the setting that disables this feature lives on a
-            // different tab, and the engine is not even loaded (ModelLoader
-            // skips the step) — the toggle below would otherwise look active.
-            if diarEngine == ModelLoader.mossEngineID {
-                Text("Not active: overlap repair finds its windows in pyannote's speaker turns, and the diarization engine is currently set to MOSS. Switch it back in Models → Diarization to use this.")
+            if enabled {
+                overlapEngineSection
+            }
+
+            Text("The selected engine loads up front when this is on (visible in the loading overlay) and runs only after you stop recording. Requires diarization to be enabled so overlaps can be located.")
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Engine choice and the selected engine's own settings. Only reachable while
+    /// `enabled` is on, which is why nothing in here carries `.disabled(!enabled)`
+    /// any more — a control that cannot be seen cannot be misread as inert.
+    /// The two SHARED settings, then the engine cards. Both settings exist for
+    /// each engine under its own key with its own default, so the bindings follow
+    /// the selection rather than one key being read by two engines — the same
+    /// reason `DiarizationTab` splits MOSS's stop pair from pyannote's.
+    ///
+    /// They sit ABOVE the cards (owner, 2026-08-06) because they are the two
+    /// questions worth asking whichever engine is picked; the cards answer a third.
+    @ViewBuilder
+    private var overlapEngineSection: some View {
+        Group {
+            SettingBlock(title: "Window around each overlap") {
+                // Per-engine tags: DiCoW caps at 14 s because its sidecar rejects
+                // windows over 30 s (±14 = 28), MossFormer2 has no such limit.
+                // Same control, different ceilings — not a cosmetic difference.
+                Picker("", selection: windowBinding) {
+                    Text("5s").tag(5)
+                    Text("8s").tag(8)
+                    Text("10s").tag(10)
+                    Text(dicowSelected ? "14s" : "15s").tag(dicowSelected ? 14 : 15)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Text("Seconds of audio on each side of the overlap's midpoint. Longer gives the model more context and takes longer.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            SettingBlock(title: "Show model speaker rows") {
+                SettingToggle(label: "Show model speaker rows", isOn: debugRowsBinding)
+                Text("Adds the engine's raw per-speaker output as extra rows, verbatim and ungated — useful for checking what it produced. Turn off for a clean transcript.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -52,99 +113,7 @@ struct OverlapTab: View {
                 .buttonStyle(.plain)
             }
 
-            SettingToggle(label: "Repair overlap regions at stop (experimental)", isOn: $enabled)
-
-            if !dicowSelected {
-                SettingBlock(title: "Show raw separated tracks") {
-                    SettingToggle(label: "Show \"MossFormer2 Index 1/2\" rows", isOn: $mossShowDebugRows)
-                        .disabled(!enabled)
-
-                    Text("Adds two extra rows per repaired overlap showing each separated track's raw transcription verbatim (before combine/replace) — useful for checking what the separator produced. Turn off for a clean transcript.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                SettingBlock(title: "Window around each overlap") {
-                    Picker("", selection: $mossWindowSec) {
-                        Text("5s").tag(5)
-                        Text("8s").tag(8)
-                        Text("10s").tag(10)
-                        Text("15s").tag(15)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .disabled(!enabled)
-
-                    Text("How much audio around each detected overlap is fed to the separator — this many seconds on each side of the overlap's midpoint (default 10s → a 20-second window). Longer windows give the model more context but take longer to process.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                SettingBlock(title: "What to expect") {
-                    Text("On a single microphone, separating two people talking at once is unreliable: the two output tracks are often blended or near-duplicates rather than two clean voices. When that happens the region keeps its original text unchanged — an internal quality check (near-duplicate guard + speaker attribution) skips it. Expect many, sometimes most, regions to be skipped; that is correct, safe behaviour, not a failure.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text("Every decision (overwrite or skip, with before/after text) is logged to logs/overlap-repair-decisions.log. Only two-speaker overlaps are handled — windows touching three or more speakers are skipped.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            if dicowSelected {
-                SettingBlock(title: "Show raw per-speaker output") {
-                    SettingToggle(label: "Show \"DiCoW · <speaker>\" rows", isOn: $dicowShowDebugRows)
-                        .disabled(!enabled)
-
-                    Text("Adds one extra row per speaker per repaired overlap showing what DiCoW transcribed for that speaker, verbatim and ungated — including text the quality checks rejected. Turn off for a clean transcript.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                SettingBlock(title: "Window around each overlap") {
-                    Picker("", selection: $dicowWindowSec) {
-                        Text("5s").tag(5)
-                        Text("8s").tag(8)
-                        Text("10s").tag(10)
-                        Text("14s").tag(14)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .disabled(!enabled)
-
-                    Text("How much audio around each detected overlap is fed to DiCoW — this many seconds on each side of the overlap's midpoint (default 10s → a 20-second window). Capped at 14s because DiCoW reads at most 30 seconds at once; longer windows are skipped rather than processed unreliably.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                SettingBlock(title: "What to expect") {
-                    Text("DiCoW transcribes one speaker at a time using that speaker's diarization mask, so it handles overlaps in the ASR instead of splitting the waveform. It does recover speech that is otherwise lost — but this engine was tried once before (July 2026) and removed, because on real recordings it sometimes put one speaker's words under another speaker, repeated the same words for both, or ran away and attributed far more words to a speaker than they had time to say.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text("Those three failures are now each checked for: text that matches the other speaker's existing words better than its own, text duplicated across both speakers, and text too long for the speaker's own speaking time are all rejected, and the region keeps its original text. Expect regions to be skipped; that is correct, safe behaviour, not a failure.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Text("Every decision (overwrite or skip, with before/after text and the reason) is logged to logs/overlap-repair-decisions.log — read it before trusting a repaired transcript. Only two-speaker overlaps are handled — windows touching three or more speakers are skipped.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-
-            Text("The selected engine loads up front when this is on (visible in the loading overlay) and runs only after you stop recording. Requires diarization to be enabled so overlaps can be located.")
-                .font(.system(size: 11))
-                .foregroundColor(Theme.textDim)
-                .fixedSize(horizontal: false, vertical: true)
+            ModelInstallStatus(model: ModelCatalog.overlapEngine(id: engine))
         }
     }
 }

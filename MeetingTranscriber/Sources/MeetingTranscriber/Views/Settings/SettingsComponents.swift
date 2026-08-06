@@ -34,8 +34,6 @@ struct ModelCardView: View {
                 }
             }
             Spacer()
-
-            installedBadge
         }
         .padding(16)
         .background(
@@ -53,19 +51,6 @@ struct ModelCardView: View {
         .onHover { hovered = $0 }
     }
 
-    private var installedBadge: some View {
-        let installed = ModelCatalog.isInstalled(model)
-        return Text(installed ? "INSTALLED" : "NOT DOWNLOADED")
-            .font(.system(size: 9, weight: .heavy))
-            .kerning(0.5)
-            .foregroundColor(installed ? Theme.teal : Theme.red)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 5)
-                    .fill((installed ? Theme.teal : Theme.red).opacity(0.12))
-            )
-    }
 }
 
 /// A sub-tab inside a settings section (Models' model tabs, ATND's tabs).
@@ -120,6 +105,84 @@ struct SubTabBar<Tab: SettingsSubTab>: View {
     }
 }
 
+/// The settings window's spacing, in ONE place.
+///
+/// Before this there were three competing numbers and the result was visible:
+/// the content column used 18, `SettingBlock` added 4 on top of it (so a titled
+/// block sat 22 from its neighbour while two plain paragraphs sat at 18), and
+/// one tab wrapped its model cards in a VStack of 8. TWO numbers now, and the
+/// rule is structural: anything at the top level of a tab is `row` apart,
+/// anything INSIDE a `SettingBlock` is `inBlock` apart.
+enum SettingsLayout {
+    /// Between top-level items in a tab: paragraphs, model cards, blocks.
+    static let row: CGFloat = 14
+    /// Between a block's title and its controls, and between controls in it.
+    static let inBlock: CGFloat = 8
+}
+
+/// Download status for the model a tab has SELECTED, shown under its card list.
+///
+/// It used to be a badge on EVERY card ("INSTALLED" / "NOT DOWNLOADED"), which
+/// spent a red chip on models a session was never going to load and made a list
+/// of five cards read as four problems. Only the SELECTED model can stop a
+/// session from starting, so only that one is reported — and the message says
+/// what to DO, which a two-word chip had no room for.
+///
+/// Modelled on the Aligner tab's row, which had this shape first.
+struct ModelInstallStatus: View {
+    let model: ModelInfo
+
+    var body: some View {
+        let installed = ModelCatalog.isInstalled(model)
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: installed ? "checkmark.circle.fill"
+                                        : "exclamationmark.triangle.fill")
+                .font(.system(size: 11))
+                .foregroundColor(installed ? Theme.teal : Theme.red)
+            Text(installed
+                 ? "\(model.name) — downloaded."
+                 : "\(model.name) is not downloaded. RUN SETUP (download-best-models.sh) "
+                   + "before starting a session, or it will fail to start.")
+                .font(.system(size: 11))
+                .foregroundColor(installed ? Theme.textFaint : Theme.red)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+/// A bordered container for the SELECTED model's own options.
+///
+/// It exists to answer one question the flat list could not: these controls
+/// belong to ONE card in the list below, not to the pipeline. A border and a
+/// title that names the model say so.
+struct ModelOptionsBox<Content: View>: View {
+    let title: String
+    let note: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SettingsLayout.inBlock) {
+            Text(title)
+                .font(.system(size: 12, weight: .heavy)).kerning(0.3)
+                .foregroundColor(Theme.teal)
+            Text(note)
+                .font(.system(size: 11))
+                .foregroundColor(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+            content
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Theme.card.opacity(0.5))
+                .overlay(RoundedRectangle(cornerRadius: 10)
+                    .stroke(Theme.teal.opacity(0.35), lineWidth: 1))
+        )
+    }
+}
+
 /// Labeled toggle in app style.
 struct SettingToggle: View {
     let label: String
@@ -140,13 +203,12 @@ struct SettingBlock<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: SettingsLayout.inBlock) {
             Text(title)
                 .font(.system(size: 12, weight: .bold))
                 .foregroundColor(Theme.textLabel)
             content
         }
-        .padding(.top, 4)
     }
 }
 

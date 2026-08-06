@@ -145,7 +145,12 @@ final class PyannoteService: @unchecked Sendable {
     /// pyannote clustering threshold — absent/0 falls back to its default 0.6.
     /// Exposed for per-room calibration; see DiarizationTab. A PIPELINE
     /// parameter, which is why it stayed on this side of the split.
-    private static func clusterThreshold() -> Double {
+    ///
+    /// INTERNAL rather than private so it can be pinned by a test. It is sent per
+    /// JOB, not as a launch flag, so no `Config` comparison guards it — this is
+    /// the one remaining setting that changes a transcript's speakers with nothing
+    /// else standing between the stored value and the wire.
+    static func clusterThreshold() -> Double {
         let v = UserDefaults.standard.double(forKey: "diarization.clusterThreshold")
         return v > 0 ? v : 0.6
     }

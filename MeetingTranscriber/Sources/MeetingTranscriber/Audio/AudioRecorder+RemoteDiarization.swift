@@ -179,7 +179,7 @@ extension AudioRecorder {
             completeRemoteDiarization(error: "Remote recording is missing")
             return
         }
-        let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
+        let numSpeakers = Self.diarNumSpeakers
         let detectOverlap = diarDetectOverlap
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers,
                              exclusive: !detectOverlap, stream: .remote)

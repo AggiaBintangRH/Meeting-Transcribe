@@ -105,6 +105,11 @@ final class ModelLoader: ObservableObject {
     /// whichever is picked in Settings → Models → Overlap.
     private(set) var dicowRepair: DicowService?
 
+    /// Overlap DETECTION sidecar (pyannote segmentation, 32 MB, CPU); persistent.
+    /// Marks where two people spoke at once; never recovers words. Loaded only
+    /// when the feature is on AND there are rows to mark — see `wantsOverlapDetect`.
+    private(set) var overlapDetect: OverlapDetectService?
+
     /// Whether this session should drive the realtime sidecar's REMOTE lane.
     /// Both conditions are necessary: no Remote channel means there is no second
     /// stream at all, and with realtime captions off there is nothing for either
@@ -170,9 +175,71 @@ final class ModelLoader: ObservableObject {
     /// first time (the aligner no longer lives inside the MLX ASR process), but
     /// the owner deferred cross-chunk MOSS work, so it stays excluded and the
     /// Aligner tab says so.
+    /// Also false with the chunked pass switched off: the aligner splits CHUNKED
+    /// segments into words, and there are no chunked segments then. Loading 1.2 GB
+    /// to align text that will never arrive is the same waste every other rule
+    /// here exists to prevent.
     nonisolated static func wantsAligner(alignEnabled: Bool,
-                                         chunkedID: String) -> Bool {
-        alignEnabled && chunkedID != "moss"
+                                         chunkedID: String,
+                                         chunkedEnabled: Bool) -> Bool {
+        alignEnabled && chunkedEnabled && chunkedID != "moss"
+    }
+
+    /// Whether this session loads the CHUNKED ASR sidecar at all.
+    ///
+    /// THE MASTER SWITCH, owner-requested 2026-08-06, and it is not the same thing
+    /// as `chunked.finalPass` — which was already in the Chunked tab and reads
+    /// like an on/off but is not one. That key governs only the extra pass AFTER
+    /// Stop; with it off, chunked ASR still runs all meeting and still produces
+    /// the transcript. This switch is the one that stops it.
+    ///
+    /// WHAT TURNING IT OFF COSTS, stated here because the cost is the feature:
+    /// the meeting has no accurate transcript at all. The realtime Nemotron text
+    /// becomes the only text that audio will ever have, and the existing
+    /// `.none` stop plan already refuses to sweep it away for exactly that reason.
+    /// The Chunked tab says so in as many words before the toggle.
+    ///
+    /// Pure and static, read by BOTH `buildSteps` and the teardown in `loadAll`,
+    /// like every other want-rule here since the three want/teardown leaks.
+    nonisolated static func wantsChunked(chunkedEnabled: Bool) -> Bool {
+        chunkedEnabled
+    }
+
+    /// Which diarization engines the Settings UI offers for a chunked model.
+    ///
+    /// Owner, 2026-08-06, and it is a BICONDITIONAL — MOSS chunked ⟺ MOSS
+    /// diarization — written as one function precisely because two half-rules
+    /// living apart is how they come to disagree:
+    ///
+    ///   * with MOSS as the ASR, ONLY MOSS is offered;
+    ///   * with any other ASR, MOSS is NOT offered.
+    ///
+    /// The second half stops a second 3.6 GB process and ~6.4 s more per chunk
+    /// being spent to re-label text another model already produced. The first
+    /// half is the owner's decision to keep MOSS as the single all-in-one pairing
+    /// its authors built.
+    ///
+    /// THE COST OF THE FIRST HALF, stated because it removes something that
+    /// worked: "MOSS as ASR + pyannote as diarizer" was a real mode, and the
+    /// better one on paper — it keeps saved profiles, renaming, `spk` confidence,
+    /// overlap tags and overlap repair, all of which MOSS-as-diarizer gives up.
+    /// It is no longer reachable from Settings.
+    ///
+    /// UI AVAILABILITY ONLY, deliberately NOT a loader rule.
+    /// `needsSecondMossProcess` and `wantedDiarizationStack` still support every
+    /// combination and their tests still pin them, so relaxing this one function
+    /// restores both modes intact. What must never happen is an engine staying
+    /// STORED while no card on screen selects it — a setting in force with
+    /// nothing showing it — which is why `selectChunkedModel` and
+    /// `DiarizationTab.onAppear` both correct it, and say so.
+    nonisolated static func diarizationEngineIsSelectable(_ engineValue: String,
+                                                          chunkedID: String) -> Bool {
+        chunkedID == "moss" ? engineValue == mossEngineID : engineValue != mossEngineID
+    }
+
+    /// The engine to fall back to when the stored one is no longer offered.
+    nonisolated static func fallbackDiarizationEngine(chunkedID: String) -> String {
+        chunkedID == "moss" ? mossEngineID : pyannoteEngineID
     }
 
     /// Whether this session needs a SECOND MOSS process for diarization.
@@ -181,6 +248,13 @@ final class ModelLoader: ObservableObject {
     /// carries both the text and the segments, so a second process would be a
     /// second 3.6 GB load and a second ~6.4 s per chunk for output we already
     /// have. It is also why the overlay must not show two rows for one process.
+    ///
+    /// TRUE AGAIN WHEN THE CHUNKED PASS IS SWITCHED OFF, even with the chunked
+    /// MODEL still set to MOSS — and this is the coupling that makes the master
+    /// switch safe. In MOSS+MOSS mode the diarizer borrows its segments from the
+    /// chunked process; with no chunked process there is nothing to borrow, so
+    /// the diarizer needs its own. Without this the MOSS engine would load
+    /// nothing and produce no speakers at all, silently.
     ///
     /// Pure, so the "one process in the primary mode" guarantee is testable
     /// without loading anything (the `wantsRemoteRealtime` precedent).
@@ -205,7 +279,8 @@ final class ModelLoader: ObservableObject {
     /// already covered, because `configureMoss` reads the switch itself.
     nonisolated static func wantedDiarizationStack(diarizationEnabled: Bool,
                                                    engine: String,
-                                                   chunkedID: String) -> DiarizationStack? {
+                                                   chunkedID: String,
+                                                   chunkedEnabled: Bool) -> DiarizationStack? {
         guard diarizationEnabled else { return nil }
         switch engine {
         case mossEngineID:
@@ -213,7 +288,8 @@ final class ModelLoader: ObservableObject {
             // already returns text and segments — but it does need the embedder,
             // so that mode has its own case rather than falling through to
             // "nothing", which used to deny it identity by accident.
-            return needsSecondMossProcess(chunkedID: chunkedID, engine: engine)
+            return needsSecondMossProcess(chunkedID: chunkedID, engine: engine,
+                                          chunkedEnabled: chunkedEnabled)
                 ? .mossSecondProcess : .mossOwnASR
         case spectralEngineID:
             return .spectral
@@ -266,36 +342,64 @@ final class ModelLoader: ObservableObject {
     /// `needsSecondMossProcess` are: the rule is what matters, and it should be
     /// testable without a loader, a sidecar process or UserDefaults.
     ///
-    /// Returns nil under the MOSS diarization engine even when repair is switched
-    /// on, because both engines locate their windows from PYANNOTE turns and there
-    /// are none in a MOSS session — the load step has always known this, and the
-    /// teardown now agrees with it.
+    /// MOSS and SPECTRAL used to return nil unconditionally, and the reason was
+    /// never "not pyannote" — it was that both repair engines need OVERLAP
+    /// REGIONS, and the only source of them was `AudioRecorder.overlapRegions()`,
+    /// which finds turns whose spans intersect. That needs a diarizer able to put
+    /// two speakers on one instant. MOSS's segments tile exactly and spectral's
+    /// Viterbi smoothing assigns one label per frame, so under either engine
+    /// `repairWindows` always came back empty and loading a 6 GB DiCoW to discover
+    /// that once per meeting was pure waste.
     ///
-    /// SPECTRAL IS EXCLUDED FOR A DIFFERENT REASON, and it is worth stating rather
-    /// than filing under "not pyannote". Both repair engines need OVERLAP REGIONS:
-    /// `AudioRecorder.overlapRegions()` finds them by looking for turns whose spans
-    /// intersect, which requires a diarizer that can put two speakers on the same
-    /// instant. The spectral engine is inherently EXCLUSIVE — its Viterbi smoothing
-    /// assigns exactly one label per frame — so its turns never intersect and
-    /// `repairWindows` would always come back empty. Loading a 6 GB DiCoW to
-    /// discover that once per meeting is the same waste the MOSS branch avoids.
+    /// THE OVERLAP DETECTOR CHANGES THAT PREMISE, which is why `detectEnabled` is
+    /// a parameter now. It reads the audio directly with pyannote's segmentation
+    /// network and needs no turns at all, so under those two engines regions exist
+    /// exactly when it is switched on. The rule therefore says what it always
+    /// meant: repair runs when there is somewhere to run it.
     ///
-    /// Written as two `!=` tests rather than `== pyannoteEngineID` so an unknown
-    /// stored engine value behaves the same here as it does in
+    /// pyannote is untouched — it marks overlap itself, so its regions never
+    /// depended on the detector and `detectEnabled` cannot take repair away from
+    /// it. Written as two `!=` tests rather than `== pyannoteEngineID` so an
+    /// unknown stored engine value behaves the same here as it does in
     /// `wantedDiarizationStack` (which resolves it to pyannote): a session that
     /// really is running pyannote must not silently lose repair.
+    ///
+    /// `detectEnabled` deliberately has NO default value. A default would let a
+    /// call site forget it and silently fall back to "no repair under MOSS" —
+    /// exactly the invisible failure direction this project keeps paying for.
     nonisolated static func wantedOverlapEngine(repairEnabled: Bool,
                                                 engineID: String,
-                                                diarEngine: String) -> String? {
-        guard repairEnabled,
-              diarEngine != mossEngineID,
-              diarEngine != spectralEngineID else { return nil }
+                                                diarEngine: String,
+                                                detectEnabled: Bool) -> String? {
+        guard repairEnabled else { return nil }
+        if diarEngine == mossEngineID || diarEngine == spectralEngineID {
+            guard detectEnabled else { return nil }
+        }
         return engineID
     }
 
+    /// Whether this session keeps the overlap DETECTOR alive.
+    ///
+    /// Pure and static, and read by BOTH the load step and the teardown — the
+    /// pattern every other service here follows since the three want/teardown
+    /// bugs of 2026-07-31 and 2026-08-05.
+    ///
+    /// Needs diarization ON, because the detector marks ROWS and a session with no
+    /// speakers has none to mark. It is deliberately NOT restricted to the MOSS
+    /// and spectral engines: under pyannote it is redundant rather than wrong
+    /// (that engine reports overlap itself), and the Diarization tab says so — but
+    /// a user who switches it on there has asked for a second opinion, and
+    /// refusing it silently would be the substitution this project forbids.
+    nonisolated static func wantsOverlapDetect(detectEnabled: Bool,
+                                               diarizationEnabled: Bool) -> Bool {
+        detectEnabled && diarizationEnabled
+    }
+
     nonisolated static func needsSecondMossProcess(chunkedID: String,
-                                                   engine: String) -> Bool {
-        engine == mossEngineID && chunkedID != "moss"
+                                                   engine: String,
+                                                   chunkedEnabled: Bool) -> Bool {
+        guard engine == mossEngineID else { return false }
+        return !chunkedEnabled || chunkedID != "moss"
     }
 
     /// Load everything the session needs. Returns true if all succeeded.
@@ -335,6 +439,7 @@ final class ModelLoader: ObservableObject {
         // from a previous session would quietly re-enable all of them.
         let diarEngine = d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID
         let chunkedID = d.string(forKey: "chunked.model") ?? "qwen3"
+        let chunkedOn = d.object(forKey: "chunked.enabled") as? Bool ?? true
         // BOTH halves of the split go together: leaving the embedder alive under
         // the MOSS engine would keep a process resident that nothing can ask
         // anything (MOSS turns never reach the profile stores), and leaving it
@@ -355,7 +460,7 @@ final class ModelLoader: ObservableObject {
         }
         let wantedDiar = Self.wantedDiarizationStack(
             diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true,
-            engine: diarEngine, chunkedID: chunkedID)
+            engine: diarEngine, chunkedID: chunkedID, chunkedEnabled: chunkedOn)
         // BOTH halves of the pyannote split go together: leaving the embedder
         // alive without the pipeline is a state no code path expects, and
         // leaving either alive when diarization is off is what let a switched-off
@@ -381,12 +486,24 @@ final class ModelLoader: ObservableObject {
             mossDiarization?.terminate()
             mossDiarization = nil
         }
+        // The chunked sidecar had NO teardown at all before the master switch
+        // existed — the only `terminate()` for it sits inside its own load step,
+        // to replace the process when its settings change. That is the same shape
+        // as the Nemotron leak of 2026-08-05 and the two overlap engines before
+        // it: harmless only while the service was unconditional. The moment it
+        // became optional it needed this, or switching the pass off would leave
+        // the largest process in the app (Qwen3 4.29 GB, MOSS 5.65 GB) resident
+        // and unreachable until quit.
+        if !Self.wantsChunked(chunkedEnabled: chunkedOn) {
+            chunkedASR?.terminate()
+            chunkedASR = nil
+        }
         // Same reasoning for the aligner, which is now a process of its own: a
         // session that does not align must not keep a previous session's sidecar
         // alive, because `AudioRecorder` decides whether to align at all by
         // asking whether this service exists.
         if !Self.wantsAligner(alignEnabled: d.object(forKey: "align.enabled") as? Bool ?? false,
-                              chunkedID: chunkedID) {
+                              chunkedID: chunkedID, chunkedEnabled: chunkedOn) {
             aligner?.terminate()
             aligner = nil
         }
@@ -402,13 +519,14 @@ final class ModelLoader: ObservableObject {
         //     ask it anything.
         // DiCoW is a ~6 GB model in its own interpreter, so this was the largest
         // idle process the app could hold. The condition mirrors the load step's
-        // exactly — `overlap.repair.enabled` AND not the MOSS engine — because a
+        // exactly — same four inputs, one function — because a
         // teardown rule that disagrees with the load rule would either drop a
         // service this session needs or keep one it cannot use.
         let wantedRepair = Self.wantedOverlapEngine(
             repairEnabled: d.object(forKey: "overlap.repair.enabled") as? Bool ?? false,
             engineID: d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id,
-            diarEngine: diarEngine)
+            diarEngine: diarEngine,
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false)
         if wantedRepair != ModelCatalog.overlapSeparation.id {
             overlapRepair?.terminate()
             overlapRepair = nil
@@ -416,6 +534,15 @@ final class ModelLoader: ObservableObject {
         if wantedRepair != ModelCatalog.overlapDicow.id {
             dicowRepair?.terminate()
             dicowRepair = nil
+        }
+        // Same want/teardown pair as everything else — a detector left running for
+        // a session that switched it off is the exact bug this file has now had
+        // three times.
+        if !Self.wantsOverlapDetect(
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false,
+            diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true) {
+            overlapDetect?.terminate()
+            overlapDetect = nil
         }
 
         // Built once and reused for both the overlay list and the run below, so
@@ -452,6 +579,7 @@ final class ModelLoader: ObservableObject {
         let d = UserDefaults.standard
         var steps: [Step] = []
         let chunkedID = d.string(forKey: "chunked.model") ?? "qwen3"
+        let chunkedOn = d.object(forKey: "chunked.enabled") as? Bool ?? true
         let diarEngine = d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID
         let mossDiar = diarEngine == Self.mossEngineID
 
@@ -470,11 +598,19 @@ final class ModelLoader: ObservableObject {
         // step so "aligner not downloaded" is reported before a multi-GB ASR
         // load, not after it. Skipped for MOSS — see `wantsAligner`.
         if Self.wantsAligner(alignEnabled: d.object(forKey: "align.enabled") as? Bool ?? false,
-                             chunkedID: chunkedID) {
+                             chunkedID: chunkedID, chunkedEnabled: chunkedOn) {
             steps.append(Step(model: ModelCatalog.wordAligner, checkInstalled: true))
         }
-        // Chunked model (rolling accurate pass) — per settings selection
-        steps.append(Step(model: ModelCatalog.chunkedModel(id: chunkedID), checkInstalled: true))
+        // Chunked model (rolling accurate pass) — per settings selection, and only
+        // when the master switch is on. Off, the session genuinely has no accurate
+        // transcript: `chunkedStopMode(hasChunkedModel:)` already resolves that to
+        // the `.none` plan, which settles the stop gate here and deliberately does
+        // NOT sweep the realtime tail. That state predates this switch — it was
+        // the "no chunked model" early-out — which is why turning it off does not
+        // need a single new branch downstream.
+        if Self.wantsChunked(chunkedEnabled: chunkedOn) {
+            steps.append(Step(model: ModelCatalog.chunkedModel(id: chunkedID), checkInstalled: true))
+        }
         // Diarization (runs after recording ends, but loads up front).
         // Engine-aware: pyannote gets a step only when it is the selected engine,
         // and MOSS gets one only when it needs a SECOND process — with MOSS in
@@ -483,7 +619,7 @@ final class ModelLoader: ObservableObject {
         // Same rule as the teardown in `prepare`, from the SAME function.
         switch Self.wantedDiarizationStack(
             diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true,
-            engine: diarEngine, chunkedID: chunkedID) {
+            engine: diarEngine, chunkedID: chunkedID, chunkedEnabled: chunkedOn) {
         case .none:
             break
         case .mossSecondProcess:
@@ -521,10 +657,22 @@ final class ModelLoader: ObservableObject {
         // Same rule as the teardown in `prepare`, from the SAME function — a load
         // step and a teardown that computed this separately is exactly how the
         // engines came to be started and never stopped.
+        if Self.wantsOverlapDetect(
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false,
+            diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true) {
+            // Resolved from the STORED choice, not hard-coded to the one entry.
+            // `overlap.detect.model` had a picker and nothing read it — the
+            // Granite/Voxtral language-picker trap, harmless only while the list
+            // has a single entry, and a silent defect the moment it has two.
+            steps.append(Step(model: ModelCatalog.overlapDetector(
+                id: d.string(forKey: "overlap.detect.model") ?? ModelCatalog.overlapDetectPyannote.id),
+                              checkInstalled: true))
+        }
         if let engineID = Self.wantedOverlapEngine(
             repairEnabled: d.object(forKey: "overlap.repair.enabled") as? Bool ?? false,
             engineID: d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id,
-            diarEngine: diarEngine) {
+            diarEngine: diarEngine,
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false) {
             steps.append(Step(model: ModelCatalog.overlapEngine(id: engineID), checkInstalled: true))
         }
         return steps
@@ -670,6 +818,19 @@ final class ModelLoader: ObservableObject {
             spectral = try await Task.detached(priority: .userInitiated) {
                 try SpectralService(config: config)
             }.value
+            return
+        }
+
+        // Overlap detection: start the persistent segmentation sidecar. Failure is
+        // NOT fatal — a missing mark costs the user a hint, not their transcript,
+        // so this is the one diarization-adjacent service that degrades instead of
+        // refusing the session.
+        if ModelCatalog.overlapDetectors.contains(where: { $0.id == step.model.id }) {
+            if overlapDetect == nil {
+                overlapDetect = try? await Task.detached(priority: .userInitiated) {
+                    try OverlapDetectService()
+                }.value
+            }
             return
         }
 

@@ -409,7 +409,7 @@ extension AudioRecorder {
         guard finalOn, let service = modelLoader.pyannote else { return }
         diarizing = true
         diarizationError = nil
-        let numSpeakers = UserDefaults.standard.integer(forKey: "diarization.numSpeakers")
+        let numSpeakers = Self.diarNumSpeakers
         let detectOverlap = diarDetectOverlap
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers, exclusive: !detectOverlap)
         // A final pass over a long meeting legitimately takes a while, so scale

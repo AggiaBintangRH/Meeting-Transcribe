@@ -120,21 +120,17 @@ extension AudioRecorder {
     var overlapRepairWillRun: Bool {
         let d = UserDefaults.standard
         guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? false else { return false }
-        // Both engines find their windows in pyannote turns, of which there are
-        // none under the MOSS engine — `ModelLoader.buildSteps` does not even
-        // load one. Checked here too because the services outlive a session: one
-        // left over from a previous pyannote meeting would otherwise put a
-        // "Repairing overlapping speech" row on the overlay for work that cannot
-        // happen.
-        guard !mossDiarizationActive else { return false }
-        // And none under the SPECTRAL engine either, for a different reason worth
-        // naming: that engine is inherently EXCLUSIVE (Viterbi smoothing assigns
-        // one label per frame), so its turns never intersect and `overlapRegions()`
-        // is always empty. `ModelLoader.wantedOverlapEngine` does not load a repair
-        // engine for it — this second test exists because the services outlive a
-        // session, so one left over from a previous pyannote meeting would
-        // otherwise put a row on the overlay for work that cannot happen.
-        guard !spectralDiarizationActive else { return false }
+        // MOSS and spectral cannot mark overlap in their own turns (MOSS's tile
+        // exactly, spectral assigns one label per frame), so under those engines
+        // repair's regions come from the DETECTOR and there is a leg only when it
+        // is running. Tested against the loaded service rather than the setting,
+        // because a step that failed to load must not put a "Repairing overlapping
+        // speech" row on the overlay for work that cannot happen — and services
+        // outlive a session, so one left over from a previous pyannote meeting
+        // would do exactly that.
+        if usesDetectedRegionsForRepair {
+            guard modelLoader.overlapDetect != nil else { return false }
+        }
         let engine = d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id
         return engine == ModelCatalog.overlapDicow.id
             ? modelLoader.dicowRepair != nil
@@ -203,6 +199,10 @@ extension AudioRecorder {
             segments.removeAll { !$0.confirmed }
             rebuildDisplayRows()
         }
+        // MOSS+MOSS: this pass was the last source of turns, so identity runs here
+        // rather than in a full pass that mode never has. It settles the rest of
+        // the gate itself, which is why this returns instead of falling through.
+        if startMossIdentifyForOwnASR() { return }
         maybeStartOverlapRepair()
         checkStopProcessingDone()
     }

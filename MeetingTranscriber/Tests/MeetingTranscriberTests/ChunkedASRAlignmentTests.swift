@@ -26,25 +26,25 @@ final class ChunkedASRAlignmentTests: XCTestCase {
     // MARK: - Which session loads the aligner
 
     func testAlignerIsNotLoadedWhenDisabled() {
-        XCTAssertFalse(ModelLoader.wantsAligner(alignEnabled: false, chunkedID: "qwen3"))
+        XCTAssertFalse(ModelLoader.wantsAligner(alignEnabled: false, chunkedID: "qwen3", chunkedEnabled: true))
     }
 
     func testAlignerIsNotLoadedWhenUnset() {
         UserDefaults.standard.removeObject(forKey: key)
         let stored = UserDefaults.standard.object(forKey: key) as? Bool ?? false
-        XCTAssertFalse(ModelLoader.wantsAligner(alignEnabled: stored, chunkedID: "qwen3"))
+        XCTAssertFalse(ModelLoader.wantsAligner(alignEnabled: stored, chunkedID: "qwen3", chunkedEnabled: true))
     }
 
     func testAlignerIsLoadedWhenEnabled() {
-        XCTAssertTrue(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: "qwen3"))
-        XCTAssertTrue(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: "whisper"))
+        XCTAssertTrue(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: "qwen3", chunkedEnabled: true))
+        XCTAssertTrue(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: "whisper", chunkedEnabled: true))
     }
 
     /// MOSS stays excluded even though the split makes aligning its text
     /// possible for the first time — the owner deferred cross-chunk MOSS work,
     /// and the Aligner tab says so.
     func testAlignerIsNeverLoadedForMoss() {
-        XCTAssertFalse(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: "moss"))
+        XCTAssertFalse(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: "moss", chunkedEnabled: true))
     }
 
     func testAlignerConfigCarriesTheAlignerRepo() {

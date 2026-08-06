@@ -23,34 +23,43 @@ extension AudioRecorder {
         var speakerIDs: [Int]   // exactly 2
     }
 
+    /// Whether repair takes its overlap spans from the DETECTOR rather than from
+    /// intersecting turns.
+    ///
+    /// Keyed on the ENGINE, not on whether the detector happens to be loaded: the
+    /// question is "can this session's diarizer mark overlap itself?", and the
+    /// answer is a property of MOSS and spectral (one speaker per instant), not of
+    /// what else is running. pyannote marks overlap itself, so it keeps using its
+    /// own turns and its behaviour is byte-for-byte unchanged — the detector is a
+    /// second opinion there, never a substitution.
+    var usesDetectedRegionsForRepair: Bool {
+        mossDiarizationActive || spectralDiarizationActive
+    }
+
     /// Start overlap repair only once both the last chunk and the diarization
     /// final pass are done, the feature is on, and the selected engine loaded.
     func maybeStartOverlapRepair() {
         let d = UserDefaults.standard
         guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? false else { return }
-        // Deliberate skip, not a failure. Under the MOSS diarization engine there
-        // are no pyannote turns to find overlap windows in, and `ModelLoader`
-        // skips loading either repair engine — so without this the code below
-        // would fall through to `.failed("engine unavailable")` and report a
-        // missing model as the reason for something we chose not to do.
-        guard !mossDiarizationActive else {
-            overlapLog("skipped — diarization engine is MOSS, so there are no pyannote "
-                       + "turns to locate overlap windows in")
-            finishRepairStep(.done)
-            return
-        }
-        // Same shape, different reason. The spectral engine DOES produce pyannote-
-        // style turns — but it is inherently exclusive (one label per frame), so
-        // no two of its turns ever intersect and `overlapRegions()` is empty by
-        // construction. Skipped explicitly rather than left to return an empty
-        // window list, so the log says "this engine cannot detect overlap" instead
-        // of the ambiguous "no 2-speaker overlap windows to repair", which on
-        // pyannote means "we looked and there weren't any".
-        guard !spectralDiarizationActive else {
-            overlapLog("skipped — diarization engine is SPECTRAL, which assigns exactly one "
-                       + "speaker per instant, so there are no overlap regions to repair")
-            finishRepairStep(.done)
-            return
+        // MOSS and spectral cannot locate overlap in their OWN turns — MOSS's
+        // segments tile exactly, spectral assigns one label per frame — so under
+        // those engines repair's regions come from the standalone DETECTOR, which
+        // reads the audio and needs no turns at all. Without it there is genuinely
+        // nothing to repair, and `ModelLoader.wantedOverlapEngine` does not even
+        // load an engine, so this must skip rather than fall through to
+        // `.failed("engine unavailable")` and blame a missing model for a choice.
+        if usesDetectedRegionsForRepair {
+            guard modelLoader.overlapDetect != nil else {
+                overlapLog("skipped — the \(mossDiarizationActive ? "MOSS" : "SPECTRAL") "
+                           + "diarization engine assigns exactly one speaker per instant, so "
+                           + "overlap repair needs the overlap DETECTOR to locate regions, "
+                           + "and it is switched off (Settings → Models → Detect overlap)")
+                finishRepairStep(.done)
+                return
+            }
+            // Still scanning. Its completion handler calls back in here — both on
+            // success and on failure — so this is a wait, not a bail.
+            guard overlapDetectDone else { return }
         }
         guard stopped, finalDiarDone, lastChunkDone else { return }
         guard repairTask == nil, !overlapRepairing else { return }
@@ -111,30 +120,51 @@ extension AudioRecorder {
     private func repairWindows(windowSec: Double,
                                maxDurationSec: Double? = nil) -> [RepairWindow] {
         // Overlap repair rewrites transcript text under a speaker id — the last
-        // place a stray remote id should ever reach.
-        let turns = Self.officeTurnsOnly(liveTurns, "repairWindows")
+        // place a stray remote id should ever reach. MOSS keeps its turns in their
+        // own collection and never in `liveTurns`, so the office-only assert is
+        // asked of the collection that actually holds this session's office turns.
+        let turns = mossDiarizationActive
+            ? mossTurns
+            : Self.officeTurnsOnly(liveTurns, "repairWindows")
         guard turns.count > 1 else { return [] }
 
-        // Raw windows from pairwise different-speaker overlaps.
-        var raw: [(start: Double, end: Double)] = []
-        for i in 0..<turns.count {
-            for j in (i + 1)..<turns.count where turns[i].id != turns[j].id {
-                let a = turns[i].start <= turns[j].start ? turns[i] : turns[j]
-                let b = turns[i].start <= turns[j].start ? turns[j] : turns[i]
-                let os = max(a.start, b.start)
-                let oe = min(a.end, b.end)
-                guard oe - os >= 0.4 else { continue }   // genuine overlap only
-                // Center the window on the overlap-region midpoint.
-                let mid = (os + oe) / 2
-                var ws = max(0, mid - windowSec)
-                var we = min(recordingElapsed, mid + windowSec)
-                ws = min(ws, os)          // keep the full overlap span inside (long overlaps)
-                we = max(we, oe)
-                we = min(we, recordingElapsed)
-                if we - ws >= 2.0 {
-                    raw.append((ws, we))
-                    overlapLog("window [\(fmt(ws))-\(fmt(we))] centered on overlap midpoint \(fmt(mid)) (overlap [\(fmt(os))-\(fmt(oe))])")
+        // Where the overlap SPANS come from. Under pyannote: pairs of turns that
+        // intersect. Under MOSS and spectral, whose turns never intersect: the
+        // standalone detector, which read the audio itself. `maybeStartOverlapRepair`
+        // has already proved the detector ran, so an empty list here means it found
+        // no overlap — not that it is missing.
+        var spans: [(start: Double, end: Double)] = []
+        if usesDetectedRegionsForRepair {
+            // The 0.4 s genuine-overlap bar is applied to both sources, so the two
+            // paths admit the same thing. The detector's own floor is 0.20 s.
+            spans = detectedOverlapRegions.filter { $0.end - $0.start >= 0.4 }
+            overlapLog("regions from the overlap DETECTOR: "
+                       + "\(spans.count) of \(detectedOverlapRegions.count) are >= 0.4s")
+        } else {
+            for i in 0..<turns.count {
+                for j in (i + 1)..<turns.count where turns[i].id != turns[j].id {
+                    let a = turns[i].start <= turns[j].start ? turns[i] : turns[j]
+                    let b = turns[i].start <= turns[j].start ? turns[j] : turns[i]
+                    let os = max(a.start, b.start)
+                    let oe = min(a.end, b.end)
+                    guard oe - os >= 0.4 else { continue }   // genuine overlap only
+                    spans.append((os, oe))
                 }
+            }
+        }
+
+        // Raw windows: each overlap span centered in ±windowSec of context.
+        var raw: [(start: Double, end: Double)] = []
+        for (os, oe) in spans {
+            let mid = (os + oe) / 2
+            var ws = max(0, mid - windowSec)
+            var we = min(recordingElapsed, mid + windowSec)
+            ws = min(ws, os)          // keep the full overlap span inside (long overlaps)
+            we = max(we, oe)
+            we = min(we, recordingElapsed)
+            if we - ws >= 2.0 {
+                raw.append((ws, we))
+                overlapLog("window [\(fmt(ws))-\(fmt(we))] centered on overlap midpoint \(fmt(mid)) (overlap [\(fmt(os))-\(fmt(oe))])")
             }
         }
         guard !raw.isEmpty else { return [] }

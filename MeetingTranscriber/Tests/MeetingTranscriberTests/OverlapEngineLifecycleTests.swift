@@ -18,6 +18,7 @@ final class OverlapEngineLifecycleTests: XCTestCase {
 
     private let pyannote = ModelLoader.pyannoteEngineID
     private let moss = ModelLoader.mossEngineID
+    private let spectral = ModelLoader.spectralEngineID
     private let mossformer2 = ModelCatalog.overlapSeparation.id
     private let dicow = ModelCatalog.overlapDicow.id
 
@@ -26,11 +27,13 @@ final class OverlapEngineLifecycleTests: XCTestCase {
     func testTheSelectedEngineIsTheOneKept() {
         XCTAssertEqual(ModelLoader.wantedOverlapEngine(repairEnabled: true,
                                                        engineID: mossformer2,
-                                                       diarEngine: pyannote),
+                                                       diarEngine: pyannote,
+                                                       detectEnabled: false),
                        mossformer2)
         XCTAssertEqual(ModelLoader.wantedOverlapEngine(repairEnabled: true,
                                                        engineID: dicow,
-                                                       diarEngine: pyannote),
+                                                       diarEngine: pyannote,
+                                                       detectEnabled: false),
                        dicow)
     }
 
@@ -39,23 +42,78 @@ final class OverlapEngineLifecycleTests: XCTestCase {
     func testDisablingRepairKeepsNeither() {
         XCTAssertNil(ModelLoader.wantedOverlapEngine(repairEnabled: false,
                                                      engineID: mossformer2,
-                                                     diarEngine: pyannote))
+                                                     diarEngine: pyannote,
+                                                     detectEnabled: true))
         XCTAssertNil(ModelLoader.wantedOverlapEngine(repairEnabled: false,
                                                      engineID: dicow,
-                                                     diarEngine: pyannote))
+                                                     diarEngine: pyannote,
+                                                     detectEnabled: true))
     }
 
-    /// The MOSS diarization engine cannot run overlap repair at all: both engines
-    /// locate their windows from pyannote turns, and a MOSS session produces
-    /// none. The load step always knew this; the teardown did not, so switching
-    /// to MOSS left a loaded engine running with nothing able to ask it anything.
-    func testMossDiarizationEngineKeepsNeitherEvenWhenRepairIsOn() {
-        XCTAssertNil(ModelLoader.wantedOverlapEngine(repairEnabled: true,
-                                                     engineID: mossformer2,
-                                                     diarEngine: moss))
-        XCTAssertNil(ModelLoader.wantedOverlapEngine(repairEnabled: true,
-                                                     engineID: dicow,
-                                                     diarEngine: moss))
+    /// MOSS and spectral cannot LOCATE overlap in their own turns — MOSS's
+    /// segments tile exactly, spectral assigns one label per frame — so with the
+    /// detector off there is nothing for either repair engine to work on and both
+    /// must be dropped. This was the whole rule until the standalone overlap
+    /// detector existed; it is now the detector-off half of it.
+    ///
+    /// The teardown direction is what makes it matter: switching to MOSS used to
+    /// leave a loaded engine running with nothing able to ask it anything.
+    func testMossAndSpectralKeepNeitherWhileTheDetectorIsOff() {
+        for diar in [moss, spectral] {
+            for engine in [mossformer2, dicow] {
+                XCTAssertNil(ModelLoader.wantedOverlapEngine(repairEnabled: true,
+                                                             engineID: engine,
+                                                             diarEngine: diar,
+                                                             detectEnabled: false),
+                             "\(diar) cannot locate overlap without the detector")
+            }
+        }
+    }
+
+    /// THE OTHER HALF, and the reason `detectEnabled` is a parameter at all. The
+    /// detector reads the audio directly and needs no turns, so under MOSS and
+    /// spectral it is what gives repair somewhere to run. Switching it on must
+    /// therefore hand back the engine the owner picked — the same engine, not a
+    /// substitute.
+    func testTheDetectorGivesMossAndSpectralTheirRepairEngineBack() {
+        for diar in [moss, spectral] {
+            for engine in [mossformer2, dicow] {
+                XCTAssertEqual(ModelLoader.wantedOverlapEngine(repairEnabled: true,
+                                                               engineID: engine,
+                                                               diarEngine: diar,
+                                                               detectEnabled: true),
+                               engine,
+                               "\(diar) + detector must keep the engine that was chosen")
+            }
+        }
+    }
+
+    /// The detector can never turn repair ON by itself, under any engine. It
+    /// decides WHERE repair may run, never WHETHER — the feature switch does that,
+    /// and a detector that quietly started a 6 GB DiCoW would be the substitution
+    /// this project forbids.
+    func testTheDetectorCannotSwitchRepairOn() {
+        for diar in [pyannote, moss, spectral] {
+            for engine in [mossformer2, dicow] {
+                XCTAssertNil(ModelLoader.wantedOverlapEngine(repairEnabled: false,
+                                                             engineID: engine,
+                                                             diarEngine: diar,
+                                                             detectEnabled: true))
+            }
+        }
+    }
+
+    /// pyannote marks overlap in its own turns, so its regions never depended on
+    /// the detector. Repair there must be byte-for-byte unaffected by that switch
+    /// — the detector is a second opinion under pyannote, never a precondition.
+    func testPyannoteRepairIgnoresTheDetectorEntirely() {
+        for engine in [mossformer2, dicow] {
+            XCTAssertEqual(
+                ModelLoader.wantedOverlapEngine(repairEnabled: true, engineID: engine,
+                                                diarEngine: pyannote, detectEnabled: false),
+                ModelLoader.wantedOverlapEngine(repairEnabled: true, engineID: engine,
+                                                diarEngine: pyannote, detectEnabled: true))
+        }
     }
 
     /// The engines are mutually exclusive, so the rule may never name both. This
@@ -65,7 +123,8 @@ final class OverlapEngineLifecycleTests: XCTestCase {
         for engine in [mossformer2, dicow] {
             let wanted = ModelLoader.wantedOverlapEngine(repairEnabled: true,
                                                          engineID: engine,
-                                                         diarEngine: pyannote)
+                                                         diarEngine: pyannote,
+                                                         detectEnabled: false)
             let keepsMossformer2 = wanted == mossformer2
             let keepsDicow = wanted == dicow
             XCTAssertFalse(keepsMossformer2 && keepsDicow,
