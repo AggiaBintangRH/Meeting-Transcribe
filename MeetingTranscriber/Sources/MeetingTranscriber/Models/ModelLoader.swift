@@ -581,7 +581,6 @@ final class ModelLoader: ObservableObject {
         let chunkedID = d.string(forKey: "chunked.model") ?? "qwen3"
         let chunkedOn = d.object(forKey: "chunked.enabled") as? Bool ?? true
         let diarEngine = d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID
-        let mossDiar = diarEngine == Self.mossEngineID
 
         if d.object(forKey: "vad.enabled") as? Bool ?? true {
             steps.append(Step(model: ModelCatalog.vad, checkInstalled: false)) // energy VAD needs no files yet

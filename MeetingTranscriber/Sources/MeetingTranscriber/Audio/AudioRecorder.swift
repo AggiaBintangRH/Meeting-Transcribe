@@ -555,24 +555,13 @@ final class AudioRecorder: ObservableObject {
         // transcript. Refusal, never a silent downgrade to the tail: the user
         // asked for the whole recording and would have no way to know they did
         // not get it.
-        let chunkedFinalPass = UserDefaults.standard.object(forKey: "chunked.finalPass") as? Bool ?? true
-        // ALWAYS tail-only. The "Continue from live text (tail only)" toggle was
-        // removed on 2026-08-06 (owner), and its stored key is deliberately NOT
-        // read any more: leaving the read in place would let a value set before
-        // the control disappeared keep choosing the full pass, with nothing in
-        // the UI able to change it back. `true` is that toggle's own default and
-        // what the app has always done, so this is today's behaviour made fixed
-        // rather than a new one. `.full` and its machinery are kept — they are
-        // still covered by tests and reachable if the toggle ever returns.
-        let chunkedTailOnly = true
-        if chunkedFinalPass, !chunkedTailOnly,
-           let refusal = Self.chunkedFullPassRefusalMessage(chunkedModelID: chunkedID) {
-            chunkedStopLog("REFUSED start — \(refusal)")
-            modelLoader.failStartup(step: "Stop-time transcription pass + chunked model", message: refusal)
-            errorMessage = refusal
-            state = .idle
-            return
-        }
+        // NO full-pass refusal here any more. `chunkedFullPassRefusalMessage`
+        // guards a mode the tail-only pin (see `stop()`) makes unreachable, so the
+        // `if` that called it — and the two locals it read — were provably dead,
+        // and a CLEAN build said so ("will never be executed"). The pure function
+        // and its tests are KEPT: they are what restoring the toggle would need.
+        // A branch that can never run is not a safety net, it is a warning on
+        // every build.
         let ok = await modelLoader.loadAll()
         guard ok else {
             state = .idle
