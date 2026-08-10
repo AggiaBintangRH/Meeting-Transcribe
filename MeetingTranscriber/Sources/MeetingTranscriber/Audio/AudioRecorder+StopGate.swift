@@ -137,15 +137,32 @@ extension AudioRecorder {
             : modelLoader.overlapRepair != nil
     }
 
+    /// THE one way out of `.processing`.
+    ///
+    /// Every exit does the same three things — stop the backstop, unblock the UI,
+    /// and mark the meeting finished so the mic locks until Start Over. Those
+    /// three lines were copied to three sites, and the third (`markMeetingFinished`)
+    /// had to be added to all of them by hand on 2026-08-10; the property's doc
+    /// still spends a paragraph enumerating them because there was no single place
+    /// to point at. There is now.
+    ///
+    /// The value of routing every exit through here is the exit that does not exist
+    /// yet: a fourth one added later gets the lock for free, instead of leaving the
+    /// mic live over a finished transcript — a failure with no error and no trace.
+    private func leaveProcessing() {
+        stopWatchdog?.cancel()
+        stopWatchdog = nil
+        state = .idle
+        markMeetingFinished()
+    }
+
     /// All post-stop work landed → drop the overlay and re-enable Start.
     /// Idempotent; every leg's completion path calls it.
     func checkStopProcessingDone() {
         guard state == .processing, lastChunkDone, remoteLastChunkDone,
               finalDiarDone, remoteFinalDiarDone, mossLastChunkDone,
               !overlapRepairing, repairTask == nil else { return }
-        stopWatchdog?.cancel()
-        stopWatchdog = nil
-        state = .idle
+        leaveProcessing()
     }
 
     /// Last resort: never hold the controls hostage. The background work keeps
@@ -164,8 +181,10 @@ extension AudioRecorder {
                 where self.stopSteps[i].state == .pending || self.stopSteps[i].state == .loading {
                     self.stopSteps[i].state = .failed("timed out")
                 }
-                self.stopWatchdog = nil
-                self.state = .idle
+                // Timed out, but the meeting still HAPPENED and the app is
+                // unblocked. Cancelling the watchdog from inside the watchdog is a
+                // no-op, which is why this can share the common exit.
+                self.leaveProcessing()
             }
         }
     }
@@ -174,9 +193,10 @@ extension AudioRecorder {
     /// nothing. Degrades to the pre-overlay behaviour — work continues silently.
     func continueInBackground() {
         guard state == .processing else { return }
-        stopWatchdog?.cancel()
-        stopWatchdog = nil
-        state = .idle
+        // The user stopped WAITING; the passes did not stop RUNNING. Locking the
+        // mic matters more here than anywhere else — starting a second recording
+        // now would collide with work still in flight.
+        leaveProcessing()
     }
 
     /// Last chunk finished after stop → maybe kick off overlap repair.

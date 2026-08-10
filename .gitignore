@@ -85,6 +85,11 @@ dist/
 # pattern is an exact directory name, not a prefix.
 /.venv-nemo
 
+# Exported meeting transcripts. Real client speech, written here by the owner
+# choosing this folder in the export dialog — the one category in this repo that
+# must never reach a remote.
+/PDFExport
+
 # Secrets — never commit. Use .env.example as the template.
 .env
 

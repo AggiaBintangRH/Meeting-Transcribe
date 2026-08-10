@@ -266,12 +266,7 @@ struct TranscriptView: View {
 
     private func timeRange(_ row: AudioRecorder.SpeakerUtterance) -> String? {
         guard let start = row.start, let end = row.end else { return nil }
-        return "\(clock(start)) – \(clock(end))"
-    }
-
-    private func clock(_ seconds: Double) -> String {
-        let total = Int(seconds.rounded())
-        return String(format: "%02d:%02d", total / 60, total % 60)
+        return "\(Clock.mmss(start)) – \(Clock.mmss(end))"
     }
 
     private var emptyState: some View {

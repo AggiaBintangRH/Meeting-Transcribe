@@ -10,6 +10,51 @@ final class AudioRecorder: ObservableObject {
     enum State { case idle, preparing, recording, processing }
 
     @Published var state: State = .idle
+
+    /// A meeting has been recorded and every stop pass has finished (owner,
+    /// 2026-08-10). While this is true the mic is LOCKED and the two meeting
+    /// actions are offered instead: `Start Over` clears the panel and unlocks the
+    /// mic; `Export to PDF` writes the transcript out.
+    ///
+    /// A FLAG, NOT `state == .idle && !segments.isEmpty` — which is what this
+    /// started as, and it was wrong in the one case that matters most. A meeting
+    /// that transcribed NOTHING is still a finished meeting, and it is exactly
+    /// then that the user needs Start Over; deriving from `segments` would have
+    /// left them with a dead panel and a mic that pretends the session never
+    /// happened. Export handles the empty case on its own (`canExport`).
+    ///
+    /// Raised by ALL THREE `.processing` → `.idle` transitions, which is more than
+    /// it looks and was nearly missed:
+    ///   1. `checkStopProcessingDone` — every leg landed. The happy path.
+    ///   2. `startStopWatchdog` — the backstop fired and marked legs "timed out".
+    ///   3. `continueInBackground` — the user chose to stop waiting; work carries on.
+    /// Two and three still leave a RECORDED MEETING on screen and an unblocked
+    /// app, so skipping them would leave the mic live over a transcript the user
+    /// never exported — and a new recording would collide with passes still in
+    /// flight in case 3.
+    ///
+    /// The other five `state = .idle` assignments are START failures (permission
+    /// denied, refused configuration, `beginCapture` threw). Those never recorded
+    /// anything and must NOT raise this.
+    @Published private(set) var meetingFinished = false
+
+    /// Is there anything to export? Export is offered on a finished meeting even
+    /// when it is empty, but pressing it then would write a blank document, so the
+    /// button is disabled and the user is told why (owner, 2026-08-10).
+    var canExport: Bool { !displayRows.isEmpty }
+
+    /// Raise `meetingFinished` from the stop-gate extension.
+    ///
+    /// A METHOD rather than a looser access level: `private(set)` keeps the setter
+    /// in this file, and widening it to internal would let any of the twenty-odd
+    /// files in `Audio/` set the flag from anywhere. The three legitimate callers
+    /// all live in `AudioRecorder+StopGate.swift` and all mean the same thing, so
+    /// they get one named door instead.
+    ///
+    /// Idempotent by construction — every caller is already on a path that runs
+    /// once per stop, and setting `true` twice is harmless anyway.
+    func markMeetingFinished() { meetingFinished = true }
+
     @Published var rms: Float = 0.0
     @Published var isSpeaking = false
     @Published var vadEnabled = true
@@ -488,12 +533,81 @@ final class AudioRecorder: ObservableObject {
     }
 
     func toggle() {
+        // A finished meeting LOCKS the mic until `startOver()` clears it (owner,
+        // 2026-08-10). The guard is here as well as on the button because a view
+        // is not a rule: `.disabled` stops a click, and this stops everything
+        // else — a keyboard path, a future menu item, a second window.
+        guard !meetingFinished else { return }
         switch state {
         case .idle:       start()
         case .recording:  stop()
         case .preparing:  break // ignore taps while loading
         case .processing: break // ignore taps while the stop work finishes
         }
+    }
+
+    /// Everything the transcript panel SHOWS, cleared in one place.
+    ///
+    /// THE ONE LIST. `startOver()` and `beginCapture` both need a blank panel, and
+    /// until 2026-08-10 they each carried their own version — already disagreeing:
+    /// `beginCapture` cleared `speakerCount` and `stopSteps` while `startOver` also
+    /// cleared `partialTranscript`, `errorMessage` and `chunkedError`, which
+    /// `beginCapture` did not. A new `@Published` that a view reads would have been
+    /// added to whichever list its author happened to be looking at, and shown
+    /// stale on the other path.
+    ///
+    /// Its membership is decided by ONE question — does a view read it? — over
+    /// `TranscriptView`, `StatusChipsView`, `ProcessingOverlayView` and
+    /// `RecordCardView`. Internal session state (buffers, watchdogs, boundaries,
+    /// turn collections) is NOT here: `beginCapture` owns that, nothing reads it
+    /// while idle, and the next recording cannot start without going through it.
+    private func clearVisibleMeetingState() {
+        // The transcript itself.
+        segments = []
+        displayRows = []
+        partialTranscript = ""
+        partialSpeakerName = nil
+        remoteCaption = RemoteCaption()
+
+        // Everything the header chips, the overlay and the record card would
+        // otherwise keep reporting about a meeting that is no longer on screen.
+        speakerCount = nil
+        remoteSpeakerCount = nil
+        errorMessage = nil
+        chunkedError = nil
+        diarizationError = nil
+        overlapRepairError = nil
+        overlapRepairProgress = nil
+        stopSteps = []
+    }
+
+    /// When this meeting happened — the date the exported PDF is stamped with.
+    ///
+    /// A MODEL fact, so it lives on the model. It was derived inside the export
+    /// button's action until 2026-08-10: a filesystem stat plus a fallback policy,
+    /// in a SwiftUI closure, where no test could reach it — while `startOver()`
+    /// nils `lastRecordingURL` specifically for that code's benefit. One fact,
+    /// three files.
+    ///
+    /// Falls back to now when there is no recording file, which is the honest
+    /// answer for a meeting whose audio was never written.
+    var meetingRecordedAt: Date {
+        lastRecordingURL
+            .flatMap { try? $0.resourceValues(forKeys: [.creationDateKey]).creationDate }
+            ?? Date()
+    }
+
+    /// Clear the finished meeting so a new one can start.
+    func startOver() {
+        guard meetingFinished else { return }
+        clearVisibleMeetingState()
+        // The recording this panel was showing. Cleared HERE and not in the shared
+        // helper: `beginCapture` sets this to the new session's file moments later,
+        // so clearing it there would be undone in the same breath. Only Start Over
+        // means "there is no recording", which is what stops Export acting on a
+        // file the user has just dismissed.
+        lastRecordingURL = nil
+        meetingFinished = false
     }
 
     // MARK: - Start
@@ -750,8 +864,10 @@ final class AudioRecorder: ObservableObject {
         // Its result REPLACES the unconfirmed Nemotron segments in place.
         let chunked = modelLoader.chunkedASR
         chunkedModelName = chunked?.config.modelName ?? ""
-        segments = []
-        displayRows = []
+        // Everything a view shows, from the ONE list that Start Over also uses —
+        // segments, rows, partials, the chips, the errors, the stop steps. Keeping
+        // a second copy of that set here is what let the two paths disagree.
+        clearVisibleMeetingState()
         chunkedBusy = false
         chunkElapsed = 0
         recordingElapsed = 0
@@ -759,14 +875,12 @@ final class AudioRecorder: ObservableObject {
         pendingChunkWindows = []
         lastRealtimeFinalElapsed = 0
         diarizing = false
-        speakerCount = nil
-        diarizationError = nil
-        // Fresh overlap-repair state for this session.
+        // Fresh overlap-repair state for this session. `overlapRepairProgress` and
+        // `overlapRepairError` are display fields and went to the shared helper;
+        // the task and the in-flight flag are not, and stay here.
         repairTask?.cancel()
         repairTask = nil
         overlapRepairing = false
-        overlapRepairProgress = nil
-        overlapRepairError = nil
         stopped = false
         finalDiarDone = false
         lastChunkDone = false
@@ -777,7 +891,6 @@ final class AudioRecorder: ObservableObject {
         finalDiarWatchdog = nil
         stopWatchdog?.cancel()
         stopWatchdog = nil
-        stopSteps = []
         // Stop-time chunked pass: back to today's behaviour for the new session.
         // `stop()` writes the real values from this session's settings.
         chunkedSweepsUnconfirmed = true

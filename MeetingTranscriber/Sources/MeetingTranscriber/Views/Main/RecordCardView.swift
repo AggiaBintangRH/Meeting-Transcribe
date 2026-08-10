@@ -7,7 +7,16 @@ struct RecordCardView: View {
     private var isRecording: Bool { recorder.state == .recording }
     private var isPreparing: Bool { recorder.state == .preparing }
 
+    /// A finished meeting is still on screen, so the mic is locked until
+    /// `Start Over` clears it (owner, 2026-08-10). Checked BEFORE `state` in both
+    /// switches below, because the state at that moment is `.idle` and would
+    /// otherwise read "Ready to record" over a mic that cannot be pressed —
+    /// a label describing a control's normal behaviour while the control is
+    /// inert is worse than no label.
+    private var isLocked: Bool { recorder.meetingFinished }
+
     private var title: String {
+        if isLocked { return "Meeting finished" }
         switch recorder.state {
         case .idle:       return "Ready to record"
         case .preparing:  return "Loading models…"
@@ -17,6 +26,7 @@ struct RecordCardView: View {
     }
 
     private var buttonLabel: String {
+        if isLocked { return "START OVER TO RECORD AGAIN" }
         switch recorder.state {
         case .idle:       return "START RECORDING"
         case .preparing:  return "LOADING…"
@@ -51,7 +61,8 @@ struct RecordCardView: View {
                 }
             }
             .buttonStyle(.plain)
-            .disabled(isPreparing || recorder.state == .processing)
+            .disabled(isPreparing || recorder.state == .processing || isLocked)
+            .opacity(isLocked ? 0.5 : 1)   // the app's one disabled opacity (EnrollmentPromptView)
 
             Text(buttonLabel)
                 .font(.system(size: 12, weight: .heavy))

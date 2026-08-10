@@ -12,6 +12,12 @@ struct SidebarView: View {
             RecordCardView(recorder: recorder)
             Spacer()
             Spacer()
+            // Under the record card, at the very bottom (owner, 2026-08-10).
+            // AFTER the second Spacer rather than between them, so it is pinned to
+            // the floor instead of floating in whatever space is left — and so the
+            // mic card keeps the exact vertical position it has always had when no
+            // meeting is finished, which is every launch.
+            MeetingActionsView(recorder: recorder)
         }
         .frame(width: 350)
         .background(Theme.sidebar)

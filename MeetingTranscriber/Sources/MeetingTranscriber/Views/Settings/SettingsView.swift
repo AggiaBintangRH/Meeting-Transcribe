@@ -9,12 +9,18 @@ struct SettingsView: View {
         case models = "Models"
         case microphone = "Microphone"
         case atnd = "ATND"
+        // Things that happen AROUND a meeting rather than to its audio (owner,
+        // 2026-08-10). Last in the rail because it is the only section that acts
+        // after a recording is over, and the rail otherwise reads as pipeline
+        // order.
+        case utils = "Utils"
 
         var icon: String {
             switch self {
             case .models: return "cpu"
             case .microphone: return "mic.fill"
             case .atnd: return "antenna.radiowaves.left.and.right"
+            case .utils: return "wrench.and.screwdriver.fill"
             }
         }
 
@@ -23,6 +29,7 @@ struct SettingsView: View {
             switch self {
             case .models, .atnd: return ""
             case .microphone: return "Input device and channel selection"
+            case .utils: return "Export and other post-meeting options"
             }
         }
     }
@@ -467,6 +474,8 @@ struct SettingsView: View {
                         case .command:    ATNDCommandTab()
                         case .position:   ATNDPositionTab()
                         }
+                    case .utils:
+                        UtilsTab()
                     }
                 }
                 .padding(24)

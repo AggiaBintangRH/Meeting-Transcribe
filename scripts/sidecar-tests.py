@@ -4307,6 +4307,7 @@ LAYOUT_CHECKS = [
     "layout/tail-window-start-is-recorded-not-derived",
     "layout/diarization-settings-locked-per-session",
     "layout/batch-engines-ignore-final-pass",
+    "layout/pdf-export-uses-fixed-ink",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -4745,6 +4746,66 @@ def run_layout(rep: Report, ctx):
         rep.expect(cid, not problems,
                    "neither batch engine reads diarization.finalPass (both pass "
                    "true), while pyannote's remote pass still honours it",
+                   "; ".join(problems))
+
+    cid = "layout/pdf-export-uses-fixed-ink"
+    if ctx.wants(cid):
+        # The PDF exporter may not draw with a DYNAMIC system colour.
+        #
+        # `NSColor.textColor`, `.labelColor`, `.secondaryLabelColor` and friends
+        # resolve against the CURRENT APPEARANCE. The app runs dark, so on
+        # 2026-08-10 the exported transcript was near-white ink on a page, and the
+        # only visible element was the title — which alone carried no colour and
+        # therefore defaulted to black. The owner found it by opening the file.
+        #
+        # PINNED HERE RATHER THAN IN A UNIT TEST because a unit test cannot see it:
+        # a headless XCTest process has no application appearance, so the same
+        # colour resolves to black there and the render looks perfect. Measured,
+        # including with `performAsCurrentDrawingAppearance(.darkAqua)`, which does
+        # not help. `ExportTests` covers the transparent-page half; this covers this
+        # one.
+        #
+        # The POSITIVE half — that the file really does define fixed ink — is what
+        # stops a file that had simply stopped drawing text from passing.
+        path = SWIFT_SOURCES / "MeetingTranscriber" / "Export" / "TranscriptPDF.swift"
+        problems = []
+        if not path.exists():
+            problems.append("TranscriptPDF.swift is gone")
+        else:
+            code = "\n".join(l for l in path.read_text().splitlines()
+                             if not l.strip().startswith("//")
+                             and not l.strip().startswith("///"))
+            # AN ALLOWLIST, NOT A DENYLIST — the `assert_no_torchcodec_use` shape.
+            #
+            # This was six banned names, which is the special case: `.systemGray`,
+            # `.headerTextColor`, `.textBackgroundColor`, a bridged SwiftUI
+            # `Color(...)` or anything from `Theme` would all have passed while
+            # being just as appearance-dependent. The RULE is "every colour in this
+            # file is a literal component initialiser", so that is what is checked.
+            # Anything else — a named system colour, a semantic colour, a Theme
+            # token — fails by default, which is the right direction for a file
+            # whose output is printed.
+            allowed_init = re.compile(r"NSColor\((?:white|red|calibratedWhite|calibratedRed|"
+                                      r"deviceWhite|deviceRed|displayP3Red|genericGamma22White):")
+            for m in re.finditer(r"NSColor\s*(?:\.\s*(\w+)|\()", code):
+                token = m.group(0)
+                if token.rstrip().endswith("("):
+                    if not allowed_init.match(code[m.start():m.start() + 60]):
+                        problems.append(f"a non-component NSColor initialiser at "
+                                        f"offset {m.start()} — printed ink must be "
+                                        f"literal components")
+                else:
+                    problems.append(f"NSColor.{m.group(1)} is a NAMED system colour; "
+                                    f"named colours resolve against the current "
+                                    f"appearance and render near-white in dark mode. "
+                                    f"A printed page has one appearance — use "
+                                    f"NSColor(white:) or another component form")
+            if "NSColor(white:" not in code:
+                problems.append("no fixed NSColor(white:) ink is defined — this "
+                                "check has lost the half that lets it fail")
+        rep.expect(cid, not problems,
+                   "the PDF exporter draws with fixed ink, never a dynamic "
+                   "appearance colour",
                    "; ".join(problems))
 
     cid = "layout/log-name-matches-folder"
