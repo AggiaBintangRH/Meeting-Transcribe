@@ -413,6 +413,155 @@ else
 fi
 
 # -------------------------------------------------------------
+# 3c. DIARIZATION ENGINE 3 — NeMo (its own venv, .venv-nemo)
+#     MarbleNet VAD -> multi-scale TitaNet-Large embeddings -> NME-SC spectral
+#     clustering (which estimates the speaker count itself).
+#     Selectable as diarization.engine = nemo.
+#
+#     ITS OWN INTERPRETER, the second sidecar after DiCoW to need one.
+#     nemo_toolkit 3.0.0 drags in lightning, hydra and a large pinned dependency
+#     tree that conflicts with the main .venv's MLX stack; a trial install into
+#     .venv was reverted on 2026-08-07 for exactly that reason. Do not "simplify"
+#     this into the main venv.
+#
+#     THE WEIGHTS ARE FETCHED HERE AND STORED AS LOCAL .nemo FILES under
+#     models/nemo/, because `ClusteringDiarizer` branches on
+#     `model_path.endswith('.nemo')`: a PATH is restored off disk, while a bare
+#     pretrained NAME goes to from_pretrained -> maybe_download_from_cloud ->
+#     https://api.ngc.nvidia.com/... at RUNTIME. On this Mac the names would work
+#     (the checkpoints sit in ~/.cache/torch/NeMo), and they would reach for the
+#     network on a client machine — the invisible-until-shipped shape this
+#     project keeps being bitten by.
+#
+#     THE URL IS NOT HARDCODED HERE. NeMo's own registry
+#     (`list_available_models()` -> PretrainedModelInfo.location) is the
+#     authority, and `_get_ngc_pretrained_model_info` is the exact NeMo function
+#     that resolves + downloads WITHOUT instantiating the model; the .nemo file
+#     is then copied out of NeMo's cache. Inventing an NGC URL here would be a
+#     second copy of a fact NeMo already owns.
+# -------------------------------------------------------------
+echo ""
+echo "==> Setting up the NeMo diarization runtime venv (.venv-nemo)..."
+NEMO_VENV="$SCRIPT_DIR/.venv-nemo"
+NEMO_PY="$NEMO_VENV/bin/python3"
+
+# Idempotent: skip the install when the venv already satisfies the pins.
+nemo_venv_ok() {
+  [ -x "$NEMO_PY" ] || return 1
+  "$NEMO_PY" - <<'EOF' >/dev/null 2>&1
+import sys
+import torch, omegaconf, soundfile  # noqa: F401
+from nemo.collections.asr.models import ClusteringDiarizer  # noqa: F401
+import nemo
+assert nemo.__version__.startswith("3.0."), nemo.__version__
+sys.exit(0)
+EOF
+}
+
+if nemo_venv_ok; then
+  echo "   OK: .venv-nemo already satisfies nemo_toolkit 3.0 + deps — skipping"
+else
+  if [ ! -x "$NEMO_PY" ]; then
+    echo "   creating $NEMO_VENV"
+    if [ -n "${PYBIN:-}" ]; then
+      "$PYBIN" -m venv "$NEMO_VENV" || FAILED+=(".venv-nemo creation")
+    elif find_uv; then
+      "$UV_BIN" venv --seed --python 3.12 "$NEMO_VENV" || FAILED+=(".venv-nemo creation")
+    else
+      echo "!! No usable Python found for .venv-nemo"
+      FAILED+=(".venv-nemo creation")
+    fi
+  fi
+  if [ -x "$NEMO_PY" ]; then
+    "$NEMO_VENV/bin/pip" install --quiet --upgrade pip wheel || true
+    # THE FILE REDIRECT IS NOT COSMETIC (the [Errno 35] lesson, build.sh B2/B2b).
+    # This script's stdout is piped to tee; nemo_toolkit pulls ~200 packages and
+    # pip's one enormous "Installing collected packages: …" line through a
+    # non-blocking pipe aborts the install with
+    # "OSError: [Errno 35] write could not complete without blocking".
+    # Writing to a file removes the non-blocking fd from pip's output path
+    # entirely, and --progress-bar off keeps the log small. The tail is surfaced
+    # on failure so nothing is hidden.
+    NEMO_PIP_LOG="$SCRIPT_DIR/logs/setup-pip-nemo.log"
+    echo "   installing nemo_toolkit==3.0.0 (log: $NEMO_PIP_LOG)"
+    # torchaudio and torchcodec are DELIBERATELY ABSENT from this list, and that
+    # absence is load-bearing: it makes the ffmpeg/torchcodec trap that bit
+    # Whisper, pyannote and spectral structurally impossible in this venv rather
+    # than merely avoided. NeMo's own audio path is soundfile/librosa. Adding
+    # either package here re-opens a trap `assert_no_torchcodec_use` cannot see.
+    if ! "$NEMO_VENV/bin/pip" install --progress-bar off --upgrade \
+          "nemo_toolkit[asr]==3.0.0" torch omegaconf soundfile \
+          >"$NEMO_PIP_LOG" 2>&1; then
+      echo "!! pip install FAILED — last 30 lines of $NEMO_PIP_LOG:"
+      tail -30 "$NEMO_PIP_LOG"
+      FAILED+=("NeMo venv deps (.venv-nemo)")
+    fi
+  fi
+fi
+
+echo ""
+echo "==> Fetching the NeMo diarization checkpoints into models/nemo/ ..."
+if [ -x "$NEMO_PY" ]; then
+  NEMO_MODEL_DIR="$SCRIPT_DIR/models/nemo"
+  mkdir -p "$NEMO_MODEL_DIR"
+  # Run with the sidecar's own offline env, minus HF_HUB_OFFLINE — this is the
+  # one moment the network is allowed, and it is a one-time download.
+  WANDB_MODE=disabled WANDB_DISABLED=true SENTRY_DSN="" \
+  NEMO_ONELOGGER_ENABLED=false ONE_LOGGER_ENABLED=false \
+  NEMO_MODEL_DIR="$NEMO_MODEL_DIR" \
+  "$NEMO_PY" - <<'EOF' || FAILED+=("NeMo diarization checkpoints")
+import os
+import pathlib
+import shutil
+import sys
+
+from nemo.collections.asr.models import (EncDecClassificationModel,
+                                         EncDecSpeakerLabelModel)
+
+dest = pathlib.Path(os.environ["NEMO_MODEL_DIR"])
+dest.mkdir(parents=True, exist_ok=True)
+
+# (class, pretrained name) — the classes ClusteringDiarizer itself restores
+# these with (`_init_speaker_model` / `_init_vad_model`).
+WANTED = ((EncDecSpeakerLabelModel, "titanet_large"),
+          (EncDecClassificationModel, "vad_multilingual_marblenet"))
+
+failed = False
+for cls, name in WANTED:
+    out = dest / f"{name}.nemo"
+    if out.exists() and out.stat().st_size > 100_000:
+        print(f"   OK: {name} already at {out} — skipping")
+        continue
+    try:
+        # NeMo's OWN resolver: looks the name up in list_available_models(),
+        # downloads from the location that registry records, and returns the
+        # cached path. No URL is spelled out anywhere in this script.
+        _, cached = cls._get_ngc_pretrained_model_info(name)
+        shutil.copy2(cached, out)
+        print(f"   OK: {name} -> {out} ({out.stat().st_size / 1e6:.1f} MB)")
+    except Exception as exc:
+        print(f"!! could not fetch {name}: {type(exc).__name__}: {exc}")
+        failed = True
+
+sys.exit(1 if failed else 0)
+EOF
+else
+  echo "!! .venv-nemo is missing — cannot fetch the NeMo checkpoints"
+  FAILED+=("NeMo diarization checkpoints")
+fi
+
+# The vendored inference config is what the sidecar loads (byte-identical to
+# NVIDIA-NeMo/Speech @ 6c57e73e; every deviation is applied in sidecar CODE so
+# each carries its measured justification). It rides scripts/ into the .app via
+# build.sh [B3], the same route as the MOSS helper and the spectral tree.
+if [ -f "$SCRIPT_DIR/scripts/nemo/vendor/diar_infer_general.yaml" ]; then
+  echo "    vendored config OK (scripts/nemo/vendor/diar_infer_general.yaml)"
+else
+  echo "!! scripts/nemo/vendor/diar_infer_general.yaml is missing — the NeMo engine will not run"
+  FAILED+=("scripts/nemo/vendor/diar_infer_general.yaml")
+fi
+
+# -------------------------------------------------------------
 # 4. VAD — Silero VAD v6.2.1 (weights ship inside the pip package)
 # -------------------------------------------------------------
 echo ""
@@ -760,6 +909,57 @@ EOF
 else
   echo "   MISSING: $DICOW_PY"
   FAILED+=("DiCoW runtime check (.venv-dicow missing)")
+fi
+
+# NeMo lives in .venv-nemo, so it too must be verified with THAT interpreter.
+# Import + the two LOCAL checkpoints, not a full pass: the sidecar loads them at
+# session start and a diarization run here would add minutes.
+echo ""
+echo "==> Verifying the NeMo diarization runtime (.venv-nemo)..."
+if [ -x "$NEMO_PY" ]; then
+  HF_HUB_OFFLINE=1 WANDB_MODE=disabled SENTRY_DSN="" \
+  NEMO_PROJECT_DIR="$SCRIPT_DIR" "$NEMO_PY" - <<'EOF'
+import os, pathlib, sys, traceback
+try:
+    import torch, omegaconf, soundfile, nemo  # noqa: F401
+    from nemo.collections.asr.models import ClusteringDiarizer  # noqa: F401
+    print(f"   OK: nemo_toolkit {nemo.__version__}, torch {torch.__version__}")
+    if not nemo.__version__.startswith("3.0."):
+        print("   FAILED: the sidecar's overrides were measured on nemo_toolkit 3.0.x")
+        sys.exit(1)
+    # THE FFMPEG TRAP, checked as an ABSENCE. Neither package may be here: NeMo
+    # decodes through soundfile/librosa, and torchcodec's dylibs reach ffmpeg
+    # only through a Homebrew-only LC_RPATH. If either ever appears, a future
+    # NeMo release could route audio through it and fail on a client Mac only.
+    import importlib.util
+    intruders = [m for m in ("torchaudio", "torchcodec")
+                 if importlib.util.find_spec(m) is not None]
+    if intruders:
+        print(f"   FAILED: {intruders} installed in .venv-nemo — the ffmpeg trap is "
+              f"supposed to be structurally impossible in this venv")
+        sys.exit(1)
+    print("   OK: no torchaudio/torchcodec in .venv-nemo (the ffmpeg trap cannot apply)")
+    root = pathlib.Path(os.environ["NEMO_PROJECT_DIR"])
+    for name in ("titanet_large.nemo", "vad_multilingual_marblenet.nemo"):
+        path = root / "models" / "nemo" / name
+        if not path.exists():
+            print(f"   FAILED: missing local checkpoint {path} — without it the "
+                  f"sidecar would fall back to nothing (it never uses NGC names)")
+            sys.exit(1)
+        print(f"   OK: {name} ({path.stat().st_size / 1e6:.1f} MB, local)")
+    cfg = omegaconf.OmegaConf.load(
+        root / "scripts" / "nemo" / "vendor" / "diar_infer_general.yaml")
+    print(f"   OK: vendored config loads (clustering keys: "
+          f"{len(cfg.diarizer.clustering.parameters)})")
+except Exception:
+    print("   FAILED: NeMo runtime — full traceback:")
+    traceback.print_exc(file=sys.stdout)
+    sys.exit(1)
+EOF
+  [ $? -eq 0 ] || FAILED+=("NeMo runtime check (.venv-nemo)")
+else
+  echo "   MISSING: $NEMO_PY"
+  FAILED+=("NeMo runtime check (.venv-nemo missing)")
 fi
 
 # -------------------------------------------------------------

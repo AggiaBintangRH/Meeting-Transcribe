@@ -375,24 +375,30 @@ extension AudioRecorder {
     /// Window counts are SUMMED rather than maxed: the passes can run at once and
     /// contend for the same GPU, so their durations add.
     ///
-    /// **`spectralPassSeconds` is the fourth pass, added 2026-08-04** — and it is
-    /// the case the doc comment above predicted. It is expressed in SECONDS rather
-    /// than in windows because the spectral engine has no windows: it is one call
-    /// over the whole recording, and its cost is a function of the recording's
-    /// length, not of a count. Callers pass exactly the number that engine's own
-    /// leg watchdog uses (`spectralWatchdogSeconds`), so the overlay can never give
-    /// up before the leg it is waiting on does. Zero when no spectral pass is
-    /// scheduled, which is what keeps every pre-existing budget identical.
+    /// **`batchPassSeconds` is the fourth pass, added 2026-08-04 as
+    /// `spectralPassSeconds` and renamed 2026-08-07 when NeMo became the second
+    /// engine to use it** — and it is the case the doc comment above predicted. It
+    /// is expressed in SECONDS rather than in windows because a whole-file batch
+    /// engine has no windows: it is one call over the whole recording, and its cost
+    /// is a function of the recording's length, not of a count. Callers pass
+    /// exactly the number that engine's own leg watchdog uses
+    /// (`batchPassWatchdogSeconds`), so the overlay can never give up before the leg
+    /// it is waiting on does. Zero when no batch pass is scheduled, which is what
+    /// keeps every pre-existing budget identical.
+    ///
+    /// ONE parameter for both engines rather than two, because they are mutually
+    /// exclusive: a session has at most one diarization engine, so a second field
+    /// could only ever be zero while the first was set.
     nonisolated static func stopWatchdogSeconds(chunkedFullPassWindows: Int,
                                                 mossFullPassWindows: Int,
-                                                spectralPassSeconds: Double = 0,
+                                                batchPassSeconds: Double = 0,
                                                 floor: Double = 600,
                                                 headroom: Double = 300) -> Double {
         let scheduled = max(0, chunkedFullPassWindows) + max(0, mossFullPassWindows)
-        let spectral = max(0, spectralPassSeconds)
-        guard scheduled > 0 || spectral > 0 else { return floor }
+        let batch = max(0, batchPassSeconds)
+        guard scheduled > 0 || batch > 0 else { return floor }
         let windowed = scheduled > 0 ? fullPassWatchdogSeconds(windowCount: scheduled) : 0
-        return max(floor, windowed + spectral + headroom)
+        return max(floor, windowed + batch + headroom)
     }
 
 

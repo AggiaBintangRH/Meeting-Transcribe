@@ -10,10 +10,11 @@ import XCTest
 /// (the MOSS card), a setting read in two places that could disagree about one
 /// meeting (the three locked diarization keys).
 ///
-/// The sweep is exhaustive over the settings that interact: 5 chunked models × 3
+/// The sweep is exhaustive over the settings that interact: 5 chunked models × 4
 /// diarization engines × 2 diarization on/off × 2 chunked on/off × 2 detector ×
-/// 2 repair × 2 aligner × 2 realtime = 1920 configurations. Every assertion below
-/// runs against every one of them.
+/// 2 repair × 2 aligner × 2 realtime = 2560 configurations (1920 before NeMo
+/// became the fourth engine, 2026-08-07). Every assertion below runs against every
+/// one of them.
 ///
 /// It is deliberately built from the PURE static rules, not from a live loader:
 /// those functions are what `buildSteps` and the teardown both read, so agreement
@@ -22,7 +23,8 @@ final class SettingsMatrixTests: XCTestCase {
 
     private let chunkedIDs = ["qwen3", "whisper", "granite", "voxtral", "moss"]
     private var engines: [String] {
-        [ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID, ModelLoader.mossEngineID]
+        [ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID,
+         ModelLoader.nemoEngineID, ModelLoader.mossEngineID]
     }
 
     /// One point of the matrix, and everything the rules say about it.
@@ -73,7 +75,7 @@ final class SettingsMatrixTests: XCTestCase {
     func testTheMatrixIsTheSizeItClaims() {
         var n = 0
         sweep { _ in n += 1 }
-        XCTAssertEqual(n, 5 * 3 * 2 * 2 * 2 * 2 * 2 * 2)
+        XCTAssertEqual(n, 5 * 4 * 2 * 2 * 2 * 2 * 2 * 2)
     }
 
     // MARK: - 1. Nothing is loaded that has nothing to do
@@ -101,7 +103,7 @@ final class SettingsMatrixTests: XCTestCase {
     }
 
     /// Repair needs somewhere to run: pyannote finds regions in its own turns,
-    /// MOSS and spectral only through the detector.
+    /// MOSS, spectral and NeMo only through the detector.
     func testRepairIsNeverWantedWithoutASourceOfRegions() {
         sweep { c in
             guard c.repairEngine != nil else { return }
@@ -230,8 +232,7 @@ final class SettingsMatrixTests: XCTestCase {
         }
         for m in ModelCatalog.diarizationEngines {
             let value = ModelCatalog.diarizationEngineValue(m)
-            XCTAssertTrue([ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID,
-                           ModelLoader.mossEngineID].contains(value),
+            XCTAssertTrue(self.engines.contains(value),
                           "\(m.name) maps to engine value '\(value)', which no rule matches")
         }
     }

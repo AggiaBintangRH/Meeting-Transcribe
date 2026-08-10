@@ -134,6 +134,7 @@ struct SettingsView: View {
             case .mossOwnASR:        return ("included", true)
             case .mossSecondProcess: return ("MOSS", false)
             case .spectral:          return ("spectral", false)
+            case .nemo:              return ("NeMo", false)
             default:                 return ("pyannote", false)
             }
         case .aligner:  return (alignEnabled ? "on" : "off", false)
@@ -327,7 +328,12 @@ struct SettingsView: View {
                      + "active: that detector reads the audio directly and hands its "
                      + "regions to the engine you pick here."
             }
-            return "The spectral engine assigns exactly one speaker per instant, so its "
+            // Named per engine rather than defaulted to "the spectral engine": a
+            // banner that names the wrong engine is worse than none, and with four
+            // engines the `default` arm is no longer a safe place to hide one.
+            let engineName = diarEngine == ModelLoader.nemoEngineID
+                ? "The NeMo engine" : "The spectral engine"
+            return "\(engineName) assigns exactly one speaker per instant, so its "
                  + "turns never intersect and it cannot tell repair where to work. Switch "
                  + "on Models → Detect overlap and this page becomes active: that detector "
                  + "reads the audio directly and hands its regions to the engine you pick "

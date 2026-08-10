@@ -21,6 +21,7 @@ final class ChunkedMasterSwitchTests: XCTestCase {
     private let moss = ModelLoader.mossEngineID
     private let pyannote = ModelLoader.pyannoteEngineID
     private let spectral = ModelLoader.spectralEngineID
+    private let nemo = ModelLoader.nemoEngineID
 
     // MARK: - The switch itself
 
@@ -63,7 +64,7 @@ final class ChunkedMasterSwitchTests: XCTestCase {
     /// anything from the chunked process, so their stack is the same either way.
     /// Without this the coupling above could quietly widen into every engine.
     func testTheOtherEnginesAreUnaffectedByTheSwitch() {
-        for engine in [pyannote, spectral] {
+        for engine in [pyannote, spectral, nemo] {
             for chunkedID in ["qwen3", "whisper", "moss"] {
                 XCTAssertEqual(
                     ModelLoader.wantedDiarizationStack(diarizationEnabled: true, engine: engine,
@@ -79,7 +80,7 @@ final class ChunkedMasterSwitchTests: XCTestCase {
     /// rule must not have been weakened by adding a second input.
     func testDiarizationOffStillKeepsNothing() {
         for chunkedOn in [true, false] {
-            for engine in [pyannote, moss, spectral] {
+            for engine in [pyannote, moss, spectral, nemo] {
                 XCTAssertNil(ModelLoader.wantedDiarizationStack(diarizationEnabled: false,
                                                                 engine: engine, chunkedID: "moss",
                                                                 chunkedEnabled: chunkedOn))
@@ -147,11 +148,13 @@ final class ChunkedMasterSwitchTests: XCTestCase {
         XCTAssertTrue(ModelLoader.diarizationEngineIsSelectable(moss, chunkedID: "moss"))
         XCTAssertFalse(ModelLoader.diarizationEngineIsSelectable(pyannote, chunkedID: "moss"))
         XCTAssertFalse(ModelLoader.diarizationEngineIsSelectable(spectralID, chunkedID: "moss"))
+        XCTAssertFalse(ModelLoader.diarizationEngineIsSelectable(nemo, chunkedID: "moss"))
         // With any other ASR, MOSS is the one NOT offered.
         for other in ["qwen3", "whisper", "granite", "voxtral"] {
             XCTAssertFalse(ModelLoader.diarizationEngineIsSelectable(moss, chunkedID: other))
             XCTAssertTrue(ModelLoader.diarizationEngineIsSelectable(pyannote, chunkedID: other))
             XCTAssertTrue(ModelLoader.diarizationEngineIsSelectable(spectralID, chunkedID: other))
+            XCTAssertTrue(ModelLoader.diarizationEngineIsSelectable(nemo, chunkedID: other))
         }
     }
 
@@ -161,7 +164,7 @@ final class ChunkedMasterSwitchTests: XCTestCase {
     /// fallback is written separately from the filter, so nothing else pairs them.
     func testTheFallbackEngineIsAlwaysOneTheRuleStillOffers() {
         for chunkedID in ["moss", "qwen3", "whisper", "granite", "voxtral"] {
-            let offered = [pyannote, spectral, moss].filter {
+            let offered = [pyannote, spectral, nemo, moss].filter {
                 ModelLoader.diarizationEngineIsSelectable($0, chunkedID: chunkedID)
             }
             XCTAssertFalse(offered.isEmpty, "\(chunkedID) offers no diarization engine at all")

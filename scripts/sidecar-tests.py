@@ -121,6 +121,15 @@ WESPEAKER_SERVICE = "wespeaker/wespeaker-service.py"
 # MOSS rule.
 SPECTRAL_SERVICE = "spectral/spectral-service.py"
 SPECTRAL_VENDOR = SCRIPTS / "spectral" / "vendor"
+# The FOURTH diarizer (2026-08-07): NVIDIA NeMo's ClusteringDiarizer (MarbleNet
+# VAD -> multi-scale TitaNet-Large -> NME-SC spectral clustering). Like spectral
+# it answers the same Swift caller with the same turns-only wire, so the same
+# drift check applies. It runs in `.venv-nemo`, its OWN interpreter — the second
+# sidecar after DiCoW to need one — which is why EVERY check below is pure: this
+# suite runs under the main `.venv`, where `import nemo` does not exist. Nothing
+# here loads a model, and nothing here needs to.
+NEMO_SERVICE = "nemo/nemo-service.py"
+NEMO_VENDOR = SCRIPTS / "nemo" / "vendor"
 
 # Pin the model cache the same way every sidecar does, so the in-process
 # white-box checks (which import mlx_audio directly) resolve offline too.
@@ -2458,6 +2467,672 @@ SPECTRAL_CHECKS = [
     "spectral/rejects-zero-frame-audio",
 ]
 
+# ================================================================ nemo group
+#
+# The FOURTH diarization engine (NVIDIA NeMo ClusteringDiarizer, 2026-08-07).
+#
+# EVERY CHECK HERE IS PURE — AST, source scan and a file hash. That is not a
+# style preference: NeMo runs in `.venv-nemo` and this suite runs under the main
+# `.venv`, where `import nemo` raises. Anything needing the engine itself has to
+# be a manual drive with the other interpreter, so what is pinned here is
+# everything that can be established WITHOUT it, which turns out to be all four
+# of the measured constants, the whole wire protocol and both refusals.
+NEMO_CHECKS = [
+    "nemo/protocol-matches-pyannote",
+    "nemo/wire-is-isolated-from-nemo-logging",
+    "nemo/no-live-chunk-branch",
+    "nemo/rejects-zero-frame-audio",
+    "nemo/offline-env-is-assigned",
+    "nemo/measured-constants-are-pinned",
+    "nemo/vendored-config-is-upstream",
+]
+
+# The vendored inference config, byte-identical to
+# NVIDIA-NeMo/Speech @ 6c57e73e83de967eed4d334c493ac313b9afd147,
+# examples/speaker_tasks/diarization/conf/inference/diar_infer_general.yaml.
+# Recorded from the upstream clone, so this is a provenance pin rather than a
+# self-fingerprint — the spectral/vendor-is-own precedent.
+NEMO_VENDORED_CONFIG = "diar_infer_general.yaml"
+NEMO_VENDORED_CONFIG_SHA = \
+    "f7b10d79cbf5f481f24453363167232e81759571046adb63e03e0bccf8d03ca7"
+
+# The four deviations from that config, each MEASURED on this M4 and each stated
+# at its constant in the sidecar. Re-declared here rather than read from the
+# sidecar for the reason every mirror in this file is: reading the value from the
+# thing under test makes the check agree with whatever it finds.
+NEMO_MEASURED_CONSTANTS = {
+    # MANDATORY on macOS. With the stock 1, Lightning's DataLoader spawns
+    # workers, NeMo's dynamically-created SpeechLabelEntity cannot be pickled,
+    # and the job dies with PicklingError before reading a frame.
+    "NUM_WORKERS": 0,
+    # diar_infer_general.yaml ships 10; `meeting` and `telephonic` upstream both
+    # already use 30. At 10, Meeting5People.wav (ground truth 5) returns FOUR
+    # speakers, losing the one holding 7 % of the speech.
+    "SPARSE_SEARCH_VOLUME": 30,
+    # Forces ONE global clustering. The stock long-form path (selected when the
+    # base-scale segment count exceeds this) COLLAPSED a real 48.2-minute
+    # recording to 1 speaker / 73 turns; forced-global gives 8 speakers / 324
+    # turns and is faster (170 s vs 227 s).
+    "EMBEDDINGS_PER_CHUNK": 10_000_000,
+    # Speaker count is AUTO on this engine and there is no Settings control, so
+    # this bound is the only thing standing between a 12-person meeting and a
+    # silent cap. The stock value is 8.
+    "MAX_NUM_SPEAKERS": 20,
+}
+
+
+def run_nemo(rep: Report, ctx):
+    import ast
+
+    source = (SCRIPTS / NEMO_SERVICE).read_text()
+    tree = ast.parse(source)
+
+    def module_constants(t):
+        """Module-level `NAME = <literal>` pairs, by AST — no import, no env."""
+        out = {}
+        for node in t.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name):
+                try:
+                    out[node.targets[0].id] = ast.literal_eval(node.value)
+                except Exception:  # noqa: BLE001 — not a literal; not our subject
+                    pass
+        return out
+
+    def function(t, name):
+        return next((n for n in ast.walk(t) if isinstance(n, ast.FunctionDef)
+                     and n.name == name), None)
+
+    # -- check 1: THE DRIFT DETECTOR, third application. Same argument as
+    #    `spectral/protocol-matches-pyannote`: this sidecar answers the SAME
+    #    Swift caller, so a reply key added, renamed or REORDERED in one file and
+    #    not the other silently drops a field for whichever engine was missed.
+    #
+    #    ONE DELIBERATE DIFFERENCE FROM THE SPECTRAL CHECK, and it is the whole
+    #    reason this is a separate check rather than a third arm of that one:
+    #    `emit` is NOT compared verbatim here. It cannot be — NeMo logs to stdout
+    #    (see check 2), so this service's `emit` writes to a private `WIRE` handle
+    #    instead of `sys.stdout`. What is compared is the thing that actually
+    #    matters, the BYTES: both modules' real `emit` are driven with the same
+    #    payloads and the output must match character for character. The other
+    #    three shared functions ARE compared verbatim, because nothing about the
+    #    wire isolation touches them.
+    if ctx.wants("nemo/protocol-matches-pyannote"):
+        cid = "nemo/protocol-matches-pyannote"
+        try:
+            # Importing the sidecar ASSIGNS its offline env vars into this
+            # process (that assignment is check 5's subject). Snapshot and
+            # restore, so a test run cannot leave WANDB_MODE/SENTRY_DSN behind
+            # for whatever runs next — the MT_PROFILE_DIR discipline applied to
+            # the environment.
+            touched = ("HF_HOME", "HF_HUB_OFFLINE", "WANDB_MODE", "WANDB_DISABLED",
+                       "SENTRY_DSN", "NEMO_ONELOGGER_ENABLED", "ONE_LOGGER_ENABLED")
+            before = {k: os.environ.get(k) for k in touched}
+            try:
+                nemo_mod, nemo_src = load_sidecar_module(NEMO_SERVICE, "mt_nemo_protocol")
+            finally:
+                for key, value in before.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+            pyan_mod, pyan_src = load_sidecar_module(PYANNOTE_SERVICE, "mt_pyannote_nemo")
+            problems = []
+
+            # (1) the shared plumbing, verbatim — emit deliberately excluded, see
+            #     the header. If `emit` ever becomes identical again that is not a
+            #     failure here; check 2 is what would notice the wire isolation
+            #     going away.
+            for name in ("fail", "brief_traceback", "log"):
+                a, b = _fn_source(pyan_src, name), _fn_source(nemo_src, name)
+                if a is None or b is None or a != b:
+                    problems.append(f"{name}(): pyannote={'absent' if a is None else 'differs'}"
+                                    f" vs nemo={'absent' if b is None else 'differs'}")
+
+            # (2) the wire bytes. `WIRE` starts as `sys.stdout` precisely so an
+            #     importer sees no fd surgery, which is what lets `capture_stdout`
+            #     work on both modules identically; it is repointed only by
+            #     `install_wire()`, which only `main()` calls.
+            if nemo_mod.WIRE is not sys.stdout:
+                problems.append("importing nemo-service.py already moved WIRE off "
+                                "sys.stdout — the fd surgery must happen in "
+                                "install_wire(), called from main(), or merely "
+                                "importing this sidecar steals its importer's stdout")
+            wire_cases = [
+                {"type": "status", "text": "LOADED"},
+                {"type": "error", "text": "Audio not found: /nope.wav"},
+                {"type": "result", "audio": "/tmp/m.wav",
+                 "segments": [{"start": 0.5, "end": 1.25, "label": "SPEAKER_00"}]},
+                {"type": "result", "audio": "/tmp/m.wav", "segments": [],
+                 "stream": "remote"},
+            ]
+
+            def capture_wire(payload):
+                """Drive nemo's REAL emit and collect what it wrote.
+
+                `contextlib.redirect_stdout` (what `capture_stdout` uses) cannot
+                see this one: `WIRE` was bound to the true `sys.stdout` OBJECT at
+                import, so rebinding the NAME `sys.stdout` afterwards does not
+                reach it — the JSON would go straight to the terminal and the
+                comparison would read as an empty reply. Swapping the module's
+                own `WIRE` is the honest capture, and it also proves `emit` reads
+                that global at call time rather than having captured a handle.
+                """
+                import io
+                buffer = io.StringIO()
+                saved = nemo_mod.WIRE
+                nemo_mod.WIRE = buffer
+                try:
+                    nemo_mod.emit(payload)
+                finally:
+                    nemo_mod.WIRE = saved
+                return buffer.getvalue().splitlines()
+
+            for payload in wire_cases:
+                mine = capture_stdout(pyan_mod.emit, payload)
+                theirs = capture_wire(payload)
+                if mine != theirs:
+                    problems.append(f"emit({payload['type']}): pyannote wrote {mine} "
+                                    f"but nemo wrote {theirs}")
+
+            # (3) the REAL `wire_segments` of each, lifted by AST. Both take the
+            #     same (start, end, label) tuple shape — NeMo's `read_rttm`
+            #     produces exactly what pyannote's `itertracks` does — so this
+            #     pins {start,end,label}, the key ORDER, and that neither can emit
+            #     id/name/conf. Identity leaking out of a pipeline stage is the
+            #     structural failure the pyannote/wespeaker split exists to make
+            #     impossible, and it must be impossible for this engine too.
+            pyan_wire = extract_nested(pyan_mod, pyan_src, "main", "wire_segments", {})
+            nemo_wire = extract_nested(nemo_mod, nemo_src, "main", "wire_segments", {})
+            turns = [(0.5, 1.25, "SPEAKER_00"), (1.25, 3.0, "SPEAKER_01")]
+            a_json, b_json = json.dumps(pyan_wire(turns)), json.dumps(nemo_wire(turns))
+            if a_json != b_json:
+                problems.append(f"wire_segments: pyannote produced {a_json} but "
+                                f"nemo produced {b_json}")
+            for banned in ('"id"', '"name"', '"conf"'):
+                if banned in b_json:
+                    problems.append(f"nemo's segments carry {banned} — identity "
+                                    f"leaked back into a pipeline stage")
+
+            # (4) the reply SHAPES. Only the types both services can produce:
+            #     pyannote also has `chunk_result`, which nemo must NOT have —
+            #     that asymmetry is check 3's subject, not a drift.
+            pyan_shapes, nemo_shapes = _emit_shapes(pyan_src), _emit_shapes(nemo_src)
+            for label, shapes in (("pyannote", pyan_shapes), ("nemo", nemo_shapes)):
+                result_shapes = {(k, e) for kind, k, e, _ in shapes if kind == "result"}
+                if result_shapes != {(("type", "audio", "segments"), True)}:
+                    problems.append(f"{label}: `result` emit shapes were {result_shapes}, "
+                                    f'expected exactly ("type","audio","segments") in '
+                                    f"that order with **echo — `audio` is load-bearing "
+                                    f"(it is how the app knows which file to hand the "
+                                    f"identity stage)")
+                status_shapes = {k for kind, k, _, _ in shapes if kind == "status"}
+                if status_shapes != {("type", "text")}:
+                    problems.append(f"{label}: `status` emit shapes were {status_shapes}")
+                errors = {k for kind, k, _, _ in shapes if kind == "error"}
+                if errors != {("type", "text")}:
+                    problems.append(f"{label}: `error` emit shapes were {errors}, "
+                                    f'expected only ("type","text")')
+                # ABSENT MEANS OFFICE: every reply raised once the job's stream is
+                # known must splice `**echo`. The sole exception in both files is
+                # the bad-job-line reply, emitted BEFORE `stream` has been read.
+                naked = [(kind, k) for kind, k, echo, loop in shapes if loop and not echo]
+                if len(naked) != 1:
+                    problems.append(f"{label}: {len(naked)} replies inside the read loop "
+                                    f"do not splice **echo ({naked}) — expected exactly "
+                                    f"one (the bad-job-line reply, emitted before the "
+                                    f"job's stream is known)")
+
+            # (5) and the office/remote rule itself, verbatim across the files.
+            def echo_rule(src):
+                return [ast.unparse(n) for n in ast.walk(ast.parse(src))
+                        if isinstance(n, ast.Assign)
+                        and ast.unparse(n.targets[0]) in ("stream", "is_remote", "echo")]
+
+            a_rule, b_rule = echo_rule(pyan_src), echo_rule(nemo_src)
+            if a_rule != b_rule or len(a_rule) != 3:
+                problems.append(f"the stream/echo rule differs: pyannote {a_rule} vs "
+                                f"nemo {b_rule}")
+
+            rep.expect(cid, not problems,
+                       f"3 shared functions verbatim, {len(wire_cases)} wire messages "
+                       f"byte-identical out of a DIFFERENT emit (nemo writes to WIRE, "
+                       f"not sys.stdout — see nemo/wire-is-isolated-from-nemo-logging), "
+                       f"wire_segments agrees, the shared reply shapes are exact, and "
+                       f"the absent-stream-means-office rule is the same 3 statements",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare nemo with pyannote: {exc!r}")
+
+    # -- check 2: THE WIRE IS ISOLATED FROM NEMO'S OWN LOGGING.
+    #
+    #    A REAL DEFECT, caught on the first drive of this sidecar (2026-08-07):
+    #    one job put 28 `[NeMo I …]` lines on fd 1, interleaved with the JSON, and
+    #    a line-by-line decoder died on the first of them. No other sidecar has
+    #    this problem — pyannote, spectral and MOSS all log to stderr — so nothing
+    #    that already exists would catch it coming back.
+    #
+    #    THREE things are asserted, and the third is the one a "cleanup" breaks:
+    #      (a) fd 1 is duplicated to a private handle and fd 1 itself is pointed
+    #          at fd 2, so C-level writes and tqdm move too — a `sys.stdout`
+    #          rebinding alone would not,
+    #      (b) `emit` writes to that handle and NOT to sys.stdout,
+    #      (c) the installer runs BEFORE nemo is imported. Importing NeMo alone
+    #          prints, and a logging handler bound to fd 1 at import time would
+    #          hold the wire for the life of the process. This is an ordering
+    #          requirement that nothing else can express — the spectral VAD shim
+    #          precedent.
+    #
+    #    By AST, not grep: `install_wire`'s docstring explains the trap at length,
+    #    so a textual search matches its own explanation.
+    if ctx.wants("nemo/wire-is-isolated-from-nemo-logging"):
+        cid = "nemo/wire-is-isolated-from-nemo-logging"
+        try:
+            problems = []
+            installer = function(tree, "install_wire")
+            if installer is None:
+                problems.append("install_wire() is gone — NeMo's own logger writes to "
+                                "stdout and would interleave with the JSON protocol")
+            else:
+                calls = [ast.unparse(n) for n in ast.walk(installer)
+                         if isinstance(n, ast.Call)]
+                if not any(c.startswith("os.dup(1)") or c == "os.dup(1)" for c in calls):
+                    problems.append("install_wire never calls os.dup(1) — without a "
+                                    "private duplicate of the original fd 1 there is "
+                                    "nowhere left to write the protocol")
+                if "os.dup2(2, 1)" not in calls:
+                    problems.append("install_wire never calls os.dup2(2, 1) — rebinding "
+                                    "sys.stdout alone leaves C-level writes, tqdm and "
+                                    "Lightning's progress bars on the wire")
+                if "global WIRE" not in ast.unparse(installer):
+                    problems.append("install_wire does not rebind the module-level WIRE")
+
+            # (b) emit writes to WIRE, and nowhere in the file does anything write
+            #     to sys.stdout.
+            emit_fn = function(tree, "emit")
+            if emit_fn is None:
+                problems.append("emit() is gone")
+            else:
+                body = ast.unparse(emit_fn)
+                if "WIRE.write" not in body:
+                    problems.append("emit() does not write to WIRE")
+                if "sys.stdout.write" in body:
+                    problems.append("emit() writes to sys.stdout — NeMo's log lines "
+                                    "share that stream and would corrupt the protocol")
+
+            # (c) ORDERING: installed before NeMo is imported. The import is found
+            #     by AST rather than assumed to be on a particular line.
+            nemo_imports = [n.lineno for n in ast.walk(tree)
+                            if isinstance(n, ast.ImportFrom)
+                            and (n.module or "").startswith("nemo")]
+            install_calls = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+                             and isinstance(n.func, ast.Name)
+                             and n.func.id == "install_wire"]
+            if not nemo_imports:
+                problems.append("nothing imports nemo — the ordering this check "
+                                "measures no longer has a subject")
+            elif not install_calls:
+                problems.append("install_wire is defined but never called — the wire "
+                                "is not actually isolated")
+            elif min(install_calls) > min(nemo_imports):
+                problems.append(f"install_wire is first called at line "
+                                f"{min(install_calls)}, AFTER nemo is imported at line "
+                                f"{min(nemo_imports)} — importing NeMo prints, and a "
+                                f"handler bound to fd 1 at import time keeps the wire "
+                                f"for the whole process")
+
+            rep.expect(cid, not problems,
+                       "install_wire dups fd 1 to a private handle and points fd 1 at "
+                       "fd 2 before nemo is imported, and emit writes to that handle "
+                       "rather than to sys.stdout",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not read the wire isolation: {exc!r}")
+
+    # -- check 3: FINAL-ONLY, and pyannote is not. The
+    #    `moss/diar-has-no-file-branch` and `spectral/no-live-chunk-branch`
+    #    precedent, for the same reason and with the same both-directions
+    #    discipline.
+    #
+    #      * ADDING a live/chunk branch here is the symmetry-minded mistake and
+    #        the DANGEROUS one: NME-SC runs its eigengap analysis over the whole
+    #        file's affinity matrix, so a 30 s window would be counted and
+    #        clustered on its own and its labels would mean nothing across
+    #        windows. That failure is already documented on MOSS — two different
+    #        people both numbered S01 — and it is SILENT.
+    #      * REMOVING pyannote's is the other direction, and the positive half is
+    #        what makes this check able to fail at all.
+    if ctx.wants("nemo/no-live-chunk-branch"):
+        cid = "nemo/no-live-chunk-branch"
+        try:
+            def live_shape(src):
+                t = ast.parse(src)
+                gets, compared, dict_keys = set(), set(), set()
+                for node in ast.walk(t):
+                    if (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "get"
+                            and ast.unparse(node.func.value) == "job"
+                            and node.args
+                            and isinstance(node.args[0], ast.Constant)):
+                        gets.add(node.args[0].value)
+                    if isinstance(node, ast.Compare):
+                        for c in node.comparators:
+                            if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                                compared.add(c.value)
+                    if isinstance(node, ast.Dict):
+                        dict_keys |= {k.value for k in node.keys
+                                      if isinstance(k, ast.Constant)
+                                      and isinstance(k.value, str)}
+                return gets, compared, {kind for kind, _, _, _ in _emit_shapes(src)}, dict_keys
+
+            n_gets, n_cmp, n_kinds, n_keys = live_shape(source)
+            p_gets, p_cmp, p_kinds, p_keys = live_shape(
+                (SCRIPTS / PYANNOTE_SERVICE).read_text())
+            problems = []
+
+            # The NEGATIVE half: no live path anywhere in nemo.
+            if "chunk" in n_cmp:
+                problems.append('nemo compares a command against "chunk" — a windowed '
+                                "pass through a globally-clustering engine returns "
+                                "labels that look continuous and are not")
+            if "chunk_result" in n_kinds or "chunk_result" in n_keys:
+                problems.append("nemo emits a chunk_result reply")
+            if "window_start" in n_gets or "window_start" in n_keys:
+                problems.append("nemo reads or emits window_start — the only reason to "
+                                "know a window's offset is to serve one")
+            # …and that the refusal really is there, so "no chunk branch" is a
+            # deliberate refusal rather than an unhandled command falling through
+            # to the whole-file pass.
+            if "final" not in n_cmp:
+                problems.append('nemo never compares the command against "final" — a '
+                                "non-final job would fall through to the whole-file "
+                                "pass instead of being refused")
+
+            # The POSITIVE half: pyannote really does have the live path this
+            # engine is declining to copy.
+            if "chunk" not in p_cmp:
+                problems.append('pyannote no longer compares a command against "chunk"')
+            if "chunk_result" not in p_kinds:
+                problems.append("pyannote no longer emits chunk_result")
+            if "window_start" not in p_gets:
+                problems.append("pyannote no longer reads window_start")
+
+            rep.expect(cid, not problems,
+                       "nemo has no chunk comparison, no chunk_result and no "
+                       "window_start, and refuses any cmd != final — while pyannote "
+                       "has all three (so this check can fail in either direction)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare the read loops: {exc!r}")
+
+    # -- check 4: a recording whose WAV header declares ZERO FRAMES is REFUSED,
+    #    not answered with an empty result. Verbatim spectral semantics, and the
+    #    same reasoning: `AVAudioFile` writes the `data` chunk size only on
+    #    release, so an app killed mid-recording leaves it at 0 over a file full
+    #    of audio (13 such recordings, ~1.7 GB, found on the owner's machine
+    #    2026-08-05). Without the guard, VAD finds no speech in an empty array
+    #    and a whole meeting comes back as having no speakers, silently.
+    #
+    #    The ORDERING half is the point: a guard AFTER the diarize call could
+    #    never fire. The message is also required to name the repair tool — an
+    #    error that does not say the audio is recoverable sends the user to
+    #    delete the file.
+    if ctx.wants("nemo/rejects-zero-frame-audio"):
+        cid = "nemo/rejects-zero-frame-audio"
+        try:
+            problems = []
+            zero_tests = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)
+                          and isinstance(n.left, ast.Name) and n.left.id == "frames"
+                          and any(isinstance(c, ast.Constant) and c.value == 0
+                                  for c in n.comparators)]
+            if not zero_tests:
+                problems.append("nothing compares a frame count against 0 — an "
+                                "unreadable recording would come back as `segments: []`")
+
+            emits = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Name) and n.func.id == "emit"]
+            guard_emits = [n for n in emits
+                           if any(isinstance(k, ast.Constant)
+                                  and isinstance(k.value, str)
+                                  and "repair-wav-header" in k.value
+                                  for a in n.args if isinstance(a, ast.Dict)
+                                  for k in a.values)]
+            if not guard_emits:
+                problems.append("no error names scripts/tools/repair-wav-header.py — "
+                                "the user is told the recording is empty but not that "
+                                "it is recoverable")
+
+            # The engine entry point, read from the source rather than assumed:
+            # NeMo answers through `ClusteringDiarizer(...).diarize()`, so THAT
+            # call is what the guard must precede.
+            runs = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute) and n.func.attr == "diarize"]
+            if not runs:
+                problems.append("nothing calls .diarize() — the engine entry point this "
+                                "guard is positioned against is gone")
+            elif zero_tests and min(n.lineno for n in zero_tests) > min(runs):
+                problems.append("the zero-frame guard sits AFTER the diarize call — it "
+                                "could never fire before the pass returns nothing")
+
+            rep.expect(cid, not problems,
+                       "a 0-frame recording is refused with an error that names the "
+                       "repair tool, and the guard runs before ClusteringDiarizer.diarize()",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not read the zero-frame guard: {exc!r}")
+
+    # -- check 5: the offline environment is ASSIGNED, never `setdefault`.
+    #
+    #    The `pyannote/telemetry-is-off` precedent, and its most important detail:
+    #    hard requirement #1 is ABSOLUTE, so an inherited environment must not be
+    #    able to switch any of these back on. `setdefault` would let a stray
+    #    `WANDB_MODE=online` in the launching environment win silently.
+    #
+    #    HONESTY ABOUT WHAT THIS IS: unlike pyannote's, these variables did NOT
+    #    fix a measured leak. A DNS-recording probe over a full diarization job
+    #    (instrumentation positive-controlled against a real outbound request)
+    #    recorded ZERO lookups both WITH the block and with a BARE environment.
+    #    They are precautionary — nemo_toolkit installs wandb, sentry-sdk and
+    #    nv-one-logger, and a later release wiring up an exporter is exactly the
+    #    silent regression this project pins rather than notices. Read by AST, not
+    #    by importing: an import cannot tell `setdefault` from an assignment,
+    #    which is the whole distinction being pinned.
+    if ctx.wants("nemo/offline-env-is-assigned"):
+        cid = "nemo/offline-env-is-assigned"
+        try:
+            required = {"HF_HUB_OFFLINE", "WANDB_MODE", "SENTRY_DSN"}
+            assigned, setdefaults = {}, []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Subscript):
+                    target = node.targets[0]
+                    if ast.unparse(target.value) == "os.environ" \
+                            and isinstance(target.slice, ast.Constant):
+                        try:
+                            assigned[target.slice.value] = ast.literal_eval(node.value)
+                        except Exception:  # noqa: BLE001 — a computed path, e.g. HF_HOME
+                            assigned[target.slice.value] = "<computed>"
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "setdefault"
+                        and ast.unparse(node.func.value) == "os.environ"):
+                    setdefaults.append(ast.unparse(node))
+
+            problems = []
+            missing = sorted(required - set(assigned))
+            if missing:
+                problems.append(f"never assigned: {missing} — nemo_toolkit installs "
+                                f"wandb, sentry-sdk and nv-one-logger, and this is the "
+                                f"only place they are switched off")
+            if setdefaults:
+                problems.append(f"os.environ.setdefault used ({setdefaults}) — an "
+                                f"inherited value would then win, and the 100%-offline "
+                                f"requirement is absolute rather than a default")
+            if assigned.get("WANDB_MODE") not in (None, "disabled"):
+                problems.append(f"WANDB_MODE is set to {assigned['WANDB_MODE']!r}, "
+                                f"expected 'disabled'")
+            if assigned.get("SENTRY_DSN") not in (None, ""):
+                problems.append(f"SENTRY_DSN is set to {assigned['SENTRY_DSN']!r} — "
+                                f"sentry sends nothing only with an EMPTY dsn")
+
+            rep.expect(cid, not problems,
+                       f"{len(assigned)} offline/telemetry variables are ASSIGNED "
+                       f"({', '.join(sorted(assigned))}) and none uses setdefault, so an "
+                       f"inherited value cannot switch any of them back on",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not read the offline environment: {exc!r}")
+
+    # -- check 6: the four MEASURED constants, and the LOCAL checkpoints.
+    #
+    #    Each constant is a deviation from the vendored upstream config that cost
+    #    a real measurement, and each fails SILENTLY if it drifts back:
+    #    `num_workers` is a crash, but the other three are wrong ANSWERS —
+    #    a speaker lost, or a 48-minute meeting collapsed to one speaker — with
+    #    nothing in the transcript saying so. Pinning the constant is not enough
+    #    on its own, so the FORWARDING is asserted too: a constant that
+    #    `build_config` has stopped reading is the `overlap.detect.model` defect.
+    #
+    #    The checkpoint half is the offline requirement. `ClusteringDiarizer`
+    #    branches on `model_path.endswith('.nemo')`: a PATH is restored off disk,
+    #    a bare pretrained NAME goes to NGC over the network. Both spellings work
+    #    on this Mac (the checkpoints are in ~/.cache/torch/NeMo), so this is
+    #    invisible-until-shipped — the class this project keeps being bitten by.
+    if ctx.wants("nemo/measured-constants-are-pinned"):
+        cid = "nemo/measured-constants-are-pinned"
+        try:
+            problems = []
+            constants = module_constants(tree)
+            for name, want in NEMO_MEASURED_CONSTANTS.items():
+                got = constants.get(name)
+                if got != want:
+                    problems.append(f"{name} is {got!r}, expected {want!r} — see the "
+                                    f"measurement recorded at its declaration")
+
+            build = function(tree, "build_config")
+            if build is None:
+                problems.append("build_config() is gone")
+            else:
+                forwarded = {ast.unparse(n) for n in ast.walk(build)
+                             if isinstance(n, ast.Assign)}
+                wanted_assigns = {
+                    "cfg.num_workers = NUM_WORKERS",
+                    "params.sparse_search_volume = SPARSE_SEARCH_VOLUME",
+                    "params.embeddings_per_chunk = EMBEDDINGS_PER_CHUNK",
+                    "cfg.diarizer.speaker_embeddings.model_path = SPEAKER_MODEL_PATH",
+                    "cfg.diarizer.vad.model_path = VAD_MODEL_PATH",
+                    # MAX_NUM_SPEAKERS joined this set on 2026-08-10 and used to
+                    # need a special case below. It reached the config through a
+                    # per-job `max_speakers` argument, so it could only be checked
+                    # as "set from the argument", never by name — and the audit
+                    # that removed the argument found nothing had ever SENT it.
+                    # Now the constant is assigned directly, which is what lets it
+                    # be pinned the same way as the other five. The stock 8 would
+                    # silently cap a larger meeting.
+                    "params.max_num_speakers = MAX_NUM_SPEAKERS",
+                }
+                lost = sorted(wanted_assigns - forwarded)
+                if lost:
+                    problems.append(f"build_config no longer forwards {lost} — the "
+                                    f"constant would still be pinned above while the "
+                                    f"config quietly used upstream's value")
+
+            # The checkpoints: local absolute .nemo paths under models/nemo, and
+            # NOTHING assigns a bare pretrained name to a model_path.
+            for name in ("SPEAKER_MODEL_PATH", "VAD_MODEL_PATH", "MODEL_DIR"):
+                if name not in {t.id for n in tree.body
+                                if isinstance(n, ast.Assign)
+                                for t in n.targets if isinstance(t, ast.Name)}:
+                    problems.append(f"{name} is gone")
+            joins = {t.id: ast.unparse(n.value) for n in tree.body
+                     if isinstance(n, ast.Assign)
+                     for t in n.targets if isinstance(t, ast.Name)}
+            if joins.get("MODEL_DIR") != "os.path.join(BASE, 'models', 'nemo')":
+                problems.append(f"MODEL_DIR is {joins.get('MODEL_DIR')!r} — it must be "
+                                f"rooted at BASE, which is three dirname calls up "
+                                f"(one folder deeper resolves to scripts/models)")
+            for name in ("SPEAKER_MODEL_PATH", "VAD_MODEL_PATH"):
+                expr = joins.get(name, "")
+                if "MODEL_DIR" not in expr or ".nemo" not in expr:
+                    problems.append(f"{name} = {expr!r} — it must be a LOCAL .nemo path "
+                                    f"under MODEL_DIR; a bare pretrained name sends "
+                                    f"ClusteringDiarizer to api.ngc.nvidia.com at "
+                                    f"runtime, which works here and fails on a client Mac")
+            # THE THREE-DIRNAME TRAP, pinned directly: two would resolve BASE to
+            # scripts/, MODEL_DIR to scripts/models, py_compile would pass and it
+            # would fail at the first model load.
+            base = joins.get("BASE", "")
+            if base.count("os.path.dirname") != 3:
+                problems.append(f"BASE has {base.count('os.path.dirname')} dirname "
+                                f"calls, expected 3 — this file is one folder under "
+                                f"scripts/, so two would point MODEL_DIR at "
+                                f"scripts/models and fail only at the first model load")
+
+            rep.expect(cid, not problems,
+                       f"the {len(NEMO_MEASURED_CONSTANTS)} measured constants hold "
+                       f"their values AND are still forwarded into the config, the two "
+                       f"checkpoints are local .nemo paths under models/nemo, and BASE "
+                       f"has its three dirname calls",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not read the constants: {exc!r}")
+
+    # -- check 7: the vendored config is still upstream's, byte for byte.
+    #
+    #    The `spectral/vendor-is-own` precedent. The whole design here is "vendor
+    #    verbatim, override in CODE", so that every deviation sits next to the
+    #    measurement justifying it. An edit to the YAML would move a value with no
+    #    comment, no measurement and nothing pointing at it — and because the
+    #    sidecar's own overrides are applied AFTERWARDS, an edit to a parameter the
+    #    sidecar also sets would be silently invisible while an edit to any other
+    #    parameter would silently take effect.
+    if ctx.wants("nemo/vendored-config-is-upstream"):
+        cid = "nemo/vendored-config-is-upstream"
+        try:
+            problems = []
+            path = NEMO_VENDOR / NEMO_VENDORED_CONFIG
+            if not path.exists():
+                problems.append(f"{path} is missing — the sidecar loads it at every "
+                                f"job and refuses to start without it")
+            else:
+                got = hashlib.sha256(path.read_bytes()).hexdigest()
+                if got != NEMO_VENDORED_CONFIG_SHA:
+                    problems.append(f"{NEMO_VENDORED_CONFIG} is NOT upstream's file "
+                                    f"({got} != {NEMO_VENDORED_CONFIG_SHA}) — it is "
+                                    f"vendored VERBATIM and every deviation belongs in "
+                                    f"sidecar code, beside its measurement")
+
+            # And that the sidecar loads THIS copy — its own vendor dir, not
+            # another service's (the MOSS `asr-vendor-is-own-and-identical` rule)
+            # and not a path that happens to resolve today.
+            loads = {t.id: ast.unparse(n.value) for n in tree.body
+                     if isinstance(n, ast.Assign)
+                     for t in n.targets if isinstance(t, ast.Name)}
+            expr = loads.get("VENDORED_CONFIG")
+            if expr is None:
+                problems.append("VENDORED_CONFIG is gone")
+            else:
+                try:
+                    resolved = pathlib.Path(eval(  # noqa: S307 — our own source
+                        expr, {"os": os, "BASE": str(PROJECT),
+                               "__file__": str(SCRIPTS / NEMO_SERVICE)}))
+                except Exception as exc:  # noqa: BLE001
+                    resolved = None
+                    problems.append(f"VENDORED_CONFIG {expr!r} could not be resolved: "
+                                    f"{exc!r}")
+                if resolved is not None and resolved.resolve() != path.resolve():
+                    problems.append(f"VENDORED_CONFIG resolves to {resolved} — it must "
+                                    f"be this service's OWN {path}; pointing at another "
+                                    f"tree works until that folder moves")
+
+            rep.expect(cid, not problems,
+                       f"{NEMO_VENDORED_CONFIG} is byte-identical to upstream "
+                       f"(NVIDIA-NeMo/Speech @ 6c57e73e) and the sidecar loads its own "
+                       f"copy — every deviation lives in code, beside its measurement",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not check the vendored config: {exc!r}")
+
+
 # ============================================================== tools group
 #
 # Utilities under scripts/tools/ that the app does not launch but that recover
@@ -3631,6 +4306,7 @@ LAYOUT_CHECKS = [
     "layout/log-name-matches-folder",
     "layout/tail-window-start-is-recorded-not-derived",
     "layout/diarization-settings-locked-per-session",
+    "layout/batch-engines-ignore-final-pass",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -4023,6 +4699,54 @@ def run_layout(rep: Report, ctx):
                    "lockDiarizationSettings(), and nowhere else",
                    "; ".join(problems))
 
+    cid = "layout/batch-engines-ignore-final-pass"
+    if ctx.wants(cid):
+        # `diarization.finalPass` may not be READ by either whole-file batch
+        # engine — office pass or remote pass.
+        #
+        # Found by the 2026-08-10 audit, and it had been losing data since
+        # 2026-08-05. The office pass already ignored the key (`runsBatchOfficePass`
+        # does not take it) because under a batch engine the stop pass IS the
+        # labels. The REMOTE pass still read it, while `DiarizationTab` HIDES the
+        # toggle under these engines — so a `false` left behind by an earlier
+        # pyannote session deleted every remote label, with no message and no
+        # control able to undo it. A value outliving its control, which the
+        # 2026-08-06 settings pass exists to forbid.
+        #
+        # The POSITIVE half is what makes this able to fail at all: pyannote's own
+        # remote pass MUST still read the key, because there the toggle is visible
+        # and must be honoured. Without it, a file that had simply stopped doing
+        # remote diarization would pass.
+        needle = 'forKey: "diarization.finalPass"'
+        audio_dir = SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+
+        def _code(name):
+            return "\n".join(l for l in (audio_dir / name).read_text().splitlines()
+                             if not l.strip().startswith("//"))
+
+        problems = []
+        for name in ("AudioRecorder+Spectral.swift", "AudioRecorder+Nemo.swift"):
+            code = _code(name)
+            if needle in code:
+                problems.append(f"{name} reads diarization.finalPass — a batch "
+                                f"engine's stop pass IS its labels, and the toggle "
+                                f"is hidden under it, so a stored value would be "
+                                f"unreachable and silently destructive")
+            if "finalPass: true" not in code:
+                problems.append(f"{name} does not pass finalPass: true to "
+                                f"remoteStopMode — the caller must state its "
+                                f"engine's truth rather than read the key")
+        pyannote_remote = _code("AudioRecorder+RemoteDiarization.swift")
+        if needle not in pyannote_remote:
+            problems.append("AudioRecorder+RemoteDiarization.swift no longer reads "
+                            "diarization.finalPass — pyannote's toggle is visible "
+                            "and must still be honoured, so this check has lost the "
+                            "half that lets it fail")
+        rep.expect(cid, not problems,
+                   "neither batch engine reads diarization.finalPass (both pass "
+                   "true), while pyannote's remote pass still honours it",
+                   "; ".join(problems))
+
     cid = "layout/log-name-matches-folder"
     if ctx.wants(cid):
         rep.expect(cid, not log_problems,
@@ -4158,6 +4882,7 @@ GROUPS = [
     ("moss", MOSS_CHECKS, run_moss),
     ("pyannote", PYANNOTE_CHECKS, run_pyannote),
     ("spectral", SPECTRAL_CHECKS, run_spectral),
+    ("nemo", NEMO_CHECKS, run_nemo),
     ("wespeaker", WESPEAKER_CHECKS, run_wespeaker),
 ]
 

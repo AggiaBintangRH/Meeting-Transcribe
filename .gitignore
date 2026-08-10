@@ -80,6 +80,10 @@ dist/
 /.build-cache
 /.claude
 /.venv-dicow
+# The NeMo diarization runtime — 1.7 GB, rebuilt by download-best-models.sh 3c.
+# Listed beside .venv-dicow because `.venv/` above does NOT cover it: that
+# pattern is an exact directory name, not a prefix.
+/.venv-nemo
 
 # Secrets — never commit. Use .env.example as the template.
 .env

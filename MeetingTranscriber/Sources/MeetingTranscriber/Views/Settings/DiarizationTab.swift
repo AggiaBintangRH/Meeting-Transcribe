@@ -2,8 +2,9 @@ import SwiftUI
 
 /// Models → Diarization: pick the engine, then its settings.
 ///
-/// Three engines with genuinely different shapes, so the tab shows only the
-/// selected one's blocks. Everything under `pyannoteSettings` is pyannote-specific
+/// Four engines in three genuinely different shapes (pyannote live+stop; spectral
+/// and NeMo whole-file batch; MOSS per chunk), so the tab shows only the selected
+/// one's blocks. Everything under `pyannoteSettings` is pyannote-specific
 /// — a live pass, a cluster threshold and an overlap mode are all things the other
 /// two simply do not have — and showing a control that does nothing is the exact
 /// complaint the Overlap tab already had to fix once.
@@ -45,7 +46,10 @@ struct DiarizationTab: View {
     private var isMoss: Bool { engine == ModelLoader.mossEngineID }
 
     private var engineBoxTitle: String {
-        isMoss ? "MOSS" : (isSpectral ? "SPECTRAL" : "PYANNOTE")
+        if isMoss { return "MOSS" }
+        if isSpectral { return "SPECTRAL" }
+        if isNemo { return "NEMO" }
+        return "PYANNOTE"
     }
 
     /// MOSS keeps its OWN stop pair (`moss.finalPass` / `moss.continueOnStop`) —
@@ -54,6 +58,17 @@ struct DiarizationTab: View {
     private var stopPassBinding: Binding<Bool> { isMoss ? $mossFinalPass : $finalPass }
     private var tailBinding: Binding<Bool> { isMoss ? $mossTailOnly : $continueOnStop }
     private var isSpectral: Bool { engine == ModelLoader.spectralEngineID }
+    /// NeMo, the fourth engine (2026-08-07). It has the SPECTRAL shape exactly —
+    /// no live pass, one whole-file pass at Stop, no tail — so everywhere below it
+    /// is grouped with spectral rather than given a branch of its own.
+    private var isNemo: Bool { engine == ModelLoader.nemoEngineID }
+    /// The two WHOLE-FILE BATCH engines. Shared pyannote controls apply to
+    /// neither: there is no live pass to time, no live labels for a tail to
+    /// continue from, and the stop pass is not optional — it IS the labels.
+    /// `runsBatchOfficePass` reads none of the three, so hiding them here is not
+    /// hiding something still in force; it is the UI agreeing with a rule that
+    /// already ignores them.
+    private var isBatchEngine: Bool { isSpectral || isNemo }
     var body: some View {
         Group {
             
@@ -63,13 +78,9 @@ struct DiarizationTab: View {
             // same shape as the Chunked tab. The bindings follow the engine
             // because MOSS keeps its own pair (`moss.*`) — their defaults differ,
             // so they are not one key with two readers.
-            // NOTHING SHARED APPLIES UNDER SPECTRAL (owner, 2026-08-06). It has no
-            // live pass, so there is no interval to time and no live labels for a
-            // tail to continue from; and the stop pass is not optional there, it
-            // IS the labels. `runsSpectralOfficePass` reads none of the three, so
-            // hiding them here is not hiding something still in force — it is the
-            // UI agreeing with a rule that already ignored them.
-            if !isSpectral {
+            // NOTHING SHARED APPLIES UNDER EITHER BATCH ENGINE (owner, 2026-08-06;
+            // NeMo joined 2026-08-07) — see `isBatchEngine` for the whole reason.
+            if !isBatchEngine {
             SettingBlock(title: "Run at stop") {
                 SettingToggle(label: "Run a diarization pass at stop", isOn: stopPassBinding)
                 Text("One more pass after you stop, to finalise speaker labels.")
@@ -123,7 +134,7 @@ struct DiarizationTab: View {
             // nine and fourteen blocks of pure prose between them, which is a
             // manual, not a settings page. Each keeps ONE line — the one that
             // prevents a real failure — and nothing else.
-            if !isMoss && !isSpectral {
+            if !isMoss && !isBatchEngine {
                 ModelOptionsBox(title: "PYANNOTE SETTINGS",
                                 note: "Only for the engine selected below.") {
                     pyannoteSettings
@@ -131,6 +142,35 @@ struct DiarizationTab: View {
             } else if isSpectral {
                 Text("No settings. This engine has no live pass — it diarizes the whole "
                      + "recording once, after you press Stop, every time.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isNemo {
+                // TWO lines, not nine blocks of prose (the 2026-08-06 rule): what
+                // this engine does differently, and what it still gives you. The
+                // second half is the part a user would otherwise have to discover —
+                // it is the same identity path pyannote uses, so nothing about
+                // profiles or renaming changes here, unlike under MOSS.
+                //
+                // `spk` IS CALLED OUT SEPARATELY, and the wording is the 2026-08-10
+                // audit's. This block used to say all three "work normally", which
+                // was true of the wiring and wrong in practice: `spk` is the cosine
+                // `assign()` returns on a MATCH, and a first appearance has none. A
+                // batch engine calls `identify` ONCE over a store the session just
+                // reset, so every voice is a first appearance and no row gets a
+                // number. pyannote differs only because it identifies per 30 s
+                // chunk, and chunk 2 onward matches chunk 1's fresh profiles.
+                // A promise the architecture cannot keep is worse than a caveat.
+                Text("No settings. This engine has no live pass and counts the speakers "
+                     + "itself — it diarizes the whole recording once, after you press "
+                     + "Stop, every time. There is no speaker-count control on purpose: "
+                     + "the count is always automatic.\n\n"
+                     + "Saved voice profiles and renaming work normally. spk confidence "
+                     + "usually will not appear: it is a match score, and this engine "
+                     + "identifies every speaker in one pass against a store that starts "
+                     + "empty, so there is nothing yet to match against.\n\n"
+                     + "It cannot mark two people talking at once, so overlap "
+                     + "repair needs Models → Detect overlap switched on.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -150,7 +190,7 @@ struct DiarizationTab: View {
                 Text(chunkedModel == "moss"
                      ? "MOSS transcribes and labels in one pass, so with MOSS as the chunked "
                        + "model it is also the diarizer. Pick a different chunked model to use "
-                       + "pyannote or spectral."
+                       + "pyannote, spectral or NeMo."
                      : "MOSS diarization is offered only when MOSS is also the chunked model. "
                        + "The engine was set back to pyannote.")
                     .font(.system(size: 11))

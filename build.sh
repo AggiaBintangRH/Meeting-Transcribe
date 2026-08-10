@@ -1,11 +1,15 @@
 #!/bin/bash
 # Build a fully self-contained, portable Meeting Transcriber.app:
 #   • release Swift build + themed icon (via package-app.sh)
-#   • TWO standalone python-build-standalone interpreters:
-#       - Resources/python       — the main MLX stack (every model but DiCoW)
+#   • THREE standalone python-build-standalone interpreters:
+#       - Resources/python       — the main MLX stack (every model but DiCoW/NeMo)
 #       - Resources/.venv-dicow  — DiCoW only; it pins transformers 4.55 while
 #                                  the MLX stack needs 5.x (hard conflict, so
 #                                  they can never share one interpreter)
+#       - Resources/.venv-nemo   — the NeMo diarization engine only; nemo_toolkit
+#                                  3.0.0 pins lightning/hydra and a large tree
+#                                  that conflicts with the MLX stack (a trial
+#                                  install into .venv was reverted 2026-08-07)
 #   • scripts/ and models/ bundled as siblings under Contents/Resources
 #   • ad-hoc signed and verified
 #
@@ -20,6 +24,7 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 CACHE="$ROOT/.build-cache"
 PBS_DIR="$CACHE/python-runtime"
 PBS_DICOW_DIR="$CACHE/python-runtime-dicow"
+PBS_NEMO_DIR="$CACHE/python-runtime-nemo"
 APP_NAME="Meeting Transcriber"
 
 # Fail the build if a bundled native lib cannot actually load on a client Mac.
@@ -205,6 +210,83 @@ prune_pyannoteai_sdk() {
   echo "    Pruned pyannoteai_sdk from $label (cloud client; this build is offline-only)."
 }
 
+# `nemo_toolkit[asr]` installs THREE telemetry SDKs. None of them was measured
+# leaking — a DNS-recording probe over a full diarization job recorded ZERO
+# lookups, both with `nemo-service.py`'s env block applied and with a BARE
+# environment — so this is the `pyannoteai_sdk` rule rather than the pyannote
+# telemetry one: ABSENCE BEATS INERT in a 100 %-offline build, and the sidecar's
+# five env assignments stay as the belt to this braces.
+#
+# ONLY TWO OF THE THREE CAN GO, and which is which was determined by a shadow-stub
+# import test (2026-08-07), not by reading imports:
+#   • wandb (76 MB) + sentry_sdk (4.6 MB) — shadowed with modules that raise
+#     ImportError, `from nemo.collections.asr.models import ClusteringDiarizer`
+#     still succeeds AND a full job over recordings/Meeting5People.wav still
+#     returned the correct 5 speakers / 9 turns. Prunable.
+#   • nv_one_logger (1.0 MB) — CANNOT be pruned, and this is not a judgement
+#     call: `nemo/core/classes/modelPT.py` imports `nemo.lightning.callback_group`
+#     → `one_logger_callback` → `from nv_one_logger.api.config import
+#     OneLoggerConfig` UNCONDITIONALLY, at import time. Shadowing it makes the
+#     whole engine unimportable. It is left in place, and it self-reports
+#     "No exporters were provided" — it collects nothing by default.
+prune_nemo_telemetry() {
+  local root="$1" label="$2" site pkg gone=""
+  site="$(find "$root/lib" -maxdepth 2 -type d -name site-packages | head -1)"
+  for pkg in wandb sentry_sdk; do
+    [[ -d "$site/$pkg" ]] || continue
+    # Both dist-info dirs use the package dir's own spelling on this install
+    # (`wandb-0.28.1`, `sentry_sdk-2.66.1`), verified rather than assumed —
+    # pip normalises `sentry-sdk` to `sentry_sdk` for the metadata directory.
+    rm -rf "$site/$pkg" "$site"/"$pkg"-*.dist-info
+    gone="$gone $pkg"
+  done
+  if [[ -z "$gone" ]]; then
+    echo "    wandb/sentry_sdk absent ($label) — nothing to prune."
+  else
+    echo "    Pruned$gone from $label (telemetry SDKs; this build is offline-only)."
+    echo "      nv_one_logger is KEPT — nemo/core/classes/modelPT.py imports it"
+    echo "      unconditionally, so removing it makes the engine unimportable."
+  fi
+}
+
+# `.venv-nemo` has NO `torchaudio` and NO `torchcodec`, and that absence is the
+# whole reason `nemo-service.py` carries no `load_waveform` shim (NeMo's own audio
+# path is soundfile/librosa). This project has hit the ffmpeg/torchcodec trap
+# THREE times — Whisper (37c16bac9), pyannote (2026-07-30), spectral (2026-08-04)
+# — and each time the fix was "hand it samples, not a path". Here the trap is
+# structurally impossible instead, which is a stronger position, so the invariant
+# is PINNED rather than left to hold by luck: a future `pip install torchaudio`
+# into this venv re-opens it silently, and `assert_no_torchcodec_use` cannot see
+# it (that gate reads OUR sidecars' tokens, and the call would be inside NeMo).
+#
+# Checked BOTH ways — the directory is gone AND the interpreter really cannot
+# import it — because a leftover `.dist-info` with no package, or a package with
+# no `.dist-info`, would each pass only one half.
+assert_no_torch_audio_stack() {
+  local root="$1" label="$2" site pkg bad=0
+  site="$(find "$root/lib" -maxdepth 2 -type d -name site-packages | head -1)"
+  for pkg in torchaudio torchcodec; do
+    if [[ -d "$site/$pkg" ]]; then
+      echo "    $pkg IS PRESENT in $label: $site/$pkg" >&2
+      bad=1
+    fi
+    if "$root/bin/python3" -c "import $pkg" 2>/dev/null; then
+      echo "    $pkg IMPORTS in $label — it must not be installed there" >&2
+      bad=1
+    fi
+  done
+  if [[ "$bad" == "1" ]]; then
+    echo "ERROR: the NeMo runtime has picked up torchaudio/torchcodec." >&2
+    echo "       Both need Homebrew ffmpeg dylibs that no client Mac has, and" >&2
+    echo "       nemo-service.py is written on the guarantee that neither exists" >&2
+    echo "       (no load_waveform shim, no decode indirection). Remove them from" >&2
+    echo "       .venv-nemo — see download-best-models.sh section 3c — or add the" >&2
+    echo "       shim and re-derive that whole argument before relaxing this gate." >&2
+    exit 1
+  fi
+  echo "    No-torchaudio/torchcodec gate OK ($label — the ffmpeg trap is structurally absent here)."
+}
+
 echo "==> Project root: $ROOT"
 mkdir -p "$CACHE"
 
@@ -249,10 +331,40 @@ echo "==> [B2] Provisioning portable Python..."
 # --- resolve the newest matching PBS asset from the latest release ----------
 echo "    Resolving python-build-standalone asset..."
 RELEASE_JSON="$CACHE/pbs-latest.json"
-curl -fsSL \
-  -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest" \
-  -o "$RELEASE_JSON"
+# Written to a TEMP file, never straight over the cache: `curl -o` truncates its
+# target before it knows the request succeeded, so a failed refresh used to
+# destroy the one copy that would have rescued the build.
+#
+# The fetch is allowed to fail. GitHub's unauthenticated API is 60 requests/hour
+# PER IP, shared with everything else on the machine, so a build can be blocked
+# by something that has nothing to do with it — this was hit on 2026-08-10 with
+# the correct tarball already sitting in the cache. A project whose headline
+# requirement is offline operation should not have a build that needs GitHub to
+# tell it something it already knows.
+#
+# This weakens no gate. The asset is still resolved from real release metadata,
+# still checked against the cache by exact filename, and every later gate
+# (imports, relocatability, signing) is untouched. Falling back is announced
+# LOUDLY, because a silently stale release pin is how a build quietly stops
+# tracking upstream.
+if curl -fsSL --max-time 30 \
+     -H "Accept: application/vnd.github+json" \
+     "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest" \
+     -o "$RELEASE_JSON.tmp" 2>/dev/null; then
+  mv "$RELEASE_JSON.tmp" "$RELEASE_JSON"
+else
+  rm -f "$RELEASE_JSON.tmp"
+  if [[ ! -s "$RELEASE_JSON" ]]; then
+    echo "ERROR: could not reach the GitHub releases API and no cached release" >&2
+    echo "       metadata exists at $RELEASE_JSON." >&2
+    echo "       Check the network, or wait out the API rate limit:" >&2
+    echo "         curl -s https://api.github.com/rate_limit" >&2
+    exit 1
+  fi
+  echo "    !! GitHub API unreachable (rate limit or offline)."
+  echo "    !! Using CACHED release metadata from $(date -r "$RELEASE_JSON" '+%Y-%m-%d %H:%M')."
+  echo "    !! This build will not see a newer upstream Python than that snapshot."
+fi
 
 # All aarch64 macOS install_only_stripped 3.12.x asset URLs in this release.
 # NB: the '+' between version and build date is percent-encoded as %2B in the
@@ -464,6 +576,150 @@ prune_pyannoteai_sdk "$RES/.venv-dicow" "DiCoW runtime"
 check_relocatable "$RES/.venv-dicow" "DiCoW runtime"
 
 # ===========================================================================
+# B2c — THIRD portable interpreter for the NeMo diarization engine (.venv-nemo)
+#
+# nemo_toolkit 3.0.0 pins lightning, hydra and a large dependency tree that
+# conflicts with the main runtime's MLX stack; a trial install into .venv was
+# reverted on 2026-08-07 for exactly that reason. So the app ships three.
+#
+# `NemoService` resolves its interpreter through
+# `PythonRuntime.command(forScript:venvName: ".venv-nemo")`, which probes
+# `Contents/Resources/.venv-nemo/bin/python3` when bundled — which is why the copy
+# target below is that exact path, and why this stage needed NO Swift change.
+#
+# THIS STAGE IS THE ONE THAT WAS SKIPPED FOR DiCoW ON 2026-07-27 and shipped a
+# `.app` that threw "The DiCoW runtime (.venv-dicow) is missing" on a client
+# machine. B2b is the correction; this is B2b's shape applied to the third venv.
+# Reuses the PBS tarball B2 already downloaded — no third download.
+# ===========================================================================
+echo ""
+echo "==> [B2c] Provisioning portable Python for NeMo diarization..."
+
+# LOUD, never silent. Building without this venv would produce an app whose
+# NeMo engine card is selectable in Settings and dies at session start.
+if [[ ! -x "$ROOT/.venv-nemo/bin/pip" ]]; then
+  echo "ERROR: .venv-nemo is missing — cannot bundle the NeMo diarization runtime." >&2
+  echo "       Run ./download-best-models.sh (section 3c) first, then rebuild." >&2
+  exit 1
+fi
+
+FROZEN_NEMO="$CACHE/requirements-frozen-nemo.txt"
+echo "    Freezing .venv-nemo packages..."
+"$ROOT/.venv-nemo/bin/pip" freeze --exclude-editable > "$FROZEN_NEMO.raw"
+# The `git+` strip below is the failure that shipped a broken DiCoW: a VCS-only
+# dependency vanishes here and the bundle is quietly missing it. VERIFIED for
+# this venv rather than assumed — `nemo_toolkit==3.0.0` and all 127 of its
+# companions are plain PyPI pins, so nothing is lost. The guard stays because a
+# future `pip install git+…` into .venv-nemo must fail the build, not the app.
+grep -vE '^pip==|file://|@ file://|git\+' "$FROZEN_NEMO.raw" > "$FROZEN_NEMO" || true
+if grep -qE 'file://|git\+' "$FROZEN_NEMO"; then
+  echo "ERROR: local (file://) or VCS (git+) requirements remain after strip:" >&2
+  grep -nE 'file://|git\+' "$FROZEN_NEMO" >&2
+  exit 1
+fi
+# A stripped line is invisible in the bundle, so say what went and what stayed.
+NEMO_STRIPPED="$(( $(grep -c . "$FROZEN_NEMO.raw") - $(grep -c . "$FROZEN_NEMO") ))"
+echo "    $(wc -l < "$FROZEN_NEMO" | tr -d ' ') packages to install ($NEMO_STRIPPED stripped as pip/local/VCS)."
+if ! grep -qE '^nemo[-_]toolkit==3\.0\.0' "$FROZEN_NEMO"; then
+  echo "ERROR: nemo_toolkit==3.0.0 is not in the frozen requirements." >&2
+  echo "       MSDD was removed in 3.0.0 and nemo-service.py is written against" >&2
+  echo "       that; a different pin changes the pipeline. Frozen list says:" >&2
+  grep -iE '^nemo' "$FROZEN_NEMO" >&2 || echo "       (no nemo package at all)" >&2
+  exit 1
+fi
+
+NEW_SHA_NEMO="$(shasum "$FROZEN_NEMO" | awk '{print $1}')"
+SHA_FILE_NEMO="$CACHE/requirements-nemo.sha"
+OLD_SHA_NEMO="$(cat "$SHA_FILE_NEMO" 2>/dev/null || echo "")"
+
+if [[ "$NEW_SHA_NEMO" == "$OLD_SHA_NEMO" && -x "$PBS_NEMO_DIR/bin/python3" ]]; then
+  echo "    Requirements unchanged and runtime present — skipping reinstall."
+else
+  echo "    (Re)extracting interpreter + installing packages..."
+  rm -rf "$PBS_NEMO_DIR"
+  mkdir -p "$PBS_NEMO_DIR"
+  tar -xzf "$ASSET_PATH" -C "$PBS_NEMO_DIR" --strip-components=1
+  # Same non-blocking-terminal protection as B2 and B2b: pip's output goes to a
+  # file, never to a terminal fd that can raise OSError [Errno 35]. This venv is
+  # the largest of the three (~128 packages incl. torch), so its
+  # "Installing collected packages: …" line is the longest single write in the
+  # whole build — the exact shape that failure takes.
+  PIP_LOG_NEMO="$CACHE/build-pip-install-nemo.log"
+  if ! "$PBS_NEMO_DIR/bin/python3" -m pip install --no-compile --progress-bar off -q \
+        -r "$FROZEN_NEMO" >"$PIP_LOG_NEMO" 2>&1; then
+    echo "    pip install FAILED — last 30 lines of $PIP_LOG_NEMO:"
+    tail -30 "$PIP_LOG_NEMO"
+    exit 1
+  fi
+  echo "    Installed $(grep -c . "$FROZEN_NEMO") packages."
+  echo "$NEW_SHA_NEMO" > "$SHA_FILE_NEMO"
+fi
+
+echo "    Copying NeMo interpreter into bundle..."
+rm -rf "$RES/.venv-nemo"
+cp -Rc "$PBS_NEMO_DIR" "$RES/.venv-nemo"
+
+# Import gate (mandatory), with a VERSION ASSERT. NeMo 3.0.0 removed MSDD and
+# `nemo-service.py` is written against the ClusteringDiarizer-only 3.0 surface,
+# so a silent upgrade OR downgrade changes the pipeline rather than breaking
+# loudly. The freeze pin above catches a drifted requirement; this catches a
+# drifted INSTALL, which is not the same thing.
+#
+# THE PAUSE IS EXPECTED. NeMo's cold import is ~51 s (it walks its whole
+# collections tree). Announced so it is not mistaken for a hang.
+echo "    Import gate (NeMo — this takes ~51 s, NeMo's cold import is slow; not a hang)..."
+"$RES/.venv-nemo/bin/python3" -c "
+import nemo
+from nemo.collections.asr.models import ClusteringDiarizer
+assert nemo.__version__.startswith('3.0.'), 'expected nemo_toolkit 3.0.x, got ' + nemo.__version__
+import torch, omegaconf, soundfile
+print('NEMO IMPORTS OK', nemo.__version__)
+"
+
+# --- vendored-config gate (mandatory) --------------------------------------
+# The same shape as [B2]'s vendored-helper gate, for the same reason: the
+# upstream inference config is VENDORED at scripts/nemo/vendor/, so the ONLY way
+# it reaches the bundle is by riding scripts/ in [B3]. There is no pip fallback
+# and no default — `build_config()` starts with `OmegaConf.load(VENDORED_CONFIG)`,
+# so a bundle that lost this 6 KB file has a NeMo engine that fails at the first
+# job with "the vendored NeMo config is missing".
+#
+# It is LOADED, not merely stat'd, and through the BUNDLED interpreter: a
+# truncated or unparseable YAML is exactly as fatal as an absent one, and only
+# `OmegaConf.load` can tell the difference. The four keys read below are the ones
+# `build_config()` overwrites — a config that parsed but had lost the diarizer
+# tree would still fail at the first job.
+echo "    Vendored-config gate (NeMo)..."
+if ! "$RES/.venv-nemo/bin/python3" - "$ROOT/scripts/nemo/vendor/diar_infer_general.yaml" <<'PY'; then
+import sys
+from omegaconf import OmegaConf
+cfg = OmegaConf.load(sys.argv[1])
+for key in ("diarizer.speaker_embeddings.model_path",
+            "diarizer.vad.model_path",
+            "diarizer.clustering.parameters.sparse_search_volume",
+            "diarizer.clustering.parameters.embeddings_per_chunk"):
+    if OmegaConf.select(cfg, key, default="\0") == "\0":
+        raise SystemExit(f"vendored NeMo config has no `{key}`")
+print("VENDOR OK (nemo -> diar_infer_general.yaml)")
+PY
+  echo "ERROR: scripts/nemo/vendor/diar_infer_general.yaml is missing or unloadable." >&2
+  echo "       nemo-service.py's build_config() starts from that file and has no" >&2
+  echo "       fallback, so the .app would ship a NeMo engine that fails at its" >&2
+  echo "       first job. Restore it from NVIDIA-NeMo/Speech @ 6c57e73e," >&2
+  echo "       examples/speaker_tasks/diarization/conf/inference/, then rebuild." >&2
+  exit 1
+fi
+
+echo "    Portability checks (NeMo)..."
+# `prune_torchcodec` is deliberately NOT called here. The gate below asserts
+# torchcodec was never installed in the first place, which is the stronger
+# statement — pruning would make an absence indistinguishable from a removal.
+assert_no_torch_audio_stack "$RES/.venv-nemo" "NeMo runtime"
+prune_nemo_telemetry "$RES/.venv-nemo" "NeMo runtime"
+prune_pyannoteai_sdk "$RES/.venv-nemo" "NeMo runtime"
+check_relocatable "$RES/.venv-nemo" "NeMo runtime"
+
+# ===========================================================================
 # B3 — scripts + models (siblings under Resources/)
 # ===========================================================================
 echo ""
@@ -493,6 +749,11 @@ echo "                     (moss-diar/vendor/moss_transcribe_diarize preserved: 
 # only installable form pulls `wespeakerruntime`, which downloads ONNX weights at
 # runtime, so this copy is the engine.
 echo "                     (spectral/vendor/diarize preserved: $([[ -f "$RES/scripts/spectral/vendor/diarize/torch_embedder.py" ]] && echo yes || echo NO))"
+# NeMo's vendored item is a CONFIG, not a package — but it has the same property
+# that earns a line here: no pip fallback, no default, and `build_config()` cannot
+# start without it. [B2c]'s gate already refuses to build if it is gone; this is
+# what makes its arrival in the bundle visible in the log.
+echo "                     (nemo/vendor/diar_infer_general.yaml preserved: $([[ -f "$RES/scripts/nemo/vendor/diar_infer_general.yaml" ]] && echo yes || echo NO))"
 
 if [[ "${MT_SKIP_MODELS:-0}" == "1" ]]; then
   echo "    MT_SKIP_MODELS=1 — skipping 16GB models copy."
@@ -520,6 +781,11 @@ codesign --force --sign - "$RES/python/bin/"python3* 2>/dev/null || true
 find "$RES/.venv-dicow" \( -name '*.so' -o -name '*.dylib' \) -print0 \
   | xargs -0 -n 50 -P 8 codesign --force --sign - 2>/dev/null || true
 codesign --force --sign - "$RES/.venv-dicow/bin/"python3* 2>/dev/null || true
+# And the NeMo interpreter — same rule, and it is the biggest of the three
+# (torch's own dylibs plus ~128 packages).
+find "$RES/.venv-nemo" \( -name '*.so' -o -name '*.dylib' \) -print0 \
+  | xargs -0 -n 50 -P 8 codesign --force --sign - 2>/dev/null || true
+codesign --force --sign - "$RES/.venv-nemo/bin/"python3* 2>/dev/null || true
 codesign --force --deep --sign - "$APP"
 
 echo "    Verifying signature..."
@@ -575,7 +841,7 @@ echo "    dist/README-INSTALL.txt written."
 
 echo ""
 echo "==> Manifest:"
-for d in python .venv-dicow models scripts; do
+for d in python .venv-dicow .venv-nemo models scripts; do
   if [[ -d "$RES/$d" ]]; then
     printf "    %-10s %s\n" "$d" "$(du -sh "$RES/$d" | awk '{print $1}')"
   else

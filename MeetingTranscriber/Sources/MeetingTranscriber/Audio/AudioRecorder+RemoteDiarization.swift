@@ -19,7 +19,10 @@ extension AudioRecorder {
         // whole remote stream at ~230 MB/hour for a pass that reads the Remote WAV
         // and never looks at it. Same shape as the `chunkAudio` leak found on
         // 2026-07-31, caught here before it could ship.
-        guard !spectralDiarizationActive else { remoteDiarAudio = []; return }
+        // NEMO takes the same guard for the same reason — see `diarizeLiveChunk`.
+        guard !spectralDiarizationActive, !nemoDiarizationActive else {
+            remoteDiarAudio = []; return
+        }
         guard remoteStreamActive, let service = modelLoader.pyannote else { return }
         let liveOn = diarLiveEnabled
         guard liveOn else {

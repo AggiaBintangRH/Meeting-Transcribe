@@ -114,11 +114,12 @@ final class AppLogRollingTests: XCTestCase {
     /// is shared by two engines on purpose.
     func testTheAppOwnedLogNamesAreDomainsNotServices() {
         let appOwned = ["position-diarization", "moss-diarization",
-                        "spectral-diarization", "dual-stream",
+                        "spectral-diarization", "nemo-diarization", "dual-stream",
                         "overlap-repair-decisions"]
         let services = ["whisper", "qwen3", "granite", "voxtral", "moss-asr",
                         "moss-diar", "aligner", "pyannote", "wespeaker",
-                        "nemotron", "vad", "dicow", "mossformer2", "spectral"]
+                        "nemotron", "vad", "dicow", "mossformer2", "spectral",
+                        "nemo"]
         for name in appOwned {
             XCTAssertFalse(services.contains(name),
                            "\(name) collides with a sidecar log — two writers on "

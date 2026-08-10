@@ -119,9 +119,32 @@ enum ModelCatalog {
         hfRepo: "pyannote/wespeaker-voxceleb-resnet34-LM"
     )
 
+    /// The NEMO engine — NVIDIA NeMo's `ClusteringDiarizer` (nemo_toolkit 3.0.0,
+    /// Apache 2.0): MarbleNet VAD → multi-scale TitaNet-Large embeddings → NME-SC
+    /// spectral clustering, which estimates the speaker count ITSELF → multi-scale
+    /// label fusion. A WHOLE-FILE pass at Stop and nothing else, like spectral.
+    ///
+    /// `hfRepo` is NOT an HF repo id: both checkpoints are `.nemo` files
+    /// downloaded flat into `models/nemo/`, so `isInstalled` special-cases this
+    /// entry the way it does silero and mossformer2. The string names the folder
+    /// rather than a hub path, and nothing else reads it.
+    ///
+    /// Measured on this M4 before it was offered at all: 16–23× realtime on MPS,
+    /// 5 speakers / 9 segments on `Meeting5People.wav` and 8 speakers / 324 turns
+    /// on a real 48.2-minute meeting. Its cold import is ~51 s — the slowest load
+    /// in the app — and its peak RSS scales with the audio (1.15 GB for 98 s,
+    /// 13.33 GB for 67 min).
+    static let nemoDiarization = ModelInfo(
+        id: "nemo",
+        name: "NVIDIA NeMo clustering diarization",
+        detail: "MarbleNet VAD → TitaNet-Large embeddings → NME-SC clustering · counts speakers itself · whole recording at stop",
+        badges: ["PyTorch MPS", "whole-file only", "Apache 2.0", "own runtime"],
+        hfRepo: "nemo"
+    )
+
     /// Engines offered on Settings → Models → Diarization (`diarization.engine`).
     static let diarizationEngines: [ModelInfo] = [diarization, spectralDiarization,
-                                                  mossDiarization]
+                                                  nemoDiarization, mossDiarization]
 
     /// The `diarization.engine` VALUE a given engine card selects.
     ///
@@ -145,6 +168,7 @@ enum ModelCatalog {
         switch model.id {
         case mossDiarization.id:     return ModelLoader.mossEngineID
         case spectralDiarization.id: return ModelLoader.spectralEngineID
+        case nemoDiarization.id:     return ModelLoader.nemoEngineID
         default:                     return ModelLoader.pyannoteEngineID
         }
     }
@@ -154,6 +178,7 @@ enum ModelCatalog {
         switch engine {
         case ModelLoader.mossEngineID:     return mossDiarization
         case ModelLoader.spectralEngineID: return spectralDiarization
+        case ModelLoader.nemoEngineID:     return nemoDiarization
         default:                           return diarization
         }
     }
@@ -257,6 +282,19 @@ enum ModelCatalog {
             let path = modelsDir
                 .appendingPathComponent("mossformer2/mossformer2-librimix-2spk/masknet.ckpt")
             return fm.fileExists(atPath: path.path)
+        }
+        if model.id == nemoDiarization.id {
+            // Non-standard layout, the mossformer2 precedent: NeMo's checkpoints
+            // are two flat `.nemo` archives under models/nemo/, not an HF-hub
+            // cache. BOTH are required and both are checked — the sidecar hands
+            // `ClusteringDiarizer` two absolute paths and a missing one fails deep
+            // inside the pipeline at Stop, which is the worst moment to find out.
+            // (Local paths, never NeMo's pretrained NAMES, is also what keeps the
+            // NGC downloader out of a 100 %-offline build.)
+            let dir = modelsDir.appendingPathComponent("nemo")
+            return ["titanet_large.nemo", "vad_multilingual_marblenet.nemo"].allSatisfy {
+                fm.fileExists(atPath: dir.appendingPathComponent($0).path)
+            }
         }
         let hubName = "models--" + model.hfRepo.replacingOccurrences(of: "/", with: "--")
         return fm.fileExists(atPath: modelsDir.appendingPathComponent("hub/\(hubName)").path)

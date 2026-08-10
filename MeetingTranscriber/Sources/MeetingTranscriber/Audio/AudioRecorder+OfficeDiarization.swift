@@ -282,7 +282,13 @@ extension AudioRecorder {
         // the audio would be dropped correctly — but stating the rule at the top
         // keeps a future edit to that condition from resurrecting the ~230 MB/hour
         // accumulation for a pass that reads the recording file instead.
-        guard !spectralDiarizationActive else { chunkAudio = []; chunkAudioStart = lastDiarBoundary; return }
+        // NEMO IS THE SAME SHAPE and takes the same guard: NME-SC counts and
+        // clusters globally, `NemoService` has no chunk API, and its sidecar refuses
+        // any `cmd` but `final`. Written as one condition rather than a second guard
+        // so a future edit cannot fix one engine's buffer leak and miss the other's.
+        guard !spectralDiarizationActive, !nemoDiarizationActive else {
+            chunkAudio = []; chunkAudioStart = lastDiarBoundary; return
+        }
         let liveOn = diarLiveEnabled
         guard liveOn, modelLoader.pyannote != nil else {
             // When live labels are off but "continue from live labels (tail only)"

@@ -82,7 +82,7 @@ final class SpectralEngineTests: XCTestCase {
     /// without the embedder its numbering restarted at every window seam and it
     /// had no profiles, no renaming and no `spk`.
     func testEveryStackUsesSpeakerIdentity() {
-        for stack: ModelLoader.DiarizationStack in [.pyannote, .spectral,
+        for stack: ModelLoader.DiarizationStack in [.pyannote, .spectral, .nemo,
                                                     .mossSecondProcess, .mossOwnASR] {
             XCTAssertTrue(stack.usesSpeakerIdentity,
                           "\(stack) has no way to name anyone without the embedder")
@@ -203,7 +203,7 @@ final class SpectralEngineTests: XCTestCase {
     /// So the only ways it can fail are the three below.
     func testTheOfficePassNeedsTheEngineTheServiceAndTheRecording() {
         func runs(active: Bool = true, service: Bool = true, recording: Bool = true) -> Bool {
-            AudioRecorder.runsSpectralOfficePass(spectralActive: active,
+            AudioRecorder.runsBatchOfficePass(batchActive: active,
                                                  hasService: service, hasRecording: recording)
         }
         XCTAssertTrue(runs())
@@ -226,7 +226,7 @@ final class SpectralEngineTests: XCTestCase {
         }
         for stored in [true, false] {
             d.set(stored, forKey: "diarization.finalPass")
-            XCTAssertTrue(AudioRecorder.runsSpectralOfficePass(spectralActive: true,
+            XCTAssertTrue(AudioRecorder.runsBatchOfficePass(batchActive: true,
                                                                hasService: true,
                                                                hasRecording: true),
                           "a stored finalPass=\(stored) reached the spectral pass")
@@ -283,22 +283,22 @@ final class SpectralEngineTests: XCTestCase {
                                                          mossFullPassWindows: 0)
         XCTAssertEqual(AudioRecorder.stopWatchdogSeconds(chunkedFullPassWindows: 0,
                                                          mossFullPassWindows: 0,
-                                                         spectralPassSeconds: 0),
+                                                         batchPassSeconds: 0),
                        baseline, "a session with no spectral pass must budget exactly as before")
 
         // A pass long enough to matter must move the budget past it. 3600 s of
         // audio → a 7200 s leg watchdog, which no floor covers.
-        let long = AudioRecorder.spectralWatchdogSeconds(recordingLength: 3600)
+        let long = AudioRecorder.batchPassWatchdogSeconds(recordingLength: 3600)
         let budget = AudioRecorder.stopWatchdogSeconds(chunkedFullPassWindows: 0,
                                                        mossFullPassWindows: 0,
-                                                       spectralPassSeconds: long)
+                                                       batchPassSeconds: long)
         XCTAssertGreaterThan(budget, long,
                              "the overlay would give up before the leg it is waiting on")
         // And it still composes with the other passes rather than replacing them.
         XCTAssertGreaterThan(
             AudioRecorder.stopWatchdogSeconds(chunkedFullPassWindows: 40,
                                               mossFullPassWindows: 0,
-                                              spectralPassSeconds: long),
+                                              batchPassSeconds: long),
             AudioRecorder.stopWatchdogSeconds(chunkedFullPassWindows: 40,
                                               mossFullPassWindows: 0))
     }
@@ -307,9 +307,9 @@ final class SpectralEngineTests: XCTestCase {
     /// what is actually being processed. CPU-only, so 1x realtime is a far tighter
     /// bound here than it is for pyannote's MPS pass.
     func testTheLegWatchdogHasAFloorAndScalesWithTheRecording() {
-        XCTAssertEqual(AudioRecorder.spectralWatchdogSeconds(recordingLength: 0), 180)
-        XCTAssertEqual(AudioRecorder.spectralWatchdogSeconds(recordingLength: 10), 180)
-        XCTAssertGreaterThan(AudioRecorder.spectralWatchdogSeconds(recordingLength: 3600), 3600)
+        XCTAssertEqual(AudioRecorder.batchPassWatchdogSeconds(recordingLength: 0), 180)
+        XCTAssertEqual(AudioRecorder.batchPassWatchdogSeconds(recordingLength: 10), 180)
+        XCTAssertGreaterThan(AudioRecorder.batchPassWatchdogSeconds(recordingLength: 3600), 3600)
     }
 
     // MARK: - 4. Literal script and log names, differing per engine

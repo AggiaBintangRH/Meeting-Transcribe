@@ -31,13 +31,21 @@ struct OverlapTab: View {
 
     /// Engines that assign exactly one speaker per instant, and so depend on the
     /// standalone detector to locate overlap. Mirrors
-    /// `ModelLoader.wantedOverlapEngine`'s own two-engine test.
+    /// `ModelLoader.wantedOverlapEngine`'s own test — THREE engines since NeMo
+    /// (2026-08-07), and it must keep mirroring it: this copy decides only what the
+    /// tab SAYS, while the loader decides what runs, so a divergence would print a
+    /// reassurance about a session that behaves the other way.
     private var needsDetector: Bool {
         diarEngine == ModelLoader.mossEngineID || diarEngine == ModelLoader.spectralEngineID
+            || diarEngine == ModelLoader.nemoEngineID
     }
 
     private var diarEngineName: String {
-        diarEngine == ModelLoader.mossEngineID ? "MOSS" : "the spectral engine"
+        switch diarEngine {
+        case ModelLoader.mossEngineID: return "MOSS"
+        case ModelLoader.nemoEngineID: return "the NeMo engine"
+        default:                       return "the spectral engine"
+        }
     }
 
     var body: some View {

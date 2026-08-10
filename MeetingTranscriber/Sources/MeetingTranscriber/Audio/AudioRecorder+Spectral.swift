@@ -53,6 +53,14 @@ extension AudioRecorder {
         service.onFinalResult = { [weak self] audioPath, localTurns, stream in
             Task { @MainActor in
                 guard let self else { return }
+                // The DONE line the 2026-08-10 audit added to both batch engines —
+                // see `AudioRecorder+Nemo.configureNemo` for the whole reason. In
+                // short: this log recorded only starts and failures, so a pass that
+                // succeeded was indistinguishable from one that hung.
+                self.spectralLog("FINAL PASS done (\(stream == .office ? "office" : "remote")) "
+                                 + "— \(localTurns.count) turn(s), "
+                                 + "\(Set(localTurns.map(\.label)).count) local label(s); "
+                                 + "identity next, see logs/\(WeSpeakerService.Config.logName).log")
                 await self.identifyFinalTurns(audio: audioPath, localTurns: localTurns,
                                               stream: stream)
             }
@@ -67,11 +75,17 @@ extension AudioRecorder {
 
     // MARK: - The office whole-file pass
 
-    /// Whether a spectral session dispatches its office whole-file pass at Stop.
+    /// Whether a WHOLE-FILE BATCH session dispatches its office pass at Stop.
+    ///
+    /// ENGINE-NEUTRAL SINCE 2026-08-07, and shared by spectral and NeMo. It was
+    /// `runsSpectralOfficePass(spectralActive:…)`; NeMo has the identical shape (no
+    /// live path, one pass over the recording at Stop, no tail), so it is ONE
+    /// function called with each engine's own flag rather than two rules that
+    /// could drift. The rename is the whole change — the body is untouched.
     ///
     /// PURE and static, like `remoteStopMode` and `mossStopMode`, so the rule can
-    /// be tested without a sidecar — and so `stop()` reads ONE condition rather
-    /// than growing a second one that could disagree with it.
+    /// be tested without a sidecar — and so `stop()` reads ONE condition per engine
+    /// rather than growing a second one that could disagree with it.
     ///
     /// **NEITHER `continueOnStop` NOR `finalPass` IS A PARAMETER**, and for the
     /// same reason: taking a setting and then ignoring it would imply it was
@@ -79,32 +93,36 @@ extension AudioRecorder {
     ///
     /// There is no tail because there are no live labels to continue from, and
     /// since 2026-08-06 there is no stop-pass switch either — the pass IS the
-    /// labels under this engine, so the Diarization tab shows neither control
-    /// while spectral is selected and nothing here reads them. That also retired
+    /// labels under these engines, so the Diarization tab shows neither control
+    /// while one is selected and nothing here reads them. That also retired
     /// `spectralRefusalMessage`: the configuration it refused (stop pass off, no
     /// labels at all) can no longer be expressed.
     ///
     /// The stored `diarization.finalPass` deliberately keeps whatever pyannote
-    /// left in it — this engine simply never asks.
-    nonisolated static func runsSpectralOfficePass(spectralActive: Bool,
-                                                   hasService: Bool,
-                                                   hasRecording: Bool) -> Bool {
-        spectralActive && hasService && hasRecording
+    /// left in it — these engines simply never ask.
+    nonisolated static func runsBatchOfficePass(batchActive: Bool,
+                                                hasService: Bool,
+                                                hasRecording: Bool) -> Bool {
+        batchActive && hasService && hasRecording
     }
 
-    /// Seconds to allow one spectral whole-file pass over `recordingLength`
-    /// seconds of audio.
+    /// Seconds to allow one WHOLE-FILE batch pass over `recordingLength` seconds
+    /// of audio — spectral's and NeMo's, from one rule.
     ///
     /// Same floor and shape as `startDiarization`'s `max(180, recordingElapsed)`
     /// and `tailDiarWatchdogSeconds`: a generous constant, then at least 1×
     /// realtime for whatever is actually being processed. The multiplier is above
-    /// 1 because this engine runs entirely on **CPU** (the vendored embedder pins
+    /// 1 because spectral runs entirely on **CPU** (the vendored embedder pins
     /// `torch.device("cpu")`) while pyannote's pass runs on MPS, so 1× realtime is
-    /// a far tighter bound here than it is there. It has NOT been measured on a
-    /// real meeting on this hardware — the number is a deliberately loose backstop,
+    /// a far tighter bound there than it is for pyannote.
+    ///
+    /// NeMo shares it with room to spare rather than needing its own number: it
+    /// was measured at **16–23× realtime on MPS** (48.2 min of audio in 170 s), so
+    /// 2× realtime is roughly 35× its measured cost. Neither engine's figure has
+    /// been taken on a *worst case* though — this is a deliberately loose backstop,
     /// not a prediction, and the whole point of a watchdog is that being wrong in
     /// this direction only costs patience.
-    nonisolated static func spectralWatchdogSeconds(recordingLength: Double) -> Double {
+    nonisolated static func batchPassWatchdogSeconds(recordingLength: Double) -> Double {
         max(180, recordingLength * 2)
     }
 
@@ -135,7 +153,7 @@ extension AudioRecorder {
                     + "num_speakers=\(numSpeakers == 0 ? "auto" : String(numSpeakers))")
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers)
 
-        let limit = Self.spectralWatchdogSeconds(recordingLength: recordingElapsed)
+        let limit = Self.batchPassWatchdogSeconds(recordingLength: recordingElapsed)
         finalDiarWatchdog?.cancel()
         finalDiarWatchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(limit))
@@ -168,10 +186,24 @@ extension AudioRecorder {
     /// `startRemoteDiarization` has.
     @discardableResult
     func startRemoteSpectralDiarization() -> Bool {
-        let d = UserDefaults.standard
-        let finalOn = d.object(forKey: "diarization.finalPass") as? Bool ?? true
+        // `finalPass` IS PASSED AS `true`, NOT READ — and that is the fix for a
+        // silent data loss found in the 2026-08-10 audit.
+        //
+        // The office pass already ignores this key (`runsBatchOfficePass` does not
+        // take it) for the reason in that function's doc: under a batch engine the
+        // stop pass IS the labels, so a stored value must not be able to leave a
+        // session with none. The remote pass read it anyway, and `DiarizationTab`
+        // HIDES the toggle under batch engines — so a value left `false` by an
+        // earlier pyannote session removed every remote label, silently, with
+        // nothing in the UI able to put it back. That is exactly the failure the
+        // 2026-08-06 settings pass exists to forbid: a value outliving its control.
+        //
+        // Passed rather than deleted from the signature because `remoteStopMode` is
+        // shared with pyannote, where the toggle is visible and must still be
+        // honoured. `supportsTail:` already establishes this shape — the caller
+        // states its engine's truth, the one pure function keeps enumerating.
         let continueOnStop = diarContinueOnStop
-        let mode = Self.remoteStopMode(finalPass: finalOn,
+        let mode = Self.remoteStopMode(finalPass: true,
                                        continueOnStop: continueOnStop,
                                        remoteStreamActive: remoteStreamActive,
                                        hasDiarizationService: modelLoader.spectral != nil,
@@ -195,7 +227,7 @@ extension AudioRecorder {
         // out the office pass before it even starts — the doubling is the same
         // rule `startRemoteFullDiarization` uses for the same reason.
         startRemoteDiarWatchdog(
-            seconds: Self.spectralWatchdogSeconds(recordingLength: recordingElapsed) * 2,
+            seconds: Self.batchPassWatchdogSeconds(recordingLength: recordingElapsed) * 2,
             message: "Remote spectral diarization timed out")
         return true
     }

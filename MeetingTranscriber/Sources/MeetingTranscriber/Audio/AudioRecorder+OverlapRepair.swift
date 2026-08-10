@@ -28,12 +28,23 @@ extension AudioRecorder {
     ///
     /// Keyed on the ENGINE, not on whether the detector happens to be loaded: the
     /// question is "can this session's diarizer mark overlap itself?", and the
-    /// answer is a property of MOSS and spectral (one speaker per instant), not of
-    /// what else is running. pyannote marks overlap itself, so it keeps using its
-    /// own turns and its behaviour is byte-for-byte unchanged — the detector is a
-    /// second opinion there, never a substitution.
+    /// answer is a property of MOSS, spectral and NeMo (one speaker per instant),
+    /// not of what else is running. pyannote marks overlap itself, so it keeps
+    /// using its own turns and its behaviour is byte-for-byte unchanged — the
+    /// detector is a second opinion there, never a substitution.
     var usesDetectedRegionsForRepair: Bool {
-        mossDiarizationActive || spectralDiarizationActive
+        mossDiarizationActive || spectralDiarizationActive || nemoDiarizationActive
+    }
+
+    /// Which engine to NAME in the log when repair is skipped for want of the
+    /// detector. Derived from the same three flags rather than a `?:` at the call
+    /// site: with three engines a two-way conditional silently mislabels the third,
+    /// and a log line that names the wrong engine sends the next debugging session
+    /// to the wrong page of Settings.
+    var batchEngineNameForLog: String {
+        if mossDiarizationActive { return "MOSS" }
+        if nemoDiarizationActive { return "NEMO" }
+        return "SPECTRAL"
     }
 
     /// Start overlap repair only once both the last chunk and the diarization
@@ -50,7 +61,7 @@ extension AudioRecorder {
         // `.failed("engine unavailable")` and blame a missing model for a choice.
         if usesDetectedRegionsForRepair {
             guard modelLoader.overlapDetect != nil else {
-                overlapLog("skipped — the \(mossDiarizationActive ? "MOSS" : "SPECTRAL") "
+                overlapLog("skipped — the \(batchEngineNameForLog) "
                            + "diarization engine assigns exactly one speaker per instant, so "
                            + "overlap repair needs the overlap DETECTOR to locate regions, "
                            + "and it is switched off (Settings → Models → Detect overlap)")

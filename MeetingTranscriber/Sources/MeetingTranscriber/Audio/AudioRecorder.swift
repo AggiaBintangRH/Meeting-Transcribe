@@ -177,7 +177,7 @@ final class AudioRecorder: ObservableObject {
     //
     // `finalPass` and `numSpeakers` are deliberately NOT here. They are read only
     // at Stop, there is no second read to disagree with, and `finalPass` is
-    // documented in `runsSpectralOfficePass` as intentionally late — a rule that
+    // documented in `runsBatchOfficePass` as intentionally late — a rule that
     // trusted a start-of-session value would dispatch a pass the user had since
     // switched off.
     var diarLiveEnabled = true
@@ -340,6 +340,17 @@ final class AudioRecorder: ObservableObject {
     /// properties. Inert for every other session — it stays false, so every guard
     /// that reads it is a no-op.
     var spectralDiarizationActive = false
+
+    /// True when THIS session takes its speaker labels from the NEMO engine.
+    /// Read once in `beginCapture` (via `configureNemo`) like every other setting,
+    /// so the engine cannot change mid-recording and leave half the transcript
+    /// labelled by each.
+    ///
+    /// Declared here rather than in `AudioRecorder+Nemo` for the plain Swift reason
+    /// the MOSS, spectral and remote state above is: an extension cannot hold
+    /// stored properties. Inert for every other session — it stays false, so every
+    /// guard that reads it is a no-op.
+    var nemoDiarizationActive = false
     /// True when the chunked ASR model IS MOSS, so one process fills both roles
     /// and the segments arriving on `onChunkSegments` describe the very text
     /// `onChunkTranscript` is about to deliver.
@@ -830,6 +841,11 @@ final class AudioRecorder: ObservableObject {
         // and a spectral session has already had the other two no-op cleanly
         // rather than half-wiring a service that is not loaded.
         configureSpectral()
+        // The FOURTH engine, in the same place and the same way, and for the same
+        // reason it is last: each of the four `configure*` calls sets its own flag
+        // false unless its engine is the selected one, so this order leaves exactly
+        // one of the four true and the other three have already no-op'd cleanly.
+        configureNemo()
         configureOverlapDetect()
         // The second MOSS process for this session, or nil — captured once, like
         // `chunked`, so the escaping tap closure never touches the recorder to
@@ -1337,28 +1353,39 @@ final class AudioRecorder: ObservableObject {
         // re-diarize the whole recording (best global clustering).
         let finalOn = UserDefaults.standard.object(forKey: "diarization.finalPass") as? Bool ?? true
         let continueOnStop = diarContinueOnStop
-        // The SPECTRAL engine's office pass, decided by its own pure rule. The two
-        // are mutually exclusive by construction — `modelLoader.pyannote` is nil
-        // under this engine and `modelLoader.spectral` is nil under the other — but
-        // both are asked explicitly so the overlay's "diarize" row exists for
-        // exactly one of them and can never be listed twice or not at all.
-        let runsSpectralPass = Self.runsSpectralOfficePass(
-            spectralActive: spectralDiarizationActive,
+        // The two WHOLE-FILE BATCH engines' office passes, each decided by the SAME
+        // pure rule called with its own flag. All three paths are mutually
+        // exclusive by construction — at most one of `pyannote`, `spectral` and
+        // `nemo` is non-nil in a session — but each is asked explicitly so the
+        // overlay's "diarize" row exists for exactly one of them and can never be
+        // listed twice or not at all.
+        let runsSpectralPass = Self.runsBatchOfficePass(
+            batchActive: spectralDiarizationActive,
             hasService: modelLoader.spectral != nil,
             hasRecording: lastRecordingURL != nil)
-        let willRunStopPass = runsSpectralPass || (finalOn && modelLoader.pyannote != nil)
+        let runsNemoPass = Self.runsBatchOfficePass(
+            batchActive: nemoDiarizationActive,
+            hasService: modelLoader.nemo != nil,
+            hasRecording: lastRecordingURL != nil)
+        let willRunStopPass = runsSpectralPass || runsNemoPass
+            || (finalOn && modelLoader.pyannote != nil)
         // The remote pass is dispatched HERE, before the overlay is built, so the
         // step list knows whether to show a remote-diarization row. Queued ahead
         // of the office stop pass on the same stdin; the sidecar drains it in
         // order, so both run to completion regardless of who is first.
         //
-        // Routed by the engine, not merged into one function: the two dispatchers
-        // talk to DIFFERENT sidecars and take different modes (spectral passes
-        // `supportsTail: false`). Each returns whether it took the remote gate, so
-        // the overlay contract is identical whichever answered.
-        let willRunRemoteDiar = spectralDiarizationActive
-            ? startRemoteSpectralDiarization()
-            : startRemoteDiarization()
+        // Routed by the engine, not merged into one function: the three dispatchers
+        // talk to DIFFERENT sidecars and take different modes (both batch engines
+        // pass `supportsTail: false`). Each returns whether it took the remote gate,
+        // so the overlay contract is identical whichever answered.
+        let willRunRemoteDiar: Bool
+        if spectralDiarizationActive {
+            willRunRemoteDiar = startRemoteSpectralDiarization()
+        } else if nemoDiarizationActive {
+            willRunRemoteDiar = startRemoteNemoDiarization()
+        } else {
+            willRunRemoteDiar = startRemoteDiarization()
+        }
 
         // Everything below lands asynchronously; block the controls until it does.
         buildStopSteps(willRunStopPass: willRunStopPass,
@@ -1368,7 +1395,7 @@ final class AudioRecorder: ObservableObject {
         // One place decides how long the overlay may wait — see
         // `stopWatchdogSeconds`, which exists because two watchdogs in a row
         // failed to scale with the work they were guarding.
-        // The spectral legs' own watchdogs are what the overlay must outlast — the
+        // The batch legs' own watchdogs are what the overlay must outlast — the
         // remote one is deliberately DOUBLE the office one (both passes queue on a
         // single stdin, so the remote job can wait out the office job before it
         // even starts), so the budget takes the larger of the two whenever a remote
@@ -1376,14 +1403,18 @@ final class AudioRecorder: ObservableObject {
         // keeps all three pre-existing budgets identical.
         // Either leg alone is enough to need the budget: a dual-stream session can
         // legitimately dispatch the remote pass while the office one is skipped.
-        let spectralBudget = spectralDiarizationActive && (runsSpectralPass || willRunRemoteDiar)
-            ? Self.spectralWatchdogSeconds(recordingLength: recordingElapsed)
+        // ONE budget for both batch engines rather than two, because a session runs
+        // at most one of them — see `stopWatchdogSeconds(batchPassSeconds:)`.
+        let batchEngineActive = spectralDiarizationActive || nemoDiarizationActive
+        let batchBudget = batchEngineActive
+            && (runsSpectralPass || runsNemoPass || willRunRemoteDiar)
+            ? Self.batchPassWatchdogSeconds(recordingLength: recordingElapsed)
                 * (willRunRemoteDiar ? 2 : 1)
             : 0
         startStopWatchdog(seconds: Self.stopWatchdogSeconds(
             chunkedFullPassWindows: chunkedPlan.runsFullPass ? fullPassWindowCount : 0,
             mossFullPassWindows: mossFullPassWindowCount,
-            spectralPassSeconds: spectralBudget))
+            batchPassSeconds: batchBudget))
 
         // Started AFTER the step list exists, because the pass reports its
         // progress into the "chunk" (and, dual-stream, "remote") rows.
@@ -1406,13 +1437,16 @@ final class AudioRecorder: ObservableObject {
         if let recording = lastRecordingURL { startOverlapDetection(recording) }
 
         if willRunStopPass {
-            // The spectral branch is FIRST and does not consult `continueOnStop`:
-            // there is no tail to continue from, so the whole-file pass is the only
-            // mode. `runsSpectralPass` already proved the service and the recording
-            // exist, which is why this leg has no fallback arm — the `else if`
-            // chain below keeps pyannote's untouched.
+            // The two BATCH branches are FIRST and neither consults
+            // `continueOnStop`: there is no tail to continue from, so the
+            // whole-file pass is the only mode. `runsSpectralPass` / `runsNemoPass`
+            // already proved the service and the recording exist, which is why
+            // these legs have no fallback arm — the `else if` chain below keeps
+            // pyannote's untouched.
             if runsSpectralPass, let recording = lastRecordingURL {
                 startSpectralDiarization(recording)
+            } else if runsNemoPass, let recording = lastRecordingURL {
+                startNemoDiarization(recording)
             } else if continueOnStop {
                 diarizeTailChunk()
             } else if let recording = lastRecordingURL {

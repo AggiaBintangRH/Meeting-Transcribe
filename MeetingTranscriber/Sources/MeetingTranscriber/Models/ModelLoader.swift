@@ -80,6 +80,19 @@ final class ModelLoader: ObservableObject {
     /// `DiarizationStack.usesSpeakerIdentity`.
     private(set) var spectral: SpectralService?
 
+    /// NEMO diarization sidecar (NVIDIA NeMo `ClusteringDiarizer`, MPS);
+    /// persistent. nil unless `diarization.engine` is `nemo` — which is what makes
+    /// every pyannote-dependent path (live chunks, tail passes, overlap repair from
+    /// intersecting turns) a natural no-op under this engine, exactly as it is
+    /// under spectral and MOSS.
+    ///
+    /// Like spectral it answers a WHOLE-FILE pass and nothing else, so it is asked
+    /// exactly once per stream per session, at Stop. `embedding` is loaded
+    /// alongside it — see `DiarizationStack.usesSpeakerIdentity`. Runs in its OWN
+    /// interpreter `.venv-nemo`; a missing one is a loud setup error, never a
+    /// silent fall-back to the main `.venv`.
+    private(set) var nemo: NemoService?
+
     /// Speaker-identity sidecar (WeSpeaker + the two profile stores); persistent.
     /// The other half of the former `diarize-service.py`.
     ///
@@ -161,6 +174,11 @@ final class ModelLoader: ObservableObject {
     /// `ModelCatalog.diarizationEngineValue` for why that difference is not an
     /// inconsistency.
     nonisolated static let spectralEngineID = "spectral"
+    /// The NEMO diarization engine id — the fourth engine (2026-08-07).
+    /// Same string as its catalog id, like spectral and pyannote and unlike MOSS;
+    /// see `ModelCatalog.diarizationEngineValue` for why that difference is not an
+    /// inconsistency.
+    nonisolated static let nemoEngineID = "nemo"
 
     /// Whether this session loads the forced aligner.
     ///
@@ -293,6 +311,8 @@ final class ModelLoader: ObservableObject {
                 ? .mossSecondProcess : .mossOwnASR
         case spectralEngineID:
             return .spectral
+        case nemoEngineID:
+            return .nemo
         default:
             // An UNKNOWN stored value still resolves to pyannote, which is what
             // `diarizationEngine(forEngine:)` shows and what the recorder's
@@ -309,13 +329,14 @@ final class ModelLoader: ObservableObject {
     enum DiarizationStack: Equatable, Hashable {
         case pyannote           // pyannote-service + wespeaker-service
         case spectral           // spectral-service + wespeaker-service
+        case nemo               // nemo-service (.venv-nemo) + wespeaker-service
         case mossSecondProcess  // a second MOSS process, ASR done by another model
         case mossOwnASR         // MOSS is ALSO the chunked model — no second
                                 // process to load, but identity is still wanted
 
         /// Whether this stack needs the WeSpeaker identity sidecar.
         ///
-        /// ALL FOUR do, since 2026-08-05. Spectral emits run-local labels exactly
+        /// ALL FIVE do, since 2026-08-05. Spectral emits run-local labels exactly
         /// as pyannote does, so profiles, renaming and `spk` worked under it from
         /// the day of the pyannote/wespeaker split with no new identity code —
         /// and MOSS has now joined them for the same reason, one call later:
@@ -372,7 +393,11 @@ final class ModelLoader: ObservableObject {
                                                 diarEngine: String,
                                                 detectEnabled: Bool) -> String? {
         guard repairEnabled else { return nil }
-        if diarEngine == mossEngineID || diarEngine == spectralEngineID {
+        // NeMo joins MOSS and spectral for the SAME structural reason, not by
+        // analogy: NME-SC assigns exactly one label per instant, so its turns can
+        // never intersect and `overlapRegions()` is empty by construction under it.
+        if diarEngine == mossEngineID || diarEngine == spectralEngineID
+            || diarEngine == nemoEngineID {
             guard detectEnabled else { return nil }
         }
         return engineID
@@ -472,6 +497,16 @@ final class ModelLoader: ObservableObject {
         if wantedDiar != .spectral {
             spectral?.terminate()
             spectral = nil
+        }
+        // The same want/teardown PAIR, from the same function, as every other
+        // service here. A load rule and a teardown rule computed apart is what left
+        // pyannote, both overlap engines and Nemotron resident and unreachable — and
+        // this is the largest offender yet if it happened again: NeMo's peak RSS
+        // scales with the audio it was last given (measured 1.15 GB for 98 s,
+        // 7.02 GB for 48 min, 13.33 GB for 67 min).
+        if wantedDiar != .nemo {
+            nemo?.terminate()
+            nemo = nil
         }
         // The embedder serves BOTH pipeline engines, so it is dropped only when
         // NEITHER is selected. Written as one question — "does this session's
@@ -639,6 +674,14 @@ final class ModelLoader: ObservableObject {
             // missing download fails at the first row rather than the second.
             steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
             steps.append(Step(model: ModelCatalog.spectralDiarization, checkInstalled: true))
+        case .nemo:
+            // Two steps for the same reason spectral and pyannote have two: this
+            // engine is the pipeline half only, and identity is a separate process.
+            // Embedder FIRST again, and here it matters most — NeMo's cold import
+            // alone is ~51 s, so a broken embedder is reported in seconds rather
+            // than after the slowest load in the app.
+            steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
+            steps.append(Step(model: ModelCatalog.nemoDiarization, checkInstalled: true))
         case .pyannote:
             // TWO steps for the pyannote engine since the 2026-07-30 split: the
             // embedder and the pipeline are separate processes now, and the
@@ -816,6 +859,24 @@ final class ModelLoader: ObservableObject {
             spectral = nil
             spectral = try await Task.detached(priority: .userInitiated) {
                 try SpectralService(config: config)
+            }.value
+            return
+        }
+
+        // Diarization: start the persistent NEMO sidecar, in `.venv-nemo`. Fatal on
+        // failure, like every other diarization stack member: this engine has no
+        // live path, so a broken sidecar would otherwise surface as a meeting that
+        // produces no speakers at all, at Stop, with nothing left to re-run. A
+        // missing `.venv-nemo` throws the setup error that names it.
+        if step.model.id == ModelCatalog.nemoDiarization.id {
+            let config = NemoService.Config()
+            if let existing = nemo, existing.config == config {
+                return
+            }
+            nemo?.terminate()
+            nemo = nil
+            nemo = try await Task.detached(priority: .userInitiated) {
+                try NemoService(config: config)
             }.value
             return
         }
