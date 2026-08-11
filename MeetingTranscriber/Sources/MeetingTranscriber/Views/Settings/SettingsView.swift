@@ -150,6 +150,7 @@ struct SettingsView: View {
             case .spectral:          return ("spectral", false)
             case .nemo:              return ("NeMo", false)
             case .diarizen:          return ("DiariZen", false)
+            case .camPlus:           return ("CAM++", false)
             case .mossOwnASR:        return ("included", true)
             case .mossSecondProcess: return ("MOSS", false)
             case .none:              return ("off", false)

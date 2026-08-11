@@ -11,17 +11,61 @@ struct ModelInfo: Identifiable {
 }
 
 enum ModelCatalog {
-    /// One entry, one load, however many streams the session has: the realtime
-    /// sidecar serves the Office and Remote lanes from a single process (see
-    /// `NemotronASRService`), so there is no second row to show. A dual-stream
-    /// session's overlay is identical to a single-stream one here.
-    static let realtime = ModelInfo(
-        id: "nemotron",
-        name: "Nemotron 3.5 ASR Streaming 0.6B",
-        detail: "Cache-aware streaming FastConformer-RNNT",
-        badges: ["MLX", "40 locales", "112x RT", "0.6B"],
-        hfRepo: "mlx-community/nemotron-3.5-asr-streaming-0.6b"
-    )
+    /// The realtime engines, NEMOTRON FIRST — first is the default, and the
+    /// default must stay what it has always been.
+    ///
+    /// One entry, one load, however many streams the session has: whichever
+    /// engine is selected serves the Office and Remote lanes from a single
+    /// process (see `RealtimeASRService`), so there is no second row to show. A
+    /// dual-stream session's overlay is identical to a single-stream one here.
+    static let realtimeModels: [ModelInfo] = [
+        ModelInfo(id: "nemotron",
+                  name: "Nemotron 3.5 ASR Streaming 0.6B",
+                  detail: "Cache-aware streaming FastConformer-RNNT",
+                  badges: ["MLX", "40 locales", "112x RT", "0.6B"],
+                  hfRepo: "mlx-community/nemotron-3.5-asr-streaming-0.6b"),
+        // Measured on this M4 (2026-08-11), whole-buffer re-transcribe — the
+        // shape the sidecar actually uses — best of 2 with the warm-up
+        // discarded: 10 s buffer 0.083 s, 30 s 0.235 s, 60 s 0.462 s. That is
+        // 121–130x realtime against Nemotron's steady ~14x, and two ACTIVE lanes
+        // sit at ~31 % duty where Nemotron's sit at 285 %. The badge quotes the
+        // 30 s figure, which is the one a meeting actually spends its time on.
+        // CC BY-4.0, so it is shippable to a paying client — the same licence
+        // question that ruled out five of DiariZen's six checkpoints.
+        ModelInfo(id: "parakeet",
+                  name: "Parakeet TDT 0.6b v3",
+                  detail: "FastConformer-TDT · CC BY-4.0 · 25 European languages · no Indonesian/Chinese/Japanese",
+                  badges: ["MLX", "25 languages", "128x RT", "0.6B", "2.3 GB"],
+                  hfRepo: "mlx-community/parakeet-tdt-0.6b-v3"),
+        // Measured on this M4 (2026-08-11), same whole-buffer shape and same
+        // best-of-2 method as the Parakeet row: 10 s buffer 0.151 s, 30 s
+        // 0.609 s, 60 s 0.621 s — i.e. 49–97x realtime, between Parakeet's
+        // ~128x and Nemotron's ~14x. The badge quotes the 30 s figure, which is
+        // the WORST of the three and the one a meeting actually spends its time
+        // on; the 60 s row is faster only because that window held less speech,
+        // since cost here tracks tokens generated rather than seconds of audio.
+        //
+        // Apache 2.0, so it is shippable to a paying client.
+        //
+        // "3 languages" is the roster mainline mlx-audio can EXPRESS, not the 30
+        // FunAudioLLM advertises for this checkpoint — `_map_language()` accepts
+        // eleven ISO codes (English, Japanese and nine spellings of Chinese) and
+        // RAISES on everything else. The badge states what the code does, which
+        // is the Granite lesson applied one step further on.
+        ModelInfo(id: "funasr",
+                  name: "Fun-ASR MLT Nano 2512",
+                  detail: "SenseVoice encoder + Qwen3 decoder · Apache 2.0 · English, Chinese, Japanese",
+                  badges: ["MLX", "3 languages", "49x RT", "1.0B", "2.0 GB"],
+                  hfRepo: "mlx-community/Fun-ASR-MLT-Nano-2512-fp16"),
+    ]
+
+    /// The realtime engine for a stored id, falling back to the FIRST entry —
+    /// the `chunkedModel(id:)` pattern, and the same reason: a stored id naming
+    /// an engine this build no longer has must resolve to a real model rather
+    /// than to a `default:` that quietly points at a deleted script.
+    static func realtimeModel(id: String) -> ModelInfo {
+        realtimeModels.first { $0.id == id } ?? realtimeModels[0]
+    }
 
     static let chunked: [ModelInfo] = [
         ModelInfo(id: "qwen3",
@@ -150,10 +194,39 @@ enum ModelCatalog {
         hfRepo: "nemo"
     )
 
+    /// The CAM++ engine — a pipeline built around a speaker EMBEDDING model,
+    /// because that is all CAM++ is: Silero VAD → CAM++ vectors over 2 s sliding
+    /// sub-windows → spectral clustering with an eigengap speaker count. A
+    /// WHOLE-FILE pass at Stop and nothing else, like spectral, NeMo and DiariZen.
+    ///
+    /// The same SHAPE as `spectralDiarization` and deliberately not the same
+    /// stages: that engine's GMM-BIC speaker COUNTING is the part measured
+    /// failing (20 speakers on a 67-minute meeting, 13 on a 3-person clip), and
+    /// this replaces exactly that stage while keeping the rest.
+    ///
+    /// Measured on this M4 before it was offered at all: 5 speakers on
+    /// `Meeting5People.wav` (truth 5) in 1.7 s, 3 on `Overlap123.wav` (truth 3)
+    /// in 1.1 s, and 3 speakers / 99 turns on the 67-minute meeting where
+    /// spectral returns 20 / 1869.
+    ///
+    /// **Apache 2.0, and the licence chose the checkpoint.** The MLX-native CAM++
+    /// on the hub declares no licence at all, and this app ships to a paying
+    /// client — the same question that ruled out five of DiariZen's six
+    /// checkpoints. Unlike NeMo, DiCoW and DiariZen it needs NO interpreter of
+    /// its own: torch, scipy and silero-vad are already in the main `.venv`, so
+    /// it costs the bundle only its 66 MB of weights.
+    static let camPlusDiarization = ModelInfo(
+        id: "campplus",
+        name: "CAM++ clustering diarization",
+        detail: "Silero VAD → CAM++ embeddings → spectral clustering with an eigengap speaker count · CPU · whole recording at stop",
+        badges: ["PyTorch CPU", "whole-file only", "Apache 2.0", "vendored"],
+        hfRepo: "Wespeaker/wespeaker-voxceleb-campplus-LM"
+    )
+
     /// Engines offered on Settings → Models → Diarization (`diarization.engine`).
     static let diarizationEngines: [ModelInfo] = [diarization, spectralDiarization,
                                                   nemoDiarization, diarizenDiarization,
-                                                  mossDiarization]
+                                                  camPlusDiarization, mossDiarization]
 
     /// The `diarization.engine` VALUE a given engine card selects.
     ///
@@ -179,6 +252,7 @@ enum ModelCatalog {
         case spectralDiarization.id: return ModelLoader.spectralEngineID
         case nemoDiarization.id:     return ModelLoader.nemoEngineID
         case diarizenDiarization.id: return ModelLoader.diarizenEngineID
+        case camPlusDiarization.id:  return ModelLoader.camPlusEngineID
         default:                     return ModelLoader.pyannoteEngineID
         }
     }
@@ -190,6 +264,7 @@ enum ModelCatalog {
         case ModelLoader.spectralEngineID: return spectralDiarization
         case ModelLoader.nemoEngineID:     return nemoDiarization
         case ModelLoader.diarizenEngineID: return diarizenDiarization
+        case ModelLoader.camPlusEngineID:  return camPlusDiarization
         default:                           return diarization
         }
     }
@@ -447,6 +522,135 @@ enum Languages {
         ("ms", "Malay"), ("zh", "Chinese"), ("ja", "Japanese"),
     ]
 
+    /// Parakeet TDT 0.6b v3 — the 25 its OWN checkpoint's card publishes.
+    ///
+    /// Read from the front-matter of
+    /// `models/hub/models--mlx-community--parakeet-tdt-0.6b-v3/**/README.md`, not
+    /// from NVIDIA's card for the base model and not from the family. That is
+    /// the Granite lesson, which cost a correction in BOTH directions: the card
+    /// of the checkpoint on disk is the authority for the checkpoint on disk.
+    ///
+    /// Worth stating because it is the practical difference between the two
+    /// realtime engines: there is NO Indonesian, Malay, Chinese or Japanese
+    /// here — four of the five concrete options the Nemotron picker offers. A
+    /// stored `realtime.language` naming one of them resolves to Auto-detect
+    /// while Parakeet is selected (`resolveRealtime`), rather than travelling to
+    /// a sidecar that has never heard of it.
+    static let parakeet: [Entry] = [
+        ("en", "English"), ("es", "Spanish"), ("fr", "French"),
+        ("de", "German"), ("bg", "Bulgarian"), ("hr", "Croatian"),
+        ("cs", "Czech"), ("da", "Danish"), ("nl", "Dutch"),
+        ("et", "Estonian"), ("fi", "Finnish"), ("el", "Greek"),
+        ("hu", "Hungarian"), ("it", "Italian"), ("lv", "Latvian"),
+        ("lt", "Lithuanian"), ("mt", "Maltese"), ("pl", "Polish"),
+        ("pt", "Portuguese"), ("ro", "Romanian"), ("sk", "Slovak"),
+        ("sl", "Slovenian"), ("sv", "Swedish"), ("ru", "Russian"),
+        ("uk", "Ukrainian"),
+    ]
+
+    /// Fun-ASR MLT Nano 2512 — what the CODE accepts, not what the card claims.
+    ///
+    /// FunAudioLLM's card lists 30 languages for this checkpoint. Mainline
+    /// mlx-audio's `_map_language()` maps eleven ISO codes and RAISES a
+    /// `ValueError` on anything else, so 30 is a property of the weights and 3
+    /// is a property of the thing that runs them. The Granite lesson said the
+    /// checkpoint's own card beats the family's; this is the step after that —
+    /// the IMPLEMENTATION beats the checkpoint's card when they disagree.
+    ///
+    /// Nine of those eleven codes (cjy, cmn, gan, hak, hsn, nan, wuu, yue, zh)
+    /// all resolve to the same prompt word, 中文, so offering them separately
+    /// would be nine ways to pick Chinese. Only `zh` is listed.
+    ///
+    /// UNLIKE every other picker in this file, a wrong code here is not merely
+    /// ignored — it raises inside the model and takes the lane down with it.
+    /// `resolveRealtime` is what stops that, and the sidecar checks again.
+    static let funasr: [Entry] = [
+        ("en", "English"), ("zh", "Chinese"), ("ja", "Japanese"),
+    ]
+
+    // MARK: - The REALTIME pickers, per engine
+    //
+    // Deliberately their own four functions rather than extra cases in
+    // `supported(forModel:)` and friends below. Those are documented as
+    // reasoning about the CHUNKED models — their `default:` falls back to the
+    // full 30 "because ChunkedASRModelFactory falls back to Qwen3", which is a
+    // sentence about a different factory entirely. Folding a realtime engine
+    // into that default would silently offer Nemotron 30 languages nobody has
+    // checked, which is exactly what `Languages.realtime`'s own comment forbids.
+
+    /// What a realtime engine actually supports — WITHOUT `auto`.
+    static func realtimeSupported(forModel id: String) -> [Entry] {
+        switch id {
+        case RealtimeASRService.parakeetModelID: return parakeet
+        case RealtimeASRService.funasrModelID: return funasr
+        // Nemotron keeps EXACTLY the five it has always offered. Its card claims
+        // 40 locales and publishes no roster, and NVIDIA's own card is gated
+        // (HTTP 401), so there is nothing honest to widen it to.
+        default: return realtime.filter { $0.code != auto.code }
+        }
+    }
+
+    /// What a realtime picker shows: `auto` first, then the engine's languages.
+    static func realtimeEntries(forModel id: String) -> [Entry] {
+        [auto] + realtimeSupported(forModel: id)
+    }
+
+    /// The code that may actually be sent for this realtime engine. Resolved at
+    /// the READ boundary (`RealtimeASRService.Config.fromSettings`), so a stored
+    /// value from the other engine is overridden while this one is selected and
+    /// is still there when the user switches back.
+    static func resolveRealtime(language code: String, forModel id: String) -> String {
+        guard code != auto.code else { return auto.code }
+        return realtimeSupported(forModel: id).contains { $0.code == code }
+            ? code : auto.code
+    }
+
+    /// Why this realtime engine's setting has no effect, or nil when it uses one.
+    ///
+    /// Shown next to a LIVE picker, never a disabled one — the 2026-07-31
+    /// reversal, made after the owner was shown the same class of measurement
+    /// twice. The control is real, the stored choice survives an engine switch,
+    /// the code is even forwarded to the sidecar and logged there, and the MODEL
+    /// ignores it. MEASURED for Parakeet on 2026-08-11: `ParakeetTDT.generate()`
+    /// has no `language` parameter at all — only `**kwargs`, the same
+    /// swallow-without-raising shape as Granite's and Voxtral's — and driven
+    /// with None, "fr", "de" and a nonsense "xx" it returned byte-identical
+    /// 264-character output every time and raised nothing.
+    ///
+    /// Do NOT "fix" the sidecar to honour it: there is nothing there to honour.
+    static func realtimeNote(forModel id: String) -> String? {
+        switch id {
+        case RealtimeASRService.parakeetModelID:
+            // Short on screen; the evidence stays here. Measured 2026-08-11:
+            // `ParakeetTDT.generate()` has no `language` parameter, only
+            // `**kwargs` — driven with None, "fr", "de" and a nonsense "xx" it
+            // returned byte-identical 264-char output and raised nothing. Same
+            // swallow-without-raising shape as Granite and Voxtral.
+            return "Detected automatically — this setting will not change the transcript."
+        default:
+            return nil
+        }
+    }
+
+    /// One line naming what a realtime engine handles, or nil when there is no
+    /// honest roster to state. Nemotron gets nil for the reason its picker's
+    /// comment gives: 40 locales claimed, none published, and inventing them
+    /// would be worse than saying nothing.
+    static func realtimeSupportedSentence(forModel id: String) -> String? {
+        switch id {
+        case RealtimeASRService.parakeetModelID:
+            return "Supported languages: "
+                + parakeet.map { $0.1 }.joined(separator: ", ") + "."
+        case RealtimeASRService.funasrModelID:
+            // Stated as what this build supports, deliberately NOT as what the
+            // model card claims (30). See `funasr` above.
+            return "Supported languages: "
+                + funasr.map { $0.1 }.joined(separator: ", ") + "."
+        default:
+            return nil
+        }
+    }
+
     /// Does this chunked model take a language at all?
     ///
     /// Verified in `ChunkedASRModels.swift`: `GraniteSpeechModel` and
@@ -584,6 +788,9 @@ enum Languages {
 
     static func name(for code: String) -> String {
         if code == auto.code { return auto.name }
-        return (allTiers + realtime).first { $0.code == code }?.name ?? code
+        // `parakeet` is in the list because nine of its codes (bg, hr, et, lv,
+        // lt, mt, sk, sl, uk) appear in no tier and in no other roster — without
+        // it the "…was dropped" note would name a raw code instead of a language.
+        return (allTiers + realtime + parakeet).first { $0.code == code }?.name ?? code
     }
 }

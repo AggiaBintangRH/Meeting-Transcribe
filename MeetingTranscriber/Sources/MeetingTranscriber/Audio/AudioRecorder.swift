@@ -462,6 +462,13 @@ final class AudioRecorder: ObservableObject {
     /// Read once in `lockDiarizationSettings`; see there for why. Inert unless
     /// `diarizenDiarizationActive`.
     var diarizenOverlapMarking = false
+    /// This session runs the CAM++ engine. Locked at `beginCapture` like the
+    /// other engine flags — half a transcript labelled by each engine is not a
+    /// state any display path can render honestly. Declared here rather than in
+    /// `AudioRecorder+CamPlus` for the plain Swift reason the flags above are:
+    /// an extension cannot hold stored properties. Inert for every other
+    /// session — it stays false, so every guard that reads it is a no-op.
+    var camPlusDiarizationActive = false
     /// True when the chunked ASR model IS MOSS, so one process fills both roles
     /// and the segments arriving on `onChunkSegments` describe the very text
     /// `onChunkTranscript` is about to deliver.
@@ -857,7 +864,7 @@ final class AudioRecorder: ObservableObject {
         // `asr` is the OFFICE LANE of the one realtime sidecar (the remote lane
         // of the same process is picked up in 5b). Same `feed`/`flush`/
         // `onTranscript` calls as when this was a whole service.
-        let asr = realtimeOn ? modelLoader.nemotronASR?.office : nil
+        let asr = realtimeOn ? modelLoader.realtimeASR?.office : nil
         asr?.onTranscript = { [weak self] text, isFinal in
             Task { @MainActor in
                 guard let self else { return }
@@ -908,11 +915,11 @@ final class AudioRecorder: ObservableObject {
         // hangs off) — so a single-stream session never installs this callback at
         // all, and (see the `else` below) never leaves a stale one installed.
         let remoteASR = (realtimeOn && remoteResampler != nil)
-            ? modelLoader.nemotronASR?.remote : nil
+            ? modelLoader.realtimeASR?.remote : nil
         if remoteASR == nil {
             // Sharing one process means the remote lane outlives the session that
             // wanted it. Detach so a previous meeting's closure can never fire.
-            modelLoader.nemotronASR?.detachRemoteLane()
+            modelLoader.realtimeASR?.detachRemoteLane()
         }
         remoteASR?.onTranscript = { [weak self] text, _ in
             Task { @MainActor in
@@ -1026,6 +1033,7 @@ final class AudioRecorder: ObservableObject {
         // one of the four true and the other three have already no-op'd cleanly.
         configureNemo()
         configureDiarizen()
+        configureCamPlus()
         configureOverlapDetect()
         // The second MOSS process for this session, or nil — captured once, like
         // `chunked`, so the escaping tap closure never touches the recorder to
@@ -1038,7 +1046,7 @@ final class AudioRecorder: ObservableObject {
         // second lands in the old segment — same class of approximation as the
         // existing time→char sentence split. No-op when the feature is off
         // (positionDiarizer == nil → this optional-chain never installs anything).
-        // The realtime engine is modelLoader.nemotronASR (there is no `self.asr`
+        // The realtime engine is modelLoader.realtimeASR (there is no `self.asr`
         // property — `asr` is a local in beginCapture); flush() is a safe no-op
         // when idle, and empty-text finals are already dropped in onTranscript.
         // Office-only on purpose, and now spelled out by the `.office` lane: the
@@ -1048,7 +1056,7 @@ final class AudioRecorder: ObservableObject {
         // remote audio reaching the position path, which it must never do.
         positionDiarizer?.onClusterChange = { [weak self] in
             guard let self, !self.stopped else { return }
-            self.modelLoader.nemotronASR?.office.flush()  // end the old speaker's realtime segment now
+            self.modelLoader.realtimeASR?.office.flush()  // end the old speaker's realtime segment now
             self.rebuildDisplayRows()              // relabel existing rows' fills instantly
         }
         // Optionally start each recording with a clean speaker store. Addressed to
@@ -1380,7 +1388,7 @@ final class AudioRecorder: ObservableObject {
         // Stop ingesting beam notices, but KEEP the collected data — display-time
         // gap-fill (positionGapFill → label(for:)) still queries it afterward.
         positionDiarizer?.stop()
-        modelLoader.nemotronASR?.office.flush() // finalize any trailing speech
+        modelLoader.realtimeASR?.office.flush() // finalize any trailing speech
         // Remote's tail window is the office tail window — read BEFORE the office
         // branch below advances `lastChunkBoundary`, so both streams' last windows
         // still line up exactly as they did at every live boundary.
@@ -1507,7 +1515,7 @@ final class AudioRecorder: ObservableObject {
             // Flush parity with the office lane above: finalize the remote
             // caption's trailing speech before its tail chunk is queued. Its own
             // opcode, so this resets only the remote buffer in the sidecar.
-            modelLoader.nemotronASR?.remote.flush()
+            modelLoader.realtimeASR?.remote.flush()
             // Remote follows the SAME two toggles the office lane does, because
             // they are pipeline-level settings and the alternative is a silent
             // asymmetry: "re-transcribe the recording" that leaves half the
@@ -1554,7 +1562,14 @@ final class AudioRecorder: ObservableObject {
             batchActive: diarizenDiarizationActive,
             hasService: modelLoader.diarizen != nil,
             hasRecording: lastRecordingURL != nil)
+        // Its OWN rule again, for the reason stated above DiariZen's: sharing one
+        // call would ask whether ANOTHER engine's sidecar was up for this session.
+        let runsCamPlusPass = Self.runsBatchOfficePass(
+            batchActive: camPlusDiarizationActive,
+            hasService: modelLoader.camPlus != nil,
+            hasRecording: lastRecordingURL != nil)
         let willRunStopPass = runsSpectralPass || runsNemoPass || runsDiarizenPass
+            || runsCamPlusPass
             || (finalOn && modelLoader.pyannote != nil)
         // The remote pass is dispatched HERE, before the overlay is built, so the
         // step list knows whether to show a remote-diarization row. Queued ahead
@@ -1572,6 +1587,8 @@ final class AudioRecorder: ObservableObject {
             willRunRemoteDiar = startRemoteNemoDiarization()
         } else if diarizenDiarizationActive {
             willRunRemoteDiar = startRemoteDiarizenDiarization()
+        } else if camPlusDiarizationActive {
+            willRunRemoteDiar = startRemoteCamPlusDiarization()
         } else {
             willRunRemoteDiar = startRemoteDiarization()
         }
@@ -1595,9 +1612,10 @@ final class AudioRecorder: ObservableObject {
         // ONE budget for both batch engines rather than two, because a session runs
         // at most one of them — see `stopWatchdogSeconds(batchPassSeconds:)`.
         let batchEngineActive = spectralDiarizationActive || nemoDiarizationActive
-            || diarizenDiarizationActive
+            || diarizenDiarizationActive || camPlusDiarizationActive
         let batchBudget = batchEngineActive
-            && (runsSpectralPass || runsNemoPass || runsDiarizenPass || willRunRemoteDiar)
+            && (runsSpectralPass || runsNemoPass || runsDiarizenPass
+                || runsCamPlusPass || willRunRemoteDiar)
             ? Self.batchPassWatchdogSeconds(recordingLength: recordingElapsed)
                 * (willRunRemoteDiar ? 2 : 1)
             : 0
@@ -1639,6 +1657,8 @@ final class AudioRecorder: ObservableObject {
                 startNemoDiarization(recording)
             } else if runsDiarizenPass, let recording = lastRecordingURL {
                 startDiarizenDiarization(recording)
+            } else if runsCamPlusPass, let recording = lastRecordingURL {
+                startCamPlusDiarization(recording)
             } else if continueOnStop {
                 diarizeTailChunk()
             } else if let recording = lastRecordingURL {

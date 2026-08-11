@@ -66,13 +66,16 @@ struct DiarizationTab: View {
     /// no live pass, one whole-file pass at Stop, no tail — so it joins the
     /// batch group rather than getting a branch of its own.
     private var isDiarizen: Bool { engine == ModelLoader.diarizenEngineID }
+    /// CAM++, the sixth engine (2026-08-11). Same SPECTRAL shape again — no live
+    /// pass, one whole-file pass at Stop, no tail — so it joins the batch group.
+    private var isCamPlus: Bool { engine == ModelLoader.camPlusEngineID }
     /// The two WHOLE-FILE BATCH engines. Shared pyannote controls apply to
     /// neither: there is no live pass to time, no live labels for a tail to
     /// continue from, and the stop pass is not optional — it IS the labels.
     /// `runsBatchOfficePass` reads none of the three, so hiding them here is not
     /// hiding something still in force; it is the UI agreeing with a rule that
     /// already ignores them.
-    private var isBatchEngine: Bool { isSpectral || isNemo || isDiarizen }
+    private var isBatchEngine: Bool { isSpectral || isNemo || isDiarizen || isCamPlus }
     var body: some View {
         Group {
             
@@ -199,6 +202,26 @@ struct DiarizationTab: View {
                      + "appear.\n"
                      + "It marks overlapping speech itself, so Detect overlap is not "
                      + "used here.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isCamPlus {
+                // ITS OWN BRANCH, for the reason DiariZen's exists: without one it
+                // would fall through to the `else` below and hand the user MOSS's
+                // advice about chunk length, a CHUNKED-ASR setting with no effect
+                // on this engine.
+                //
+                // The third line is where it differs from DiariZen's: this engine
+                // clusters one label per window, so its turns never intersect and
+                // it cannot mark overlap — the same sentence NeMo's branch carries,
+                // and it is a property of the clustering, not a family resemblance.
+                // Same three-sentence limit the owner set on 2026-08-10.
+                Text("No settings — the whole recording is diarized once at Stop, "
+                     + "speaker count automatic.\n"
+                     + "Profiles and renaming work. spk confidence usually will not "
+                     + "appear.\n"
+                     + "It cannot mark two people at once, so overlap repair needs "
+                     + "Detect overlap switched on.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)

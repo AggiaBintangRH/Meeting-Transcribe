@@ -142,10 +142,14 @@ class Lane:
     captured separately.
     """
 
-    def __init__(self, stream: str = None) -> None:
+    def __init__(self, stream: str = None, partial_every: int = PARTIAL_EVERY) -> None:
         self.stream = stream  # None = office; "remote" tags the output lines
         self.buffer = np.zeros(0, dtype=np.float32)
         self.samples_since_partial = 0
+        # Per-lane, never a module global, so `--partial-ms` cannot leave office
+        # and remote running to different cadences. Both lanes get the same
+        # value at startup and nothing mutates it after.
+        self.partial_every = partial_every
 
     def reset(self) -> None:
         self.buffer = np.zeros(0, dtype=np.float32)
@@ -160,7 +164,7 @@ class Lane:
     def wants_partial(self) -> bool:
         # Cadence stretches with buffer length so a full re-transcribe of a long
         # utterance does not fall behind realtime (see PARTIAL_DUTY).
-        needed = max(PARTIAL_EVERY, int(self.buffer.size * PARTIAL_DUTY))
+        needed = max(self.partial_every, int(self.buffer.size * PARTIAL_DUTY))
         return self.samples_since_partial >= needed and self.buffer.size > SR // 2
 
 
@@ -168,7 +172,28 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--language", default="auto")
     parser.add_argument("--chunk-ms", type=int, default=160)
+    # THE CAPTION CADENCE — the same control, the same name and the same values
+    # Parakeet has (owner, 2026-08-11: *"jangan dibedakan, soalnya sama tentang
+    # waktu interval"*). It had never been exposed here; the cadence was the
+    # `PARTIAL_EVERY` constant and nothing could change it.
+    #
+    # ONE DIFFERENCE FROM PARAKEET, and it is protective rather than cosmetic:
+    # here the value is a FLOOR, not the exact cadence. `PARTIAL_DUTY` still
+    # stretches it as the buffer grows (`max(partial_every, buffer * 0.15)`),
+    # because a Nemotron partial costs 2.08 s on a 30 s buffer against
+    # Parakeet's 0.235 s. Without that stretch a short interval would put the
+    # lane past 100 % duty on a long utterance and it would never catch up. So
+    # a short interval here buys responsiveness EARLY in an utterance, which is
+    # where it is felt, and is overridden later, which is where it would hurt.
+    parser.add_argument("--partial-ms", type=int,
+                        default=int(PARTIAL_EVERY / SR * 1000))
     args = parser.parse_args()
+
+    # Clamped, not trusted — same range as Parakeet's.
+    partial_ms = max(250, min(args.partial_ms, 10_000))
+    partial_every = int(partial_ms / 1000 * SR)
+    if partial_ms != args.partial_ms:
+        log(f"--partial-ms {args.partial_ms} out of range, clamped to {partial_ms}")
 
     att_context = ATT_CONTEXT.get(args.chunk_ms, [56, 3])
     language = None if args.language in ("", "auto") else args.language
@@ -181,6 +206,11 @@ def main() -> None:
 
     try:
         from mlx_audio.stt import load  # heavy import — keep inside main
+        # mlx-audio 0.4.7's `_prepare_audio` wants an `mx.array`; a numpy buffer
+        # raises TypeError and costs the chunk-size setting (see `transcribe`).
+        # Imported HERE, beside its only consumer, and not at module scope —
+        # mlx_audio pulls it in anyway, so this adds no load time.
+        import mlx.core as mx
     except Exception:  # noqa: BLE001
         fail(f"mlx-audio import failed: {brief_traceback()} — "
              "run download-best-models.sh")
@@ -191,16 +221,74 @@ def main() -> None:
         fail(f"Nemotron model load failed: {brief_traceback()} — "
              "run download-best-models.sh")
 
+    # WHICH BRANCH RAN — logged once, the first time each one is taken.
+    #
+    # This ladder degrades SILENTLY by design, and on mlx-audio 0.4.7 that
+    # silence hides something the user can see in Settings: `model.generate()`
+    # raises `TypeError` for a numpy array, so the first branch never runs, the
+    # second raises too, and every call lands in the temp-WAV last resort —
+    # which DROPS `att_context_size` entirely. The chunk-size picker therefore
+    # does not currently change recognition at all.
+    #
+    # Deliberately NOT "fixed" here (2026-08-11): measured, the detour costs the
+    # same (0.708/2.135/4.315 s at 10/30/60 s), and passing att_context_size
+    # properly makes Nemotron SLOWER (5.46 s vs 2.12 s on a 30 s buffer) with
+    # its text equivalence unmeasured. That is its own change and its own device
+    # run. What is fixed is the EVIDENCE: the log now says which branch ran, so
+    # the fact lives in logs/nemotron.log instead of only in a comment. The tab
+    # says the same thing in words.
+    branch_logged = set()
+
+    def note_branch(which: str) -> None:
+        if which not in branch_logged:
+            branch_logged.add(which)
+            log(f"transcribe branch: {which}")
+
     def transcribe(audio: np.ndarray) -> str:
         kwargs = {}
         if language:
             kwargs["language"] = language
         try:
-            return model.generate(audio, att_context_size=att_context, **kwargs).text
+            # `mx.array`, NOT the raw numpy buffer — FIXED 2026-08-11 (owner).
+            #
+            # This one conversion is the whole repair. mlx-audio 0.4.7 changed
+            # `_prepare_audio` to call `audio.astype(mx.float32)`, which numpy
+            # cannot interpret, so BOTH array branches raised `TypeError` and the
+            # ladder fell through to the temp-WAV branch below — which takes a
+            # PATH and therefore cannot carry `att_context_size`. The setting was
+            # accepted, stored, shown in Settings, and silently discarded. It
+            # broke when `download-best-models.sh` moved mlx-audio 0.4.5 → 0.4.7
+            # unpinned on 2026-08-10; nothing failed loudly because the fallback
+            # produced correct text at the same speed.
+            #
+            # Measured cost of restoring it, seconds per partial, best of 2, on
+            # `recordings/Meeting5People.wav` — the numbers behind the duty
+            # figures in `RealtimeModelTab.chunkHint`:
+            #
+            #   buffer   none     80    160    560   1120
+            #      5 s   0.35   2.96   0.91   0.57   0.36
+            #     10 s   0.68   5.98   1.82   1.13   0.67
+            #     20 s   1.38  12.03   3.67   2.27   1.37
+            #     30 s   2.08  18.04   5.49   3.42   2.08
+            #
+            # Two things that table settles. **1120 ms is exactly the old
+            # behaviour** — same time, byte-identical text — so an install left
+            # at the shipped default transcribes precisely as it did before this
+            # fix, and the 160 ms default is the only value that changes anything
+            # for an untouched user. **80 ms cannot be served here**: ~400 % duty
+            # against its own cadence on ONE lane, so it falls permanently
+            # behind. The tab states each option's duty rather than hiding the
+            # choice — the owner sets settings, this file makes them true.
+            text = model.generate(mx.array(audio),
+                                  att_context_size=att_context, **kwargs).text
+            note_branch(f"mx.array + att_context_size={att_context}")
+            return text
         except TypeError:
             pass  # build without att_context_size / array support — degrade below
         try:
-            return model.generate(audio, **kwargs).text
+            text = model.generate(mx.array(audio), **kwargs).text
+            note_branch("mx.array, NO att_context_size (chunk size has no effect)")
+            return text
         except Exception:
             # last resort: some builds only accept file paths
             import tempfile
@@ -213,7 +301,10 @@ def main() -> None:
                     w.setsampwidth(2)
                     w.setframerate(SR)
                     w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
-                return model.generate(path, **kwargs).text
+                text = model.generate(path, **kwargs).text
+                note_branch("temp WAV path, NO att_context_size "
+                            "(chunk size has no effect)")
+                return text
             finally:
                 os.unlink(path)
 
@@ -271,8 +362,10 @@ def main() -> None:
     # The remote lane exists from the start but stays empty — it costs a
     # zero-length array — so a single-stream session never allocates, never
     # transcribes and never emits anything for it.
-    office = Lane()
-    remote = Lane("remote")
+    log(f"partial cadence floor {partial_ms} ms (stretched by PARTIAL_DUTY "
+        f"on long buffers)")
+    office = Lane(partial_every=partial_every)
+    remote = Lane("remote", partial_every=partial_every)
     stdin = sys.stdin.buffer
 
     def read_samples(count: int):

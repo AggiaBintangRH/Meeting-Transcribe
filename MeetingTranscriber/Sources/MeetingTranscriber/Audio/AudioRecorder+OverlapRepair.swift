@@ -55,6 +55,7 @@ extension AudioRecorder {
     /// `overlapRegions()` is empty under them however the audio sounds.
     var usesDetectedRegionsForRepair: Bool {
         mossDiarizationActive || spectralDiarizationActive || nemoDiarizationActive
+            || camPlusDiarizationActive
     }
 
     /// Which engine to NAME in the log when repair is skipped for want of the
@@ -70,6 +71,7 @@ extension AudioRecorder {
     var batchEngineNameForLog: String {
         if mossDiarizationActive { return "MOSS" }
         if nemoDiarizationActive { return "NEMO" }
+        if camPlusDiarizationActive { return "CAM++" }
         return "SPECTRAL"
     }
 

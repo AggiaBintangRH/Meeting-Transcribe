@@ -221,6 +221,25 @@ dl() { # dl <repo_id> <label>
 # 1. REALTIME ASR — Nemotron 3.5 Streaming 0.6B (MLX, bf16)
 # -------------------------------------------------------------
 dl "mlx-community/nemotron-3.5-asr-streaming-0.6b" "Nemotron 3.5 ASR Streaming 0.6B (MLX)"
+# The SECOND realtime engine (2026-08-11), selectable as `realtime.model`.
+# Needs NO new venv, NO vendored tree and NO new pip dependency: mlx-audio 0.4.7
+# already ships the class (`mlx_audio.stt.models.parakeet`), so it runs in the
+# main .venv beside Nemotron. CC BY-4.0, which is what makes it shippable to a
+# paying client — the same licence question that ruled out five of DiariZen's
+# six checkpoints.
+dl "mlx-community/parakeet-tdt-0.6b-v3" "Parakeet TDT 0.6b v3 (MLX, CC BY-4.0)"
+# The THIRD realtime engine (2026-08-11). Same free ride as Parakeet — mlx-audio
+# 0.4.7 already ships the class (`mlx_audio.stt.models.fun_asr_nano`), so no new
+# venv, no vendored tree, no new pip dependency. Apache 2.0 upstream
+# (FunAudioLLM/Fun-ASR-MLT-Nano-2512), so it is shippable to a paying client.
+#
+# ⚠ The MLX repo was converted with `mlx-audio-plus`, a FORK, and mainline
+# mlx-audio cannot load it correctly without the three shims in
+# scripts/funasr/funasr-service.py (config key names, the untied lm_head, and
+# float32). Without them it loads silently and emits "!!!!!!!!" forever — which
+# is why the load check below asserts real TEXT rather than just a successful
+# load, unlike the two engines above.
+dl "mlx-community/Fun-ASR-MLT-Nano-2512-fp16" "Fun-ASR MLT Nano 2512 (MLX, Apache 2.0)"
 
 # Runtime: mlx-audio with Nemotron STT support.
 # Nemotron support was MERGED upstream (PR #771/#774/#775) — the old fork
@@ -724,6 +743,85 @@ else
 fi
 
 # -------------------------------------------------------------
+# 3e. DIARIZATION ENGINE 5 — CAM++ (NO venv of its own)
+# -------------------------------------------------------------
+#     Selectable as diarization.engine = campplus.
+#
+#     THE CHEAPEST ENGINE TO SET UP, and deliberately so. Unlike NeMo, DiCoW and
+#     DiariZen — ~1.5 GB of portable Python each — this needs NO interpreter, NO
+#     new pip dependency and NO editable install: torch, torchaudio, scipy,
+#     soundfile and silero-vad are all already in the main .venv, and the CAM++
+#     architecture is VENDORED (Apache 2.0, two files from wenet-e2e/wespeaker,
+#     byte-identical to upstream and pinned by `campplus/vendor-is-verbatim`).
+#     So the whole engine costs 66 MB of weights.
+#
+#     Vendored rather than `pip install wespeaker` for the reason build.sh:110
+#     records: it strips `git+` refs out of the frozen requirements, so a pip
+#     install silently vanishes from the packaged .app — the exact failure that
+#     shipped a broken DiCoW to a client machine on 2026-07-27.
+#
+#     LICENCE: Wespeaker/wespeaker-voxceleb-campplus-LM is Apache 2.0. That is
+#     what chose it. The MLX-native CAM++ on the hub declares NO licence at all,
+#     and this app is sold to a client, so "unlicensed" is all-rights-reserved —
+#     the same question that ruled out five of DiariZen's six checkpoints.
+echo ""
+echo "==> Fetching the CAM++ checkpoint (Wespeaker/wespeaker-voxceleb-campplus-LM)..."
+CAMPP_VENDOR="$SCRIPT_DIR/scripts/campplus/vendor/wespeaker/models"
+if [ ! -f "$CAMPP_VENDOR/campplus.py" ] || [ ! -f "$CAMPP_VENDOR/pooling_layers.py" ]; then
+  echo "!! scripts/campplus/vendor is incomplete — the CAM++ architecture is"
+  echo "   vendored, not pip-installed, so the engine cannot load without it."
+  FAILED+=("scripts/campplus/vendor")
+fi
+HF_HOME="$HF_HOME" "$PY" - <<'EOF' || FAILED+=("CAM++ checkpoint")
+import os, sys
+# The one moment the network is allowed — a one-time download. HF_HUB_OFFLINE is
+# deliberately NOT set here, and IS set by the sidecar at runtime.
+os.environ.pop("HF_HUB_OFFLINE", None)
+try:
+    from huggingface_hub import hf_hub_download
+    # Only the two files the sidecar reads. The repo also ships a 25 MB ONNX
+    # copy of the same weights, which nothing here loads — this engine runs the
+    # PyTorch checkpoint through the vendored architecture.
+    for name in ("avg_model.pt", "config.yaml"):
+        path = hf_hub_download("Wespeaker/wespeaker-voxceleb-campplus-LM", name)
+    print(f"   OK: Wespeaker/wespeaker-voxceleb-campplus-LM -> {os.path.dirname(path)}")
+except Exception as exc:
+    print(f"!! could not fetch the CAM++ checkpoint: {type(exc).__name__}: {exc}")
+    sys.exit(1)
+EOF
+
+# END-TO-END, not just "the file is on disk" — the same standard the Fun-ASR
+# check above is held to. It drives the SIDECAR's own loader, so what is verified
+# is the code the app runs, and it asserts the checkpoint really fits the
+# vendored architecture: `load_campplus` raises on any missing parameter, which
+# is what turns "wrong checkpoint" into a startup error instead of plausible-
+# looking garbage vectors.
+echo ""
+echo "==> Verifying CAM++ actually loads and embeds..."
+HF_HUB_OFFLINE=1 HF_HOME="$HF_HOME" "$PY" - <<'EOF'
+import importlib.util, os, sys, traceback
+try:
+    import numpy as np
+    path = os.path.join(os.getcwd(), "scripts", "campplus", "campplus-service.py")
+    spec = importlib.util.spec_from_file_location("campplus_service", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    model = mod.load_campplus()
+    tone = (0.1 * np.sin(2 * np.pi * 220 * np.arange(2 * 16000) / 16000)).astype(np.float32)
+    vector = mod.embed_window(model, mod.global_fbank(tone), 0.0, 2.0)
+    if vector is None or vector.shape != (512,):
+        print(f"   FAILED: CAM++ returned {None if vector is None else vector.shape}, "
+              "expected a 512-dim vector")
+        sys.exit(1)
+    print("   OK: CAM++ loaded and produced a 512-dim embedding")
+except Exception:
+    print("   FAILED: CAM++ load — full traceback:")
+    traceback.print_exc(file=sys.stdout)
+    sys.exit(1)
+EOF
+[ $? -eq 0 ] || FAILED+=("CAM++ load test — diarization.engine=campplus will not start until this passes")
+
+# -------------------------------------------------------------
 # 4. VAD — Silero VAD v6.2.1 (weights ship inside the pip package)
 # -------------------------------------------------------------
 echo ""
@@ -897,6 +995,11 @@ checks = {
     "numpy": "NumPy",
     "mlx_audio": "mlx-audio (Nemotron runtime)",
     "mlx_audio.stt.models.nemotron_asr": "mlx-audio Nemotron model support",
+    # The second realtime engine ships INSIDE mlx-audio, so nothing installs it
+    # separately — which means the only thing that would notice the class
+    # disappearing from a future release is this line.
+    "mlx_audio.stt.models.parakeet": "mlx-audio Parakeet model support",
+    "mlx_audio.stt.models.fun_asr_nano": "mlx-audio Fun-ASR Nano model support",
     "mlx_whisper": "mlx-whisper (Whisper runtime)",
     "pyannote.audio": "pyannote.audio (diarization runtime)",
     # Both are the spectral engine's, and NOTHING ELSE in the app imports
@@ -933,6 +1036,61 @@ except Exception:
     sys.exit(1)
 EOF
 [ $? -eq 0 ] || FAILED+=("Nemotron model load test — the app will not transcribe until this passes")
+
+# Same end-to-end check for the SECOND realtime engine. A separate block, not a
+# loop: a failure has to name WHICH engine could not load, because the two are
+# selectable independently and only the SELECTED one can stop a session.
+echo ""
+echo "==> Verifying Parakeet model actually loads (takes ~4s first time)..."
+HF_HUB_OFFLINE=1 "$PY" - <<'EOF'
+import sys, traceback
+try:
+    from mlx_audio.stt import load
+    model = load("mlx-community/parakeet-tdt-0.6b-v3")
+    print("   OK: Parakeet TDT 0.6b v3 loaded successfully")
+except Exception:
+    print("   FAILED: Parakeet load — full traceback:")
+    traceback.print_exc(file=sys.stdout)
+    sys.exit(1)
+EOF
+[ $? -eq 0 ] || FAILED+=("Parakeet model load test — realtime.model=parakeet will not start until this passes")
+
+# THIRD realtime engine — and this check is deliberately STRONGER than the two
+# above. Fun-ASR's failure mode is not an exception, it is `!!!!!!!!`: mainline
+# mlx-audio loads this fork-converted checkpoint with every sub-config silently
+# defaulted, and only the OUTPUT shows it. So a load that "succeeds" proves
+# nothing and this asserts real decoded text.
+#
+# It imports the SIDECAR's own `load_funasr()` rather than repeating the three
+# shims here. A copy would be a second place for them to drift, and the thing
+# worth verifying is precisely the code the app runs.
+echo ""
+echo "==> Verifying Fun-ASR model actually loads AND decodes (takes ~5s first time)..."
+HF_HUB_OFFLINE=1 "$PY" - <<'EOF'
+import importlib.util, os, sys, traceback
+try:
+    import numpy as np, mlx.core as mx
+    path = os.path.join(os.getcwd(), "scripts", "funasr", "funasr-service.py")
+    spec = importlib.util.spec_from_file_location("funasr_service", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    model = mod.load_funasr()
+    # 2 s of a 440 Hz tone is not speech, so the TEXT is not the point — the
+    # point is that decoding produces finite logits and terminates. The broken
+    # build returns a solid run of "!" here.
+    tone = (0.1 * np.sin(2 * np.pi * 440 * np.arange(2 * 16000) / 16000)).astype(np.float32)
+    text = model.generate(mx.array(tone), language="en").text
+    if text.count("!") > 20:
+        print(f"   FAILED: Fun-ASR decoded garbage ({text[:40]!r}) — the load shims "
+              "in scripts/funasr/funasr-service.py are not working")
+        sys.exit(1)
+    print("   OK: Fun-ASR MLT Nano 2512 loaded and decoded cleanly")
+except Exception:
+    print("   FAILED: Fun-ASR load — full traceback:")
+    traceback.print_exc(file=sys.stdout)
+    sys.exit(1)
+EOF
+[ $? -eq 0 ] || FAILED+=("Fun-ASR model load test — realtime.model=funasr will not start until this passes")
 
 # End-to-end test of every chunked model exactly like the app's sidecar:
 # load + transcribe 0.5s of silence. If these pass, the app works.

@@ -286,8 +286,13 @@ extension AudioRecorder {
         // clusters globally, `NemoService` has no chunk API, and its sidecar refuses
         // any `cmd` but `final`. Written as one condition rather than a second guard
         // so a future edit cannot fix one engine's buffer leak and miss the other's.
+        // CAM++ IS THE SAME SHAPE AGAIN and joins the same condition: it counts
+        // and clusters globally, `CamPlusService` has no chunk API, and its
+        // sidecar refuses any `cmd` but `final`. One condition, not a fourth
+        // guard, so a future edit cannot fix one engine's buffer leak and miss
+        // the others'.
         guard !spectralDiarizationActive, !nemoDiarizationActive,
-              !diarizenDiarizationActive else {
+              !diarizenDiarizationActive, !camPlusDiarizationActive else {
             chunkAudio = []; chunkAudioStart = lastDiarBoundary; return
         }
         let liveOn = diarLiveEnabled

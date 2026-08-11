@@ -25,7 +25,7 @@ final class SettingsMatrixTests: XCTestCase {
     private var engines: [String] {
         [ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID,
          ModelLoader.nemoEngineID, ModelLoader.diarizenEngineID,
-         ModelLoader.mossEngineID]
+         ModelLoader.camPlusEngineID, ModelLoader.mossEngineID]
     }
 
     /// One point of the matrix, and everything the rules say about it.
@@ -77,8 +77,8 @@ final class SettingsMatrixTests: XCTestCase {
     func testTheMatrixIsTheSizeItClaims() {
         var n = 0
         sweep { _ in n += 1 }
-        // 5 chunked models x FIVE engines (DiariZen joined 2026-08-10) x six flags.
-        XCTAssertEqual(n, 5 * 5 * 2 * 2 * 2 * 2 * 2 * 2)
+        // 5 chunked models x SIX engines (CAM++ joined 2026-08-11) x six flags.
+        XCTAssertEqual(n, 5 * 6 * 2 * 2 * 2 * 2 * 2 * 2)
     }
 
     // MARK: - 1. Nothing is loaded that has nothing to do
@@ -252,6 +252,11 @@ final class SettingsMatrixTests: XCTestCase {
     /// test cannot see a call site. This pins the INTENT: an edit that decides to
     /// forward the room's count after all has to come here and argue with the
     /// reason, rather than changing one line in four files.
+    /// `@MainActor` like its sibling below, and required rather than stylistic:
+    /// `remoteNumSpeakers` is main-actor isolated, and `XCTAssertEqual` takes its
+    /// arguments as nonisolated autoclosures — which is a warning today and an
+    /// ERROR in the Swift 6 language mode.
+    @MainActor
     func testTheRemotePassesAlwaysAskForAutomaticCounting() {
         XCTAssertEqual(AudioRecorder.remoteNumSpeakers, 0,
                        "0 = auto. Any other value would be this app asserting a "
@@ -427,16 +432,102 @@ final class SettingsMatrixTests: XCTestCase {
     /// sidecar. A setting that does NOT change it leaves the previous process
     /// answering for the rest of the meeting while Settings claims otherwise.
     func testEveryRealtimeSettingChangesTheRealtimeConfig() {
-        let before = NemotronASRService.Config.fromSettings()
-        for (key, value) in [("realtime.language", "id" as Any),
-                             ("realtime.chunkMs", 320 as Any)] {
-            withKey(key, value) {
-                XCTAssertNotEqual(before, NemotronASRService.Config.fromSettings(),
-                                  "\(key) never reaches the realtime sidecar")
+        withKey("realtime.model", "nemotron") {
+            let before = RealtimeASRService.Config.fromSettings()
+            for (key, value) in [("realtime.language", "id" as Any),
+                                 ("realtime.partialMs", 3000 as Any)] {
+                withKey(key, value) {
+                    XCTAssertNotEqual(before, RealtimeASRService.Config.fromSettings(),
+                                      "\(key) never reaches the realtime sidecar")
+                }
+            }
+
+            // AND THE OPPOSITE, for the key whose control was removed on
+            // 2026-08-11. `realtime.chunkMs` must NOT reach the sidecar: the
+            // picker is gone and the value is pinned, so a number left behind by
+            // an older build — or written by hand — must not be able to decide
+            // behaviour that nothing in the UI can change back. That is the rule
+            // the 2026-08-06 pass established for six other retired keys, and
+            // this is the assertion that keeps it true for the seventh.
+            withKey("realtime.chunkMs", 320 as Any) {
+                XCTAssertEqual(before, RealtimeASRService.Config.fromSettings(),
+                               "a stored realtime.chunkMs still reaches the sidecar — "
+                               + "its control was removed, so the value must be inert")
+            }
+            XCTAssertEqual(RealtimeASRService.Config.fromSettings().chunkMs,
+                           RealtimeASRService.pinnedChunkMs,
+                           "the pinned chunk size must still be SENT — removing the "
+                           + "control must not silently drop the capability")
+
+            XCTAssertEqual(before, RealtimeASRService.Config.fromSettings(),
+                           "a key was not restored")
+        }
+    }
+
+    /// The ENGINE is a setting too, and the one whose omission would be worst: a
+    /// `realtime.model` that did not change the Config would leave the previously
+    /// loaded model transcribing while the tab showed the other one selected.
+    ///
+    /// Checked over EVERY PAIR rather than one, because that is what the third
+    /// engine changed: with two, "they differ" and "each is distinct" are the
+    /// same statement; with three a newcomer can collide with either incumbent,
+    /// and only one of those collisions would be caught by a fixed pair.
+    func testTheRealtimeEngineItselfChangesTheConfig() {
+        var configs: [(String, RealtimeASRService.Config)] = []
+        for m in ModelCatalog.realtimeModels {
+            withKey("realtime.model", m.id) {
+                let config = RealtimeASRService.Config.fromSettings()
+                XCTAssertEqual(config.modelID, m.id,
+                               "realtime.model never reaches the realtime sidecar")
+                configs.append((m.id, config))
             }
         }
-        XCTAssertEqual(before, NemotronASRService.Config.fromSettings(),
-                       "a key was not restored")
+        for i in configs.indices {
+            for j in configs.indices where j > i {
+                XCTAssertNotEqual(configs[i].1, configs[j].1,
+                                  "\(configs[i].0) and \(configs[j].0) compare equal — "
+                                  + "switching between them would reuse the running "
+                                  + "sidecar and keep the old model transcribing")
+            }
+        }
+    }
+
+    /// THE NEGATIVE DIRECTION, and it is the half a matrix sweep cannot see.
+    /// Under Parakeet the chunk-size block is not even shown, and its value must
+    /// be unable to enter the Config — otherwise moving an invisible control
+    /// tears down and reloads a 2.3 GB sidecar. Structural: `chunkMs` is nil in a
+    /// Parakeet config, so there is no value to differ.
+    func testTheChunkSizeCannotReachTheParakeetConfig() {
+        for engine in ["parakeet", "funasr"] {
+            withKey("realtime.model", engine) {
+                withKey("realtime.chunkMs", 160) {
+                    let before = RealtimeASRService.Config.fromSettings()
+                    XCTAssertNil(before.chunkMs, engine)
+                    withKey("realtime.chunkMs", 1120) {
+                        XCTAssertEqual(before, RealtimeASRService.Config.fromSettings(),
+                                       "a Nemotron-only knob changed the \(engine) config")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every realtime engine in the catalog must round-trip through the lookup —
+    /// the same shape the chunked/diarization/detector rows above assert, and the
+    /// reason `realtimeModel(id:)` has a fallback rather than a `default:`.
+    func testEveryRealtimeEngineRoundTripsThroughTheCatalog() {
+        for m in ModelCatalog.realtimeModels {
+            XCTAssertEqual(ModelCatalog.realtimeModel(id: m.id).id, m.id, m.name)
+            withKey("realtime.model", m.id) {
+                XCTAssertEqual(RealtimeASRService.Config.fromSettings().modelID, m.id,
+                               "\(m.name) is offered but no Config names it")
+            }
+        }
+        XCTAssertEqual(ModelCatalog.realtimeModels.first?.id,
+                       RealtimeASRService.defaultModelID,
+                       "the FIRST catalog entry is the default — the two must agree, "
+                       + "or an unknown stored id resolves to a model the loader "
+                       + "would not have started")
     }
 
     /// The VAD is built fresh per session rather than kept as a process, so there

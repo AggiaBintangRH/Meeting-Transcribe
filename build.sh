@@ -509,6 +509,13 @@ echo "    Import gate..."
 #     compiled extension whose only `@rpath` entry is its own LC_ID_DYLIB, the
 #     maturin case `check_relocatable` already skips.) The same import also
 #     covers scikit-learn (the spectral clustering) and soundfile.
+#   • campplus — the CAM++ architecture (two files from wenet-e2e/wespeaker,
+#     Apache 2.0, byte-identical to upstream). Vendored rather than pip-installed
+#     because there is no `wespeaker` wheel that ships just the model definitions,
+#     and because a git ref would be stripped by the freeze above. Without this
+#     tree the engine cannot construct the network at all, so the checkpoint on
+#     disk would be unloadable — a Stop-time failure in a whole-file engine,
+#     i.e. after the meeting, with nothing left to re-run.
 #
 # This table is the ONLY place the set of vendoring services is named.
 # Fields: service | package dir | import statement | remediation hint
@@ -517,7 +524,8 @@ MOSS_IMPORT="from moss_transcribe_diarize import build_transcription_messages, g
 for GATE in \
   "moss-asr|moss_transcribe_diarize|$MOSS_IMPORT|section 2c" \
   "moss-diar|moss_transcribe_diarize|$MOSS_IMPORT|section 2c" \
-  "spectral|diarize|from diarize import diarize, DiarizeResult|section 3b"; do
+  "spectral|diarize|from diarize import diarize, DiarizeResult|section 3b" \
+  "campplus|wespeaker|from wespeaker.models.campplus import CAMPPlus|section 3e"; do
   IFS='|' read -r SVC PKG IMPORT HINT <<< "$GATE"
   if ! PYTHONPATH="$ROOT/scripts/$SVC/vendor" "$RES/python/bin/python3" \
        -c "$IMPORT; print('VENDOR OK ($SVC → $PKG)')"; then
@@ -933,6 +941,7 @@ echo "                     (nemo/vendor/diar_infer_general.yaml preserved: $([[ 
 # engine landed, found by the 2026-08-10 audit.
 echo "                     (diarizen/vendor/diarizen preserved: $([[ -d "$RES/scripts/diarizen/vendor/diarizen" ]] && echo yes || echo NO))"
 echo "                     (diarizen/vendor/pyannote-audio preserved: $([[ -d "$RES/scripts/diarizen/vendor/pyannote-audio" ]] && echo yes || echo NO))"
+echo "                     (campplus/vendor/wespeaker preserved: $([[ -f "$RES/scripts/campplus/vendor/wespeaker/models/campplus.py" ]] && echo yes || echo NO))"
 
 if [[ "${MT_SKIP_MODELS:-0}" == "1" ]]; then
   echo "    MT_SKIP_MODELS=1 — skipping 16GB models copy."

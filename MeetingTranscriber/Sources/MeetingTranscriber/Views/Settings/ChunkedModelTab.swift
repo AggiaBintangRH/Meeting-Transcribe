@@ -187,8 +187,14 @@ struct ChunkedModelTab: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if !finalPass {
+                // Deliberately NOT naming the engine. It said "(Nemotron)" until
+                // 2026-08-11, when a second realtime engine landed and the
+                // sentence became capable of naming a model this session is not
+                // running — the same defect as the rail reading "pyannote" for a
+                // DiariZen session. Which engine it is lives on the Realtime tab,
+                // where it can be right by construction.
                 Text("Off: nothing is transcribed at stop. The last seconds keep the realtime "
-                     + "(Nemotron) text that is already on screen instead of being deleted — so "
+                     + "engine's text that is already on screen instead of being deleted — so "
                      + "no speech is lost, but that tail has no transcript confidence and no word "
                      + "alignment, and it is the less accurate engine. With MOSS selected as both "
                      + "the chunked model and the diarization engine, the tail also keeps no "

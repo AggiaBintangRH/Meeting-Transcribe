@@ -46,11 +46,14 @@ final class ModelLoader: ObservableObject {
     /// Kept alive across sessions so the model only loads once.
     private(set) var sileroVAD: SileroVADService?
 
-    /// Nemotron realtime ASR sidecar; recreated only when its settings change.
+    /// Realtime ASR sidecar (Nemotron or Parakeet, per `realtime.model`);
+    /// recreated only when its settings change — INCLUDING the engine, which is
+    /// part of `Config` precisely so that switching it replaces the process
+    /// rather than leaving the previous model answering.
     /// ONE process serving both streams: its `office` and `remote` lanes keep
     /// separate buffers inside the sidecar, so a Remote channel costs no second
-    /// model load and no second process — see `NemotronASRService`.
-    private(set) var nemotronASR: NemotronASRService?
+    /// model load and no second process — see `RealtimeASRService`.
+    private(set) var realtimeASR: RealtimeASRService?
 
     /// Chunked ASR sidecar (Qwen3/Whisper/Voxtral per settings); persistent.
     private(set) var chunkedASR: ChunkedASRService?
@@ -96,6 +99,10 @@ final class ModelLoader: ObservableObject {
     /// The DiariZen engine's sidecar, in `.venv-diarizen`. Persistent; nil unless
     /// `diarization.engine` is `diarizen`.
     private(set) var diarizen: DiarizenService?
+    /// The CAM++ engine's sidecar, in the MAIN `.venv` — unlike NeMo, DiCoW and
+    /// DiariZen it needs no interpreter of its own. Persistent; nil unless
+    /// `diarization.engine` is `campplus`.
+    private(set) var camPlus: CamPlusService?
 
     /// Speaker-identity sidecar (WeSpeaker + the two profile stores); persistent.
     /// The other half of the former `diarize-service.py`.
@@ -152,7 +159,7 @@ final class ModelLoader: ObservableObject {
     /// load step, to replace the process when its settings changed. Services are
     /// kept alive across sessions, so switching realtime captions off left the
     /// sidecar resident until the app quit, with nothing able to ask it anything:
-    /// `AudioRecorder` reads `modelLoader.nemotronASR?.office` only when the same
+    /// `AudioRecorder` reads `modelLoader.realtimeASR?.office` only when the same
     /// flag is on, so the behaviour was already correct and ONLY the memory was
     /// wrong — which is why it never surfaced. Measured on the owner's Mac:
     /// **1.70 GB**, the second-largest process in a default session.
@@ -184,6 +191,9 @@ final class ModelLoader: ObservableObject {
     /// inconsistency.
     nonisolated static let nemoEngineID = "nemo"
     nonisolated static let diarizenEngineID = "diarizen"
+    /// The CAM++ diarization engine id — the sixth engine (2026-08-11). Same
+    /// string as its catalog id, like every engine except MOSS.
+    nonisolated static let camPlusEngineID = "campplus"
 
     /// Whether this session loads the forced aligner.
     ///
@@ -217,7 +227,7 @@ final class ModelLoader: ObservableObject {
     /// the transcript. This switch is the one that stops it.
     ///
     /// WHAT TURNING IT OFF COSTS, stated here because the cost is the feature:
-    /// the meeting has no accurate transcript at all. The realtime Nemotron text
+    /// the meeting has no accurate transcript at all. The realtime engine's text
     /// becomes the only text that audio will ever have, and the existing
     /// `.none` stop plan already refuses to sweep it away for exactly that reason.
     /// The Chunked tab says so in as many words before the toggle.
@@ -320,6 +330,8 @@ final class ModelLoader: ObservableObject {
             return .nemo
         case diarizenEngineID:
             return .diarizen
+        case camPlusEngineID:
+            return .camPlus
         default:
             // An UNKNOWN stored value still resolves to pyannote, which is what
             // `diarizationEngine(forEngine:)` shows and what the recorder's
@@ -338,6 +350,7 @@ final class ModelLoader: ObservableObject {
         case spectral           // spectral-service + wespeaker-service
         case nemo               // nemo-service (.venv-nemo) + wespeaker-service
         case diarizen           // diarizen-service (.venv-diarizen) + wespeaker-service
+        case camPlus            // campplus-service (main .venv) + wespeaker-service
         case mossSecondProcess  // a second MOSS process, ASR done by another model
         case mossOwnASR         // MOSS is ALSO the chunked model — no second
                                 // process to load, but identity is still wanted
@@ -414,8 +427,15 @@ final class ModelLoader: ObservableObject {
         // second opinion had to be switched on before repair would load at all,
         // while the regions the engine had already produced were thrown away. See
         // `AudioRecorder.usesDetectedRegionsForRepair` for the full measurement.
+        // CAM++ joins this set, not DiariZen's: its clustering assigns exactly
+        // one label per window, so its turns never intersect and it can no more
+        // mark overlap than spectral or NeMo can. Stated PER ENGINE rather than
+        // derived, per the rule the DiariZen work established — "does this
+        // engine mark its own overlap" has the same answer for pyannote and
+        // DiariZen but different verdicts, so deriving one from the other would
+        // silently move pyannote the next time someone tidies this.
         if diarEngine == mossEngineID || diarEngine == spectralEngineID
-            || diarEngine == nemoEngineID {
+            || diarEngine == nemoEngineID || diarEngine == camPlusEngineID {
             guard detectEnabled else { return nil }
         }
         return engineID
@@ -490,9 +510,16 @@ final class ModelLoader: ObservableObject {
     /// should be separate (owner: the count must stay automatic).
     ///
     /// MOSS is false because it names its own speakers and takes no count at all.
+    ///
+    /// **CAM++ is true**, and like pyannote and NeMo it is true on the sidecar's
+    /// behaviour rather than on need: it counts correctly unaided on both
+    /// known-answer fixtures (5 and 3), and it reads `num_speakers` and clusters
+    /// to exactly that many when one is sent — measured, pinning `Overlap123` to
+    /// 2 returns 2. An engine that would ACT on a count belongs in this set
+    /// whether or not our two short fixtures happen to need it.
     nonisolated static func honoursSpeakerCount(diarEngine: String) -> Bool {
         diarEngine == pyannoteEngineID || diarEngine == spectralEngineID
-            || diarEngine == nemoEngineID
+            || diarEngine == nemoEngineID || diarEngine == camPlusEngineID
     }
 
     /// Whether a pinned speaker count REACHES the engine in THIS session.
@@ -564,10 +591,10 @@ final class ModelLoader: ObservableObject {
         // the finished recorder, so detach it. Nothing feeds the lane afterwards,
         // so it stays silent.
         if !Self.wantsRealtime(realtimeEnabled: realtimeOn) {
-            nemotronASR?.terminate()
-            nemotronASR = nil
+            realtimeASR?.terminate()
+            realtimeASR = nil
         } else if !wantsRemote {
-            nemotronASR?.detachRemoteLane()
+            realtimeASR?.detachRemoteLane()
         }
 
         // Diarization engines are exclusive, and both services are kept alive
@@ -629,6 +656,15 @@ final class ModelLoader: ObservableObject {
         if wantedDiar != .diarizen {
             diarizen?.terminate()
             diarizen = nil
+        }
+        // The same want/teardown PAIR, from the same function — the rule every
+        // persistent service here now has, after the realtime sidecar was found
+        // being loaded by a switch and stopped by nothing (1.70 GB resident until
+        // quit). CAM++ is the smallest of them (66 MB of weights plus torch), but
+        // "small" is not a reason to be the one service without a teardown.
+        if wantedDiar != .camPlus {
+            camPlus?.terminate()
+            camPlus = nil
         }
         // The embedder serves BOTH pipeline engines, so it is dropped only when
         // NEITHER is selected. Written as one question — "does this session's
@@ -748,7 +784,9 @@ final class ModelLoader: ObservableObject {
             realtimeEnabled: d.object(forKey: "realtime.enabled") as? Bool ?? true) {
             // One step whether or not there is a Remote stream — the sidecar's
             // second lane needs no extra weights and no extra process.
-            steps.append(Step(model: ModelCatalog.realtime, checkInstalled: true))
+            steps.append(Step(model: ModelCatalog.realtimeModel(
+                id: d.string(forKey: "realtime.model") ?? RealtimeASRService.defaultModelID),
+                checkInstalled: true))
         }
         // Word aligner — its OWN sidecar since 2026-07-29, so this step both
         // verifies the weights and starts the process. Kept BEFORE the chunked
@@ -811,6 +849,13 @@ final class ModelLoader: ObservableObject {
             // after DiariZen's WavLM load.
             steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
             steps.append(Step(model: ModelCatalog.diarizenDiarization, checkInstalled: true))
+        case .camPlus:
+            // Embedder first, as every pipeline engine does. Both are quick here
+            // (26 MB and 66 MB), so the ordering buys less than it does for NeMo
+            // or DiariZen — it is kept identical anyway, because an engine that
+            // orders its steps differently is a difference someone has to explain.
+            steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
+            steps.append(Step(model: ModelCatalog.camPlusDiarization, checkInstalled: true))
         case .pyannote:
             // TWO steps for the pyannote engine since the 2026-07-30 split: the
             // embedder and the pipeline are separate processes now, and the
@@ -900,18 +945,22 @@ final class ModelLoader: ObservableObject {
             return
         }
 
-        // Nemotron realtime ASR: start the MLX sidecar.
-        // Reused across sessions; recreated only if its settings changed.
-        if step.model.id == ModelCatalog.realtime.id {
-            let config = NemotronASRService.Config.fromSettings()
-            if let existing = nemotronASR, existing.config == config {
+        // Realtime ASR: start the MLX sidecar for the SELECTED engine.
+        // Reused across sessions; recreated only if its settings changed — and
+        // the engine id is one of those settings, so this is also the
+        // engine-switch mechanism. Matched against the LIST, never against one
+        // id: `== ModelCatalog.realtime.id` was true for exactly one engine and
+        // would have left a second one loading nothing at all.
+        if ModelCatalog.realtimeModels.contains(where: { $0.id == step.model.id }) {
+            let config = RealtimeASRService.Config.fromSettings()
+            if let existing = realtimeASR, existing.config == config {
                 return
             }
-            nemotronASR?.terminate()
-            nemotronASR = nil
+            realtimeASR?.terminate()
+            realtimeASR = nil
             // Throws with the sidecar's exact error message (shown in overlay)
-            nemotronASR = try await Task.detached(priority: .userInitiated) {
-                try NemotronASRService(config: config)
+            realtimeASR = try await Task.detached(priority: .userInitiated) {
+                try RealtimeASRService(config: config)
             }.value
             return
         }
@@ -1006,6 +1055,23 @@ final class ModelLoader: ObservableObject {
             diarizen = nil
             diarizen = try await Task.detached(priority: .userInitiated) {
                 try DiarizenService(config: config)
+            }.value
+            return
+        }
+
+        // Diarization: start the persistent CAM++ sidecar, in the MAIN `.venv`.
+        // Fatal on failure for the same reason as every other diarization stack
+        // member: no live path, so a broken sidecar surfaces as a meeting with no
+        // speakers at all, at Stop, with nothing left to re-run.
+        if step.model.id == ModelCatalog.camPlusDiarization.id {
+            let config = CamPlusService.Config.fromSettings()
+            if let existing = camPlus, existing.config == config {
+                return
+            }
+            camPlus?.terminate()
+            camPlus = nil
+            camPlus = try await Task.detached(priority: .userInitiated) {
+                try CamPlusService(config: config)
             }.value
             return
         }

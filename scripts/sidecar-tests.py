@@ -57,6 +57,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import types
 import tempfile
 import threading
 import time
@@ -77,6 +78,12 @@ SWIFT_SOURCES = PROJECT / "MeetingTranscriber" / "Sources"
 # a relative path with slashes unchanged. This file itself stays at scripts/
 # root — it tests everything, so it belongs to no single service.
 NEMOTRON_SERVICE = "nemotron/nemotron-service.py"
+# THE SECOND AND THIRD REALTIME ENGINES (2026-08-11). Each has its own sidecar,
+# per the one-service-per-model rule, and all three speak the SAME frames because
+# a single Swift client (`RealtimeASRService`) drives them — so they must not
+# drift apart; see `realtime/protocol-matches-nemotron`.
+PARAKEET_SERVICE = "parakeet/parakeet-service.py"
+FUNASR_SERVICE = "funasr/funasr-service.py"
 # ONE SERVICE PER ASR MODEL, finished 2026-07-30: the shared
 # chunked/chunked-asr-service.py is DELETED and each model has its own standalone
 # file. The three below are the mlx-audio ones — byte-identical extractions of that
@@ -120,6 +127,9 @@ WESPEAKER_SERVICE = "wespeaker/wespeaker-service.py"
 # `spectral/protocol-matches-pyannote`. Its vendored tree lives under it, the
 # MOSS rule.
 SPECTRAL_SERVICE = "spectral/spectral-service.py"
+# THE SIXTH DIARIZATION ENGINE (2026-08-11). Speaks the SAME wire as pyannote and
+# spectral, so one Swift caller drives any of them; see `campplus/*`.
+CAMPPLUS_SERVICE = "campplus/campplus-service.py"
 SPECTRAL_VENDOR = SCRIPTS / "spectral" / "vendor"
 # The FOURTH diarizer (2026-08-07): NVIDIA NeMo's ClusteringDiarizer (MarbleNet
 # VAD -> multi-scale TitaNet-Large -> NME-SC spectral clustering). Like spectral
@@ -506,13 +516,31 @@ def extract_flush_branch(source: str):
 
 
 def load_sidecar_module(filename: str, mod_name: str):
-    """Import a sidecar for its module-level constants WITHOUT running main()."""
-    import importlib.util
+    """Import a sidecar for its module-level constants WITHOUT running main().
+
+    COMPILED FROM THE SOURCE TEXT THIS FUNCTION RETURNS, never through the
+    normal loader, and that is a correctness fix rather than a style choice.
+
+    Callers use both halves together: the AST checks parse the returned SOURCE
+    while the drift checks read the returned MODULE's constants. Going through
+    `spec.loader.exec_module` let the module half come from a stale
+    `__pycache__/*.pyc` while the source half was read fresh — so the two halves
+    could describe different files. Observed 2026-08-11 during a negative
+    control: a one-character edit (`1.5` → `2.0`, same byte length) inside
+    CPython's mtime granularity left the cached bytecode valid, and the suite
+    reported a `PARTIAL_EVERY` drift that no longer existed in the source.
+
+    The direction that matters is the other one: the same staleness would let a
+    real drift keep passing, which is the silent failure this whole group exists
+    to catch.
+    """
     path = SCRIPTS / filename
-    spec = importlib.util.spec_from_file_location(mod_name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)  # __name__ != "__main__", so main() is inert
-    return module, path.read_text()
+    source = path.read_text()
+    module = types.ModuleType(mod_name)
+    module.__file__ = str(path)
+    # __name__ is mod_name, not "__main__", so main() stays inert.
+    exec(compile(source, str(path), "exec"), module.__dict__)
+    return module, source
 
 
 # ============================================================ nemotron group
@@ -734,6 +762,384 @@ def run_nemotron(rep: Report, ctx):
             sc.drain()
     finally:
         sc.close()
+
+
+# ============================================================ realtime group
+# THE SECOND REALTIME ENGINE (2026-08-11). `scripts/parakeet/parakeet-service.py`
+# speaks the SAME frames as the Nemotron sidecar, because ONE Swift client
+# (`RealtimeASRService`) drives both — the chunked side's shape, where five
+# scripts answer one client.
+#
+# That is exactly the arrangement whose failure mode this project has already
+# written down: a protocol edit applied to one copy and missed in the other
+# fails SILENTLY — the number, or the lane, simply never appears. Hence the same
+# mitigation as `whisper/protocol-matches-chunked`: detection, not discipline.
+#
+# Both checks are PURE — module import and AST, no model load, milliseconds.
+# The sidecars' heavy imports live inside `main()`, which is what makes that
+# possible; the `nemotron/*` checks above are the ones that drive a real model.
+REALTIME_CHECKS = [
+    "realtime/protocol-matches-nemotron",
+    "realtime/engine-divergences",
+]
+
+# The constants that decide WHAT the two engines put on the wire and WHEN. Every
+# one of them is shared on purpose:
+#   SR / MAX_BUFFER      — the app feeds both the same 16 kHz mono stream and
+#                          relies on the same 60 s utterance cap.
+#   PARTIAL_EVERY        — the caption cadence the app's overlay is tuned to.
+#   PARTIAL_SILENCE_RMS  — the idle-lane saving, which is engine-INDEPENDENT
+#                          (people take turns whatever model is loaded).
+# `PARTIAL_DUTY` is deliberately ABSENT from this list: it is Nemotron's
+# cadence-stretch and Parakeet must not have one. That divergence is asserted by
+# the second check, where it can be stated with its reason.
+REALTIME_SHARED_CONSTANTS = ["SR", "MAX_BUFFER", "PARTIAL_EVERY",
+                             "PARTIAL_SILENCE_RMS"]
+
+# WHAT EACH NON-REFERENCE ENGINE MUST AND MUST NOT HAVE, with the measurement
+# behind it. Stated per engine rather than as one "everything that is not
+# Nemotron looks alike" rule, because the third engine broke that assumption the
+# day it landed: Parakeet drops `PARTIAL_DUTY` and Fun-ASR keeps it.
+#
+#   ATT_CONTEXT / --chunk-ms — Nemotron's alone. Neither other model has an
+#     attention-context setting, so the flag would be an argparse error at
+#     session start. The Swift side makes it unrepresentable (`Config.chunkMs`
+#     is nil for both); this is the other end of that guarantee.
+#
+#   PARTIAL_DUTY — the cadence STRETCH, and it tracks cost, not engine age.
+#     A 30 s partial costs Nemotron 2.135 s, Fun-ASR 0.609 s and Parakeet
+#     0.235 s. Two ACTIVE lanes at the flat 1.5 s cadence therefore sit at
+#     285 % / 81 % / 31 % duty — so Parakeet genuinely does not need the stretch
+#     and Fun-ASR genuinely does. Copying either decision to the other engine
+#     would be wrong in opposite directions.
+#
+#   HALLUCINATION GATES — likewise measured per model, and asserted in BOTH
+#     directions. Parakeet returned the EMPTY STRING for 30 s of silence, 30 s
+#     of tiny noise and a 3 s flush-sized silent buffer, so a gate there would be
+#     pure over-deletion risk. Fun-ASR returned '<gbg>', "I'm not sure if I can
+#     do that." and 'Okay.' for the same three inputs, so a gate there is
+#     mandatory. Deleting Fun-ASR's gates must fail this check just as loudly as
+#     adding gates to Parakeet.
+REALTIME_ENGINE_RULES = {
+    "parakeet": {
+        "forbidden_names": ("ATT_CONTEXT", "PARTIAL_DUTY"),
+        "required_names": (),
+        "gates": False,
+    },
+    "funasr": {
+        "forbidden_names": ("ATT_CONTEXT",),
+        "required_names": ("PARTIAL_DUTY",),
+        "gates": True,
+    },
+}
+
+# The gate machinery Fun-ASR must keep and Parakeet must never grow. Named here
+# so both halves of the rule read off ONE list.
+REALTIME_GATE_NAMES = ("GARBAGE_TAGS", "REFUSAL_PREFIXES", "drop_reason")
+
+# Every wire message either sidecar can write, as (builder, args). The office
+# cases pass `stream=None` EXPLICITLY rather than relying on the default, so a
+# copy that quietly changed the default would still be compared on the value the
+# app actually sees.
+REALTIME_EMIT_CASES = [
+    ("emit", ("status", "READY", None)),
+    ("emit", ("partial", "hello there", None)),
+    ("emit", ("final", "hello there", None)),
+    ("emit", ("final", "", None)),
+    ("emit", ("partial", "hello there", "remote")),
+    ("emit", ("final", "hello there", "remote")),
+    ("_emit_raw", ("error", "model load failed: boom", None)),
+]
+
+
+def _realtime_opcodes(source: str):
+    """The integer opcodes a sidecar's read loop compares `n` against.
+
+    AST, not grep — both files DOCUMENT their protocol at length in a docstring
+    that lists every opcode, so a textual search matches its own explanation.
+    That lesson is written down three times in this repo already
+    (`pyannote/no-path-to-torchcodec`, `moss/asr-vendor-is-own-and-identical`,
+    build.sh's tokenizer gate); this is the fourth place it applies.
+    """
+    import ast
+    tree = ast.parse(source)
+    main = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+    if main is None:
+        return None
+    loops = [n for n in ast.walk(main) if isinstance(n, ast.While)]
+    found = set()
+    for loop in loops:
+        for node in ast.walk(loop):
+            if not isinstance(node, ast.Compare):
+                continue
+            if not (isinstance(node.left, ast.Name) and node.left.id == "n"):
+                continue
+            for comparator in node.comparators:
+                if isinstance(comparator, ast.Constant) and isinstance(comparator.value, int):
+                    found.add(comparator.value)
+                elif (isinstance(comparator, ast.UnaryOp)
+                      and isinstance(comparator.op, ast.USub)
+                      and isinstance(comparator.operand, ast.Constant)):
+                    found.add(-comparator.operand.value)
+    return found
+
+
+def _realtime_names(source: str):
+    """Every name the module DEFINES + every argparse flag string in the file.
+
+    Functions and classes count, not just assignments: the hallucination gates
+    this is asked about are a constant tuple AND a `drop_reason()` function, and
+    a helper that could only see constants reported the function missing from a
+    file that plainly defines it.
+    """
+    import ast
+    tree = ast.parse(source)
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    flags = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            flags |= {a.value for a in node.args
+                      if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+        # `ATT_CONTEXT` could also live inside main(); catch any assignment.
+        if isinstance(node, ast.Assign):
+            names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return names, flags
+
+
+def run_realtime(rep: Report, ctx):
+    nemo_mod, nemo_src = load_sidecar_module(NEMOTRON_SERVICE, "mt_nemotron_protocol")
+    para_mod, para_src = load_sidecar_module(PARAKEET_SERVICE, "mt_parakeet_protocol")
+    fun_mod, fun_src = load_sidecar_module(FUNASR_SERVICE, "mt_funasr_protocol")
+
+    # Nemotron is the REFERENCE, not merely the first: it is the engine the app
+    # falls back to for an absent or unknown `realtime.model`, so it is the one
+    # copy that must never move to accommodate a newcomer.
+    others = (("parakeet", para_mod, para_src), ("funasr", fun_mod, fun_src))
+    everyone = (("nemotron", nemo_mod, nemo_src),) + others
+
+    # -- check 1: every realtime sidecar speaks ONE protocol.
+    if ctx.wants("realtime/protocol-matches-nemotron"):
+        cid = "realtime/protocol-matches-nemotron"
+        try:
+            problems = []
+
+            # (1) the shared constants.
+            for name in REALTIME_SHARED_CONSTANTS:
+                a = getattr(nemo_mod, name, None)
+                for label, mod, _ in others:
+                    b = getattr(mod, name, None)
+                    if a is None or b is None or a != b:
+                        problems.append(f"{name}: nemotron={a!r} {label}={b!r}")
+
+            # (2) every wire message, byte for byte — key set, key ORDER and all.
+            #     `json.dumps` of a re-parsed payload would hide an order change,
+            #     so the raw lines are compared directly.
+            key_sets = {}
+            for builder, cargs in REALTIME_EMIT_CASES:
+                mine = capture_stdout(getattr(nemo_mod, builder), *cargs)
+                for label, mod, _ in others:
+                    theirs = capture_stdout(getattr(mod, builder), *cargs)
+                    if mine != theirs:
+                        problems.append(f"{builder}{cargs!r}: nemotron wrote {mine} "
+                                        f"but {label} wrote {theirs}")
+                for line in mine:
+                    payload = json.loads(line)
+                    key_sets.setdefault(payload["type"], set()).update(payload)
+
+            # (3) the top-level key sets, stated explicitly rather than implied by
+            #     (2), because these are the exact sets the Swift decoder reads
+            #     (`RealtimeASRService.Message`: type, text, stream?).
+            #
+            #     ABSENT MEANS OFFICE. A `"stream"` key appearing on an office
+            #     line would route correctly today (the decoder tests for the
+            #     literal "remote") and would silently change the bytes a
+            #     single-stream session produces, which the Nemotron sidecar's own
+            #     `nemotron/single-stream-bytes` check exists to protect.
+            expected_keys = {
+                "status": {"type", "text"},
+                "error": {"type", "text"},
+                "partial": {"type", "text", "stream"},
+                "final": {"type", "text", "stream"},
+            }
+            for kind, want in expected_keys.items():
+                got = key_sets.get(kind)
+                if got != want:
+                    problems.append(f"{kind} key union was {sorted(got or [])}, "
+                                    f"expected {sorted(want)}")
+            for kind in ("partial", "final"):
+                for mod_name, mod, _ in everyone:
+                    office = capture_stdout(mod.emit, kind, "x", None)
+                    if any("stream" in json.loads(l) for l in office):
+                        problems.append(f"{mod_name} put a \"stream\" key on an "
+                                        f"office {kind} — absent means office")
+
+            # (4) the stdin opcodes. The app writes these five and nothing else;
+            #     a sidecar missing one does not error, it silently ignores that
+            #     frame — a remote lane that never flushes, or an exit that hangs.
+            opcodes = {label: _realtime_opcodes(src) for label, _, src in everyone}
+            if any(v is None for v in opcodes.values()):
+                problems.append("a sidecar has no main() — its read loop could not "
+                                "be located")
+            else:
+                for label, ops in opcodes.items():
+                    for op in (0, -1, -2, -3):
+                        if op not in ops:
+                            problems.append(f"{label}'s read loop no longer handles {op}")
+                    if ops != opcodes["nemotron"]:
+                        problems.append(
+                            f"opcode sets differ: nemotron="
+                            f"{sorted(opcodes['nemotron'])} {label}={sorted(ops)}")
+
+            # (5) the READY handshake. `RealtimeASRService.waitUntilReady` blocks
+            #     for 120 s on a status line containing READY and then FAILS THE
+            #     SESSION; a sidecar that stopped emitting it would look exactly
+            #     like a model that would not load.
+            import ast
+            for label, _, src in everyone:
+                ready = [n for n in ast.walk(ast.parse(src))
+                         if isinstance(n, ast.Call)
+                         and isinstance(n.func, ast.Name) and n.func.id == "emit"
+                         and len(n.args) >= 2
+                         and all(isinstance(a, ast.Constant) for a in n.args[:2])
+                         and n.args[0].value == "status"
+                         and "READY" in str(n.args[1].value)]
+                if len(ready) != 1:
+                    problems.append(f"{label} emits the READY status {len(ready)} "
+                                    "times, expected exactly 1")
+
+            # (6) the Lane contract, driven for real: the 60 s trim, the partial
+            #     cadence gate and the office/remote tag. Behaviour, not shape.
+            import numpy as np
+            for label, mod, _ in everyone:
+                lane = mod.Lane()
+                if lane.stream is not None:
+                    problems.append(f"{label}: a default Lane is not the office lane")
+                if mod.Lane("remote").stream != "remote":
+                    problems.append(f"{label}: the remote Lane is not tagged")
+                lane.append(np.zeros(mod.MAX_BUFFER + 5 * mod.SR, dtype=np.float32))
+                if lane.buffer.size != mod.MAX_BUFFER:
+                    problems.append(f"{label}: buffer not trimmed to MAX_BUFFER "
+                                    f"({lane.buffer.size})")
+                short = mod.Lane()
+                short.append(np.zeros(mod.SR // 4, dtype=np.float32))
+                if short.wants_partial():
+                    problems.append(f"{label}: wants a partial on a sub-0.5 s buffer")
+                short.reset()
+                if short.buffer.size or short.samples_since_partial:
+                    problems.append(f"{label}: reset() left state behind")
+
+            rep.expect(cid, not problems,
+                       f"{len(everyone)} engines agree: "
+                       f"{len(REALTIME_SHARED_CONSTANTS)} constants, "
+                       f"{len(REALTIME_EMIT_CASES)} wire messages byte-identical, "
+                       f"{len(expected_keys)} key sets exact, the same 4 stdin "
+                       "opcodes, one READY each, and every Lane behaves alike",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare the realtime sidecars: {exc!r}")
+
+    # -- check 2: THE DELIBERATE DIVERGENCES, asserted in BOTH directions.
+    #
+    #    `moss/diar-has-no-file-branch` precedent, for the same reason and with
+    #    the same shape. Three things Nemotron has and Parakeet must not:
+    #
+    #    ATT_CONTEXT / --chunk-ms — Parakeet has no attention-context setting at
+    #      all, so the flag would be an argparse error at session start; the Swift
+    #      side makes it unrepresentable (`Config.chunkMs` is nil there) and this
+    #      is the other end of that guarantee.
+    #    PARTIAL_DUTY — Nemotron's cadence STRETCH, which exists solely because
+    #      its 30 s partial costs 2.1 s. Parakeet's costs 0.235 s and its ~31 %
+    #      two-lane duty was measured AT the flat cadence, so copying the stretch
+    #      across would only make the caption slower.
+    #
+    #    THE POSITIVE HALF IS LOAD-BEARING: Nemotron must still have all three.
+    #    Without it, a file that had simply stopped configuring attention context
+    #    — the exact over-deletion this project treats as the dangerous direction
+    #    — would keep this check green.
+    if ctx.wants("realtime/engine-divergences"):
+        cid = "realtime/engine-divergences"
+        try:
+            nemo_names, nemo_flags = _realtime_names(nemo_src)
+            problems = []
+
+            # THE POSITIVE HALF, stated once for the reference engine. Without
+            # it, a Nemotron file that had simply stopped configuring attention
+            # context — the over-deletion direction — would keep this green.
+            for name in ("ATT_CONTEXT", "PARTIAL_DUTY"):
+                if name not in nemo_names:
+                    problems.append(f"nemotron no longer defines {name} — this check "
+                                    "has lost the half that lets it fail")
+            if "--chunk-ms" not in nemo_flags:
+                problems.append("nemotron no longer accepts --chunk-ms")
+
+            for label, mod, src in others:
+                names, flags = _realtime_names(src)
+                rules = REALTIME_ENGINE_RULES[label]
+                for name in rules["forbidden_names"]:
+                    if name in names:
+                        problems.append(f"{label} defines {name} — see "
+                                        "REALTIME_ENGINE_RULES for why it must not")
+                for name in rules["required_names"]:
+                    if name not in names:
+                        problems.append(f"{label} no longer defines {name} — its "
+                                        "measured cost needs it")
+                if "--chunk-ms" in flags:
+                    problems.append(f"{label} accepts --chunk-ms, a flag its model "
+                                    "has nothing to apply")
+
+            # BOTH must still take --language. Parakeet's is INERT and measured so
+            # (generate() has no such parameter; None/"fr"/"de"/"xx" all returned
+            # byte-identical output) — it is accepted and LOGGED anyway, so the
+            # user's choice dies where the truth is instead of vanishing at the
+            # Swift boundary with no record.
+            for label, _, src in everyone:
+                if "--language" not in _realtime_names(src)[1]:
+                    problems.append(f"{label} no longer accepts --language")
+
+            # HALLUCINATION GATES, ASSERTED IN BOTH DIRECTIONS — the half of this
+            # check most likely to be "tidied" wrongly. Each engine's rule is
+            # written against what that model was MEASURED to emit over silence;
+            # see REALTIME_ENGINE_RULES.
+            for label, _, src in others:
+                names, _ = _realtime_names(src)
+                present = [g for g in REALTIME_GATE_NAMES if g in names]
+                if REALTIME_ENGINE_RULES[label]["gates"]:
+                    missing = [g for g in REALTIME_GATE_NAMES if g not in names]
+                    if missing:
+                        problems.append(
+                            f"{label} lost its hallucination gates ({missing}) — it "
+                            "was MEASURED emitting '<gbg>', a chatbot refusal and "
+                            "'Okay.' over silence; without these that text reaches "
+                            "the transcript")
+                else:
+                    if present:
+                        problems.append(
+                            f"{label} grew {present} — no hallucination has been "
+                            "OBSERVED for this model (silence returned the empty "
+                            "string); measure one first, then write the gate "
+                            "against what was seen")
+                    for banned in ("CANNED_HALLUCINATIONS", "canned_drop_reason",
+                                   "whisper_drop_reason"):
+                        if banned in names:
+                            problems.append(f"{label} grew {banned} — same reason")
+
+            rep.expect(cid, not problems,
+                       "nemotron keeps ATT_CONTEXT/--chunk-ms/PARTIAL_DUTY; parakeet "
+                       "has none of them and no gates; funasr keeps PARTIAL_DUTY and "
+                       "its measured gates but no attention context — each half "
+                       "asserted both ways",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not inspect the realtime sidecars: {exc!r}")
 
 
 # ============================================================= chunked group
@@ -4733,7 +5139,7 @@ def run_layout(rep: Report, ctx):
         # silently deleting every remote label again.
         problems = []
         for name in ("AudioRecorder+Spectral.swift", "AudioRecorder+Nemo.swift",
-                     "AudioRecorder+Diarizen.swift"):
+                     "AudioRecorder+Diarizen.swift", "AudioRecorder+CamPlus.swift"):
             code = _code(name)
             if needle in code:
                 problems.append(f"{name} reads diarization.finalPass — a batch "
@@ -4751,7 +5157,7 @@ def run_layout(rep: Report, ctx):
                             "and must still be honoured, so this check has lost the "
                             "half that lets it fail")
         rep.expect(cid, not problems,
-                   "no batch engine reads diarization.finalPass (all three pass "
+                   "no batch engine reads diarization.finalPass (all four pass "
                    "true), while pyannote's remote pass still honours it",
                    "; ".join(problems))
 
@@ -4807,6 +5213,8 @@ def run_layout(rep: Report, ctx):
              "AudioRecorder+Nemo.swift", "startNemoDiarization"),
             ("AudioRecorder+Diarizen.swift", "startRemoteDiarizenDiarization",
              "AudioRecorder+Diarizen.swift", "startDiarizenDiarization"),
+            ("AudioRecorder+CamPlus.swift", "startRemoteCamPlusDiarization",
+             "AudioRecorder+CamPlus.swift", "startCamPlusDiarization"),
         ]
         problems = []
         for rfile, rfunc, ofile, ofunc in pairs:
@@ -5018,10 +5426,241 @@ def run_qwen3(rep: Report, ctx):
 
 
 # ===================================================================== main
+# ============================================================ campplus group
+#
+# The SIXTH diarization engine (CAM++, 2026-08-11). Both checks are PURE — AST
+# and hashes, no model load and no audio — the `spectral/*` precedent.
+CAMPPLUS_CHECKS = [
+    "campplus/no-live-chunk-branch",
+    "campplus/turns-never-intersect",
+    "campplus/vendor-is-verbatim",
+]
+
+# The vendored WeSpeaker files, and the UPSTREAM sha256 each was fetched with.
+#
+# A REAL PROVENANCE PIN, not a self-fingerprint: these hashes were taken from
+# github.com/wenet-e2e/wespeaker's raw files, and both vendored copies matched
+# them byte for byte. So unlike `spectral/vendor-is-own` — which has to carve
+# out `embeddings.py` as a deliberate one-file deviation — this tree is
+# VERBATIM, and the check can say so without an exception.
+CAMPPLUS_VENDOR_SHA = {
+    "campplus.py":
+        "b1d6a3c39cdb9d85db8d7a7fe1885c39f6644663fd465db2592d2a63ed3a0d08",
+    "pooling_layers.py":
+        "3874eb8b382bd7ed824ca6b3822ede02344a6b8cada20230502031a00bf5d72d",
+}
+
+
+def run_campplus(rep: Report, ctx):
+    import ast
+    import hashlib
+
+    # -- check 1: no live/chunk path, asserted in BOTH directions.
+    #
+    #    The `spectral/no-live-chunk-branch` shape exactly, for the same reason:
+    #    this engine counts and clusters GLOBALLY, so a 30 s window's labels
+    #    would mean nothing across windows. The positive half — pyannote really
+    #    does have the live path being declined — is what lets it fail at all.
+    if ctx.wants("campplus/no-live-chunk-branch"):
+        cid = "campplus/no-live-chunk-branch"
+        try:
+            def live_shape(source):
+                tree = ast.parse(source)
+                gets, compared, dict_keys = set(), set(), set()
+                for node in ast.walk(tree):
+                    if (isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute)
+                            and node.func.attr == "get"
+                            and ast.unparse(node.func.value) == "job"
+                            and node.args
+                            and isinstance(node.args[0], ast.Constant)):
+                        gets.add(node.args[0].value)
+                    if isinstance(node, ast.Compare):
+                        for c in node.comparators:
+                            if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                                compared.add(c.value)
+                    if isinstance(node, ast.Dict):
+                        dict_keys |= {k.value for k in node.keys
+                                      if isinstance(k, ast.Constant)
+                                      and isinstance(k.value, str)}
+                kinds = {kind for kind, _, _, _ in _emit_shapes(source)}
+                return gets, compared, kinds, dict_keys
+
+            c_gets, c_cmp, c_kinds, c_keys = live_shape(
+                (SCRIPTS / CAMPPLUS_SERVICE).read_text())
+            p_gets, p_cmp, p_kinds, p_keys = live_shape(
+                (SCRIPTS / PYANNOTE_SERVICE).read_text())
+            problems = []
+
+            # The NEGATIVE half: no live path anywhere in campplus.
+            if "chunk" in c_cmp:
+                problems.append('campplus compares a command against "chunk" — a '
+                                "windowed pass through a globally-clustering engine "
+                                "returns labels that look continuous and are not")
+            if "chunk_result" in c_kinds or "chunk_result" in c_keys:
+                problems.append("campplus emits a chunk_result reply")
+            if "window_start" in c_gets or "window_start" in c_keys:
+                problems.append("campplus reads or emits window_start — the only "
+                                "reason to know a window's offset is to serve one")
+            # …and that the refusal really is there, so "no chunk branch" is a
+            # deliberate refusal rather than an unhandled command falling through
+            # to the whole-file pass.
+            if "final" not in c_cmp:
+                problems.append("campplus never compares the command against "
+                                '"final" — a non-final job would fall through to '
+                                "the whole-file pass instead of being refused")
+
+            # The POSITIVE half: pyannote really does have the live path this
+            # engine is declining to copy.
+            if "chunk" not in p_cmp:
+                problems.append('pyannote no longer compares a command against '
+                                '"chunk" — its live per-30s path is the thing '
+                                "campplus is being contrasted with")
+            if "chunk_result" not in p_kinds:
+                problems.append("pyannote no longer emits chunk_result")
+            if "window_start" not in p_gets:
+                problems.append("pyannote no longer reads window_start")
+
+            rep.expect(cid, not problems,
+                       "campplus has no chunk comparison, no chunk_result and no "
+                       "window_start, and refuses any cmd != final — while pyannote "
+                       "has all three (so this check can fail in either direction)",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not compare the read loops: {exc!r}")
+
+    # -- check 2: `merge_windows` NEVER returns two turns that intersect.
+    #
+    #    A SHIPPED BUG, found 2026-08-11 by driving the real sidecar over
+    #    `Overlap123.wav`: four intersecting pairs, every one of them exactly
+    #    1.000 s = WINDOW_SEC - HOP_SEC, one at each speaker change. Consecutive
+    #    windows share that much audio, and emitting both spans verbatim across a
+    #    label change made the turns overlap by precisely the shared amount.
+    #
+    #    WHY IT MATTERS ENOUGH TO PIN: this engine assigns ONE label per window,
+    #    so it cannot detect overlap — but `overlapRegions()` does not know that.
+    #    It infers overlap from any turns intersecting by >= 0.4 s, so a 1.0 s
+    #    artefact reached the transcript as two people speaking at once. Invented
+    #    speech is the failure direction this project ranks worst, and it was
+    #    invisible: the speaker COUNT was right on every known-answer file.
+    #
+    #    Pure — `merge_windows` is module-level precisely so this needs no
+    #    checkpoint. The synthetic input reproduces the exact geometry (2 s
+    #    windows, 1 s hop) with a label change in the middle.
+    if ctx.wants("campplus/turns-never-intersect"):
+        cid = "campplus/turns-never-intersect"
+        try:
+            module, _ = load_sidecar_module(CAMPPLUS_SERVICE, "campplus_merge")
+            spans = [(t, t + 2.0) for t in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0)]
+            problems = []
+            for name, labels in [("one change", [0, 0, 0, 1, 1, 1]),
+                                 ("alternating", [0, 1, 0, 1, 0, 1]),
+                                 ("every window new", [0, 1, 2, 3, 4, 5]),
+                                 ("no change", [0, 0, 0, 0, 0, 0])]:
+                turns = module.merge_windows(spans, labels)
+                for i in range(len(turns)):
+                    for j in range(i + 1, len(turns)):
+                        a, b = turns[i], turns[j]
+                        if a["label"] == b["label"]:
+                            continue
+                        ov = min(a["end"], b["end"]) - max(a["start"], b["start"])
+                        if ov > 1e-9:
+                            problems.append(
+                                f"{name}: {a['label']} [{a['start']:.3f},"
+                                f"{a['end']:.3f}] intersects {b['label']} "
+                                f"[{b['start']:.3f},{b['end']:.3f}] by {ov:.3f}s")
+                for t in turns:
+                    if t["end"] - t["start"] <= 0:
+                        problems.append(f"{name}: non-positive turn {t}")
+            # THE POSITIVE HALF, and it is what lets this check fail at all: a
+            # `merge_windows` that returned [] — or that split every window into
+            # its own turn — would satisfy "nothing intersects" trivially. The
+            # single-label case must still collapse to ONE turn spanning the
+            # whole span, and the one-change case to exactly two.
+            one = module.merge_windows(spans, [0, 0, 0, 0, 0, 0])
+            if len(one) != 1 or abs(one[0]["start"]) > 1e-9 or abs(one[0]["end"] - 7.0) > 1e-9:
+                problems.append(f"same-label windows must collapse to one 0..7 turn, got {one}")
+            two = module.merge_windows(spans, [0, 0, 0, 1, 1, 1])
+            if len(two) != 2:
+                problems.append(f"one label change must give exactly 2 turns, got {two}")
+            elif abs(two[0]["end"] - two[1]["start"]) > 1e-9:
+                problems.append(f"the two turns must meet at one boundary, got {two}")
+            if problems:
+                rep.fail(cid, "; ".join(problems))
+            else:
+                rep.ok(cid, "turns never intersect; boundaries meet at the midpoint")
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not drive merge_windows: {exc!r}")
+
+    # -- check 3: the vendored WeSpeaker tree is upstream's, unmodified, and the
+    #    service points its sys.path at ITS OWN copy.
+    #
+    #    The `moss/asr-vendor-is-own-and-identical` precedent for the second
+    #    half: a `sys.path.insert` aimed at another service's vendor folder works
+    #    today and breaks months later, in a release, the moment that folder
+    #    moves. EVALUATED rather than string-matched, so the assertion is about
+    #    the directory that will really be on sys.path.
+    if ctx.wants("campplus/vendor-is-verbatim"):
+        cid = "campplus/vendor-is-verbatim"
+        try:
+            problems = []
+            vendor = SCRIPTS / "campplus" / "vendor"
+            models = vendor / "wespeaker" / "models"
+
+            for name, want in CAMPPLUS_VENDOR_SHA.items():
+                path = models / name
+                if not path.exists():
+                    problems.append(f"{name} is missing from the vendored tree — "
+                                    "the build gate ships what is here, and a pip "
+                                    "install would be stripped from the .app")
+                    continue
+                got = hashlib.sha256(path.read_bytes()).hexdigest()
+                if got != want:
+                    problems.append(
+                        f"{name} no longer matches the upstream hash it was "
+                        f"vendored at (got {got[:12]}…, want {want[:12]}…). This "
+                        "tree is VERBATIM upstream by design; if it was "
+                        "deliberately re-vendored, update CAMPPLUS_VENDOR_SHA "
+                        "with the new upstream hash rather than ours")
+            if not (vendor / "LICENSE").exists():
+                problems.append("the vendored tree has no LICENSE — this is "
+                                "Apache-2.0 third-party code and shipping it "
+                                "without its licence is the one thing that is not "
+                                "merely untidy")
+
+            # The service must insert ITS OWN vendor dir.
+            source = (SCRIPTS / CAMPPLUS_SERVICE).read_text()
+            namespace = {"__file__": str(SCRIPTS / CAMPPLUS_SERVICE),
+                         "os": os, "sys": sys}
+            resolved = None
+            for node in ast.parse(source).body:
+                if (isinstance(node, ast.Assign)
+                        and any(getattr(t, "id", "") == "VENDOR" for t in node.targets)):
+                    resolved = eval(compile(ast.Expression(node.value), "<v>", "eval"),
+                                    namespace)
+            if resolved is None:
+                problems.append("campplus-service.py defines no VENDOR path — it "
+                                "cannot import the CAM++ architecture at all")
+            elif os.path.realpath(resolved) != os.path.realpath(str(vendor)):
+                problems.append(
+                    f"campplus-service.py's VENDOR resolves to {resolved!r}, not "
+                    f"its own {str(vendor)!r} — pointing at another service's tree "
+                    "works today and breaks when that folder moves")
+
+            rep.expect(cid, not problems,
+                       f"{len(CAMPPLUS_VENDOR_SHA)} vendored files byte-identical to "
+                       "the upstream hashes they were fetched at, LICENSE present, "
+                       "and the service inserts its own vendor dir",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not verify the campplus vendor tree: {exc!r}")
+
+
 GROUPS = [
     ("layout", LAYOUT_CHECKS, run_layout),
     ("tools", TOOLS_CHECKS, run_tools),
     ("nemotron", NEMOTRON_CHECKS, run_nemotron),
+    ("realtime", REALTIME_CHECKS, run_realtime),
     ("chunked", CHUNKED_CHECKS, run_chunked),
     ("whisper", WHISPER_CHECKS, run_whisper),
     ("qwen3", QWEN3_CHECKS, run_qwen3),
@@ -5029,6 +5668,7 @@ GROUPS = [
     ("moss", MOSS_CHECKS, run_moss),
     ("pyannote", PYANNOTE_CHECKS, run_pyannote),
     ("spectral", SPECTRAL_CHECKS, run_spectral),
+    ("campplus", CAMPPLUS_CHECKS, run_campplus),
     ("nemo", NEMO_CHECKS, run_nemo),
     ("wespeaker", WESPEAKER_CHECKS, run_wespeaker),
 ]

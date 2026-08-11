@@ -38,13 +38,15 @@ struct OverlapTab: View {
     private var needsDetector: Bool {
         diarEngine == ModelLoader.mossEngineID || diarEngine == ModelLoader.spectralEngineID
             || diarEngine == ModelLoader.nemoEngineID
+            || diarEngine == ModelLoader.camPlusEngineID
     }
 
     private var diarEngineName: String {
         switch diarEngine {
-        case ModelLoader.mossEngineID: return "MOSS"
-        case ModelLoader.nemoEngineID: return "the NeMo engine"
-        default:                       return "the spectral engine"
+        case ModelLoader.mossEngineID:    return "MOSS"
+        case ModelLoader.nemoEngineID:    return "the NeMo engine"
+        case ModelLoader.camPlusEngineID: return "the CAM++ engine"
+        default:                          return "the spectral engine"
         }
     }
 
