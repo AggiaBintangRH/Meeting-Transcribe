@@ -93,6 +93,10 @@ final class ModelLoader: ObservableObject {
     /// silent fall-back to the main `.venv`.
     private(set) var nemo: NemoService?
 
+    /// The DiariZen engine's sidecar, in `.venv-diarizen`. Persistent; nil unless
+    /// `diarization.engine` is `diarizen`.
+    private(set) var diarizen: DiarizenService?
+
     /// Speaker-identity sidecar (WeSpeaker + the two profile stores); persistent.
     /// The other half of the former `diarize-service.py`.
     ///
@@ -179,6 +183,7 @@ final class ModelLoader: ObservableObject {
     /// see `ModelCatalog.diarizationEngineValue` for why that difference is not an
     /// inconsistency.
     nonisolated static let nemoEngineID = "nemo"
+    nonisolated static let diarizenEngineID = "diarizen"
 
     /// Whether this session loads the forced aligner.
     ///
@@ -313,6 +318,8 @@ final class ModelLoader: ObservableObject {
             return .spectral
         case nemoEngineID:
             return .nemo
+        case diarizenEngineID:
+            return .diarizen
         default:
             // An UNKNOWN stored value still resolves to pyannote, which is what
             // `diarizationEngine(forEngine:)` shows and what the recorder's
@@ -330,6 +337,7 @@ final class ModelLoader: ObservableObject {
         case pyannote           // pyannote-service + wespeaker-service
         case spectral           // spectral-service + wespeaker-service
         case nemo               // nemo-service (.venv-nemo) + wespeaker-service
+        case diarizen           // diarizen-service (.venv-diarizen) + wespeaker-service
         case mossSecondProcess  // a second MOSS process, ASR done by another model
         case mossOwnASR         // MOSS is ALSO the chunked model — no second
                                 // process to load, but identity is still wanted
@@ -396,6 +404,16 @@ final class ModelLoader: ObservableObject {
         // NeMo joins MOSS and spectral for the SAME structural reason, not by
         // analogy: NME-SC assigns exactly one label per instant, so its turns can
         // never intersect and `overlapRegions()` is empty by construction under it.
+        //
+        // DIARIZEN IS DELIBERATELY ABSENT FROM THIS LIST. It was added here when it
+        // landed, on the assumption that a whole-file batch engine must resemble the
+        // other whole-file batch engines. It does not, on this question: its powerset
+        // head predicts two-speaker frames DIRECTLY (11 classes = 1 + 4 + 6 pairs),
+        // and its turns were measured intersecting — 11 pairs over 13.30 s on
+        // `recordings/Overlap123.wav`. Requiring the detector under it meant a 32 MB
+        // second opinion had to be switched on before repair would load at all,
+        // while the regions the engine had already produced were thrown away. See
+        // `AudioRecorder.usesDetectedRegionsForRepair` for the full measurement.
         if diarEngine == mossEngineID || diarEngine == spectralEngineID
             || diarEngine == nemoEngineID {
             guard detectEnabled else { return nil }
@@ -410,14 +428,111 @@ final class ModelLoader: ObservableObject {
     /// bugs of 2026-07-31 and 2026-08-05.
     ///
     /// Needs diarization ON, because the detector marks ROWS and a session with no
-    /// speakers has none to mark. It is deliberately NOT restricted to the MOSS
-    /// and spectral engines: under pyannote it is redundant rather than wrong
-    /// (that engine reports overlap itself), and the Diarization tab says so — but
-    /// a user who switches it on there has asked for a second opinion, and
-    /// refusing it silently would be the substitution this project forbids.
+    /// speakers has none to mark.
+    ///
+    /// **THIS ANSWERS ONE NARROW QUESTION: does the pyannote segmentation SIDECAR
+    /// start?** Not "is overlap detected" — under DiariZen it very much is.
+    ///
+    /// False for DiariZen (owner, 2026-08-10) because that engine IS the detector:
+    /// its powerset head predicts two-speaker frames directly (11 classes =
+    /// 1 + 4 + 6 pairs), so the regions fall out of the diarization pass that
+    /// already ran. A second 32 MB network over the same audio would answer a
+    /// question already answered. The Detect overlap TAB stays fully available —
+    /// it shows DiariZen as the detection model and its switch turns the marking
+    /// on and off (`AudioRecorder.diarizenOverlapMarking`). Do not read this
+    /// function as "the tab does not apply"; that was tried and reverted.
+    ///
+    /// **pyannote is deliberately NOT refused, and the asymmetry is the owner's
+    /// call, not an oversight.** It also reports overlap itself, so the detector is
+    /// redundant there too — but that engine has offered it since 2026-08-06 with
+    /// the reason written down (a user switching it on has asked for a second
+    /// opinion, and refusing silently is the substitution this project forbids),
+    /// and taking it away would change long-standing behaviour to buy consistency
+    /// nobody asked for. The rule is therefore stated per engine, not derived from
+    /// "does this engine mark its own overlap" — those two questions have the same
+    /// answer for pyannote and DiariZen and different verdicts, so deriving one
+    /// from the other would silently move pyannote the next time this is touched.
+    ///
+    /// `diarEngine` has NO default value on purpose, the `detectEnabled` rule: a
+    /// default lets a call site forget it and quietly load a detector for a session
+    /// that must not have one.
     nonisolated static func wantsOverlapDetect(detectEnabled: Bool,
-                                               diarizationEnabled: Bool) -> Bool {
-        detectEnabled && diarizationEnabled
+                                               diarizationEnabled: Bool,
+                                               diarEngine: String) -> Bool {
+        guard diarEngine != diarizenEngineID else { return false }
+        return detectEnabled && diarizationEnabled
+    }
+
+    /// Whether this engine ACTS on a pinned speaker count.
+    ///
+    /// Measured 2026-08-10, auto vs pinned on the same two files, rather than read
+    /// off the wire protocol — three sidecars accept `num_speakers` and only some
+    /// of them are changed by it:
+    ///
+    /// | engine | Meeting5People (5) | Overlap123 (3) |
+    /// |---|---|---|
+    /// | pyannote | 5 → 5 | 3 → 3 |
+    /// | NeMo | 5 → 5 | 3 → 3 |
+    /// | **spectral** | 5 → 5 | **13 → 3** |
+    ///
+    /// So the count is worth setting for SPECTRAL above all: its GMM-BIC counting
+    /// is the weak stage (13 speakers on a 3-person clip; 20 on a 67-minute
+    /// meeting), while its clustering is fine. pyannote and NeMo count correctly
+    /// on their own, but both honour the number, so both stay true here — an
+    /// engine that would ACT on a count belongs in this set whether or not our two
+    /// short fixtures happen to need it.
+    ///
+    /// **DiariZen is false, and that is a property of the sidecar, not a policy:**
+    /// `diarizen-service.py` does not read `num_speakers` at all. Its count comes
+    /// from the checkpoint's own bounds and `min_cluster_size`, and pinning through
+    /// those was measured ONE-DIRECTIONAL — it obeys a smaller count and ignores a
+    /// larger one, so the only thing a number could do there is merge people who
+    /// should be separate (owner: the count must stay automatic).
+    ///
+    /// MOSS is false because it names its own speakers and takes no count at all.
+    nonisolated static func honoursSpeakerCount(diarEngine: String) -> Bool {
+        diarEngine == pyannoteEngineID || diarEngine == spectralEngineID
+            || diarEngine == nemoEngineID
+    }
+
+    /// Whether a pinned speaker count REACHES the engine in THIS session.
+    ///
+    /// `honoursSpeakerCount` answers a narrower question — does the sidecar read
+    /// the field at all — and it is a property of the engine. This one adds the
+    /// only case where the answer depends on how the session is configured, and it
+    /// exists because the audit of 2026-08-10 found the SPK chip lit for a session
+    /// that silently discards the number.
+    ///
+    /// **pyannote sends `num_speakers` only on its FULL stop pass.** Its live
+    /// windows and its TAIL pass are `chunk` jobs, and `diarizeChunk` carries no
+    /// count — deliberately, and correctly: a 30 s window or a few seconds of tail
+    /// need not contain every speaker in the meeting, so forcing the meeting's
+    /// count onto one would make it invent people. So the number applies only when
+    /// a full pass actually runs:
+    ///
+    /// | `finalPass` | `continueOnStop` | pass at stop | count sent |
+    /// |---|---|---|---|
+    /// | false | — | none | **no** |
+    /// | true | true | tail (`chunk`) | **no** |
+    /// | true | false | full (`final`) | yes |
+    ///
+    /// The dangerous leg is the middle one: `continueOnStop`'s toggle is visible
+    /// only while the stop pass is OFF (an owner decision, recorded), so a `true`
+    /// can outlive the control that set it and quietly disable this number in
+    /// every later session — the same value-outliving-its-control shape as the
+    /// remote-label loss found the same day.
+    ///
+    /// The BATCH engines ignore both keys by design (their stop pass IS the
+    /// labels), so they pass straight through on `honoursSpeakerCount`.
+    nonisolated static func speakerCountReachesEngine(diarEngine: String,
+                                                      diarizationEnabled: Bool,
+                                                      finalPass: Bool,
+                                                      continueOnStop: Bool) -> Bool {
+        guard diarizationEnabled, honoursSpeakerCount(diarEngine: diarEngine) else {
+            return false
+        }
+        guard diarEngine == pyannoteEngineID else { return true }
+        return finalPass && !continueOnStop
     }
 
     nonisolated static func needsSecondMossProcess(chunkedID: String,
@@ -508,6 +623,13 @@ final class ModelLoader: ObservableObject {
             nemo?.terminate()
             nemo = nil
         }
+        // The same want/teardown PAIR, from the same function. DiariZen holds a
+        // WavLM encoder plus the pyannote 3.1 stack, measured at 1.7-3.7 GB — the
+        // third-largest idle process this app can hold, after MOSS and DiCoW.
+        if wantedDiar != .diarizen {
+            diarizen?.terminate()
+            diarizen = nil
+        }
         // The embedder serves BOTH pipeline engines, so it is dropped only when
         // NEITHER is selected. Written as one question — "does this session's
         // stack use identity?" — rather than as a second `!=` beside each
@@ -575,7 +697,8 @@ final class ModelLoader: ObservableObject {
         // three times.
         if !Self.wantsOverlapDetect(
             detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false,
-            diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true) {
+            diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true,
+            diarEngine: d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID) {
             overlapDetect?.terminate()
             overlapDetect = nil
         }
@@ -682,6 +805,12 @@ final class ModelLoader: ObservableObject {
             // than after the slowest load in the app.
             steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
             steps.append(Step(model: ModelCatalog.nemoDiarization, checkInstalled: true))
+        case .diarizen:
+            // Embedder first, as every pipeline engine does: identity is a separate
+            // process, and a broken embedder is reported in seconds rather than
+            // after DiariZen's WavLM load.
+            steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
+            steps.append(Step(model: ModelCatalog.diarizenDiarization, checkInstalled: true))
         case .pyannote:
             // TWO steps for the pyannote engine since the 2026-07-30 split: the
             // embedder and the pipeline are separate processes now, and the
@@ -701,7 +830,8 @@ final class ModelLoader: ObservableObject {
         // engines came to be started and never stopped.
         if Self.wantsOverlapDetect(
             detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false,
-            diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true) {
+            diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true,
+            diarEngine: d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID) {
             // Resolved from the STORED choice, not hard-coded to the one entry.
             // `overlap.detect.model` had a picker and nothing read it — the
             // Granite/Voxtral language-picker trap, harmless only while the list
@@ -859,6 +989,23 @@ final class ModelLoader: ObservableObject {
             spectral = nil
             spectral = try await Task.detached(priority: .userInitiated) {
                 try SpectralService(config: config)
+            }.value
+            return
+        }
+
+        // Diarization: start the persistent DIARIZEN sidecar, in `.venv-diarizen`.
+        // Fatal on failure for the same reason as every other diarization stack
+        // member: no live path, so a broken sidecar surfaces as a meeting with no
+        // speakers at all, at Stop, with nothing left to re-run.
+        if step.model.id == ModelCatalog.diarizenDiarization.id {
+            let config = DiarizenService.Config()
+            if let existing = diarizen, existing.config == config {
+                return
+            }
+            diarizen?.terminate()
+            diarizen = nil
+            diarizen = try await Task.detached(priority: .userInitiated) {
+                try DiarizenService(config: config)
             }.value
             return
         }

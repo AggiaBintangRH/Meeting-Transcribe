@@ -24,7 +24,8 @@ final class SettingsMatrixTests: XCTestCase {
     private let chunkedIDs = ["qwen3", "whisper", "granite", "voxtral", "moss"]
     private var engines: [String] {
         [ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID,
-         ModelLoader.nemoEngineID, ModelLoader.mossEngineID]
+         ModelLoader.nemoEngineID, ModelLoader.diarizenEngineID,
+         ModelLoader.mossEngineID]
     }
 
     /// One point of the matrix, and everything the rules say about it.
@@ -43,7 +44,8 @@ final class SettingsMatrixTests: XCTestCase {
                                      chunkedEnabled: chunkedOn)
         }
         var wantsDetect: Bool {
-            ModelLoader.wantsOverlapDetect(detectEnabled: detectOn, diarizationEnabled: diarOn)
+            ModelLoader.wantsOverlapDetect(detectEnabled: detectOn, diarizationEnabled: diarOn,
+                                           diarEngine: engine)
         }
         var repairEngine: String? {
             ModelLoader.wantedOverlapEngine(repairEnabled: repairOn,
@@ -75,7 +77,8 @@ final class SettingsMatrixTests: XCTestCase {
     func testTheMatrixIsTheSizeItClaims() {
         var n = 0
         sweep { _ in n += 1 }
-        XCTAssertEqual(n, 5 * 4 * 2 * 2 * 2 * 2 * 2 * 2)
+        // 5 chunked models x FIVE engines (DiariZen joined 2026-08-10) x six flags.
+        XCTAssertEqual(n, 5 * 5 * 2 * 2 * 2 * 2 * 2 * 2)
     }
 
     // MARK: - 1. Nothing is loaded that has nothing to do
@@ -102,17 +105,184 @@ final class SettingsMatrixTests: XCTestCase {
         }
     }
 
-    /// Repair needs somewhere to run: pyannote finds regions in its own turns,
-    /// MOSS, spectral and NeMo only through the detector.
+    /// Repair needs somewhere to run, and the engines split TWO ways — not into
+    /// "pyannote" and "the rest", which is how this read until 2026-08-10.
+    ///
+    /// Two engines mark overlap in their OWN turns, so repair may load with the
+    /// detector off:
+    ///   * **pyannote** — its segmentation model has always done this.
+    ///   * **DiariZen** — measured, not assumed: its powerset head predicts
+    ///     two-speaker frames directly (11 classes = 1 silence + 4 singles +
+    ///     6 PAIRS), and its turns intersect on real audio (11 pairs / 13.30 s on
+    ///     `recordings/Overlap123.wav`). It was grouped with the batch engines when
+    ///     it landed, purely by resemblance, and that cost it repair unless a
+    ///     redundant 32 MB detector was switched on.
+    ///
+    /// The other three genuinely cannot, and the reason is structural rather than
+    /// incidental: MOSS's segments tile exactly, spectral's Viterbi and NeMo's
+    /// NME-SC each assign exactly one label per instant. `overlapRegions()` is
+    /// empty under them however the audio sounds.
+    ///
+    /// Written as an explicit SET rather than `!= pyannote` so a sixth engine
+    /// cannot inherit either answer by default — it has to be classified.
     func testRepairIsNeverWantedWithoutASourceOfRegions() {
+        let marksItsOwnOverlap: Set = [ModelLoader.pyannoteEngineID,
+                                       ModelLoader.diarizenEngineID]
         sweep { c in
             guard c.repairEngine != nil else { return }
             XCTAssertTrue(c.repairOn, c.label)
-            if c.engine != ModelLoader.pyannoteEngineID {
+            if !marksItsOwnOverlap.contains(c.engine) {
                 XCTAssertTrue(c.detectOn,
                               "repair loaded under \(c.engine) with no detector — \(c.label)")
             }
         }
+    }
+
+    /// The other direction, and it is the one that makes the split above provable:
+    /// under an engine that marks its own overlap, the detector must NOT be able to
+    /// decide whether repair loads. Without this, moving an engine into
+    /// `marksItsOwnOverlap` above would weaken the test rather than restate it —
+    /// the `if` would simply stop running for that engine and nothing would check
+    /// what happens instead.
+    func testEnginesThatMarkTheirOwnOverlapDoNotNeedTheDetector() {
+        for engine in [ModelLoader.pyannoteEngineID, ModelLoader.diarizenEngineID] {
+            let withDetector = ModelLoader.wantedOverlapEngine(
+                repairEnabled: true, engineID: ModelCatalog.overlapSeparation.id,
+                diarEngine: engine, detectEnabled: true)
+            let without = ModelLoader.wantedOverlapEngine(
+                repairEnabled: true, engineID: ModelCatalog.overlapSeparation.id,
+                diarEngine: engine, detectEnabled: false)
+            XCTAssertNotNil(without,
+                            "\(engine) finds its own overlap regions, so the detector "
+                            + "must not gate repair")
+            XCTAssertEqual(withDetector, without,
+                           "the detector must not change WHETHER repair loads under "
+                           + "\(engine) — it is a second opinion, never a switch")
+        }
+    }
+
+    /// WHICH ENGINES ACT ON A PINNED SPEAKER COUNT, asserted in both directions.
+    ///
+    /// The main-window SPK control writes one key that every engine's pass reads,
+    /// so the only thing stopping it becoming a lie is this split. Measured
+    /// 2026-08-10, auto vs pinned on the same two files: spectral returned **13
+    /// speakers on a 3-person clip** and 3 when pinned, while pyannote and NeMo
+    /// were unchanged because both already counted correctly — all three honour
+    /// the number, which is what puts them on this side.
+    ///
+    /// DiariZen is the half that matters: `diarizen-service.py` never reads
+    /// `num_speakers`, so if it ever appeared here the chip would light up and
+    /// promise something no sidecar does.
+    func testOnlyTheEnginesThatReadTheCountAreSaidToHonourIt() {
+        for engine in [ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID,
+                       ModelLoader.nemoEngineID] {
+            XCTAssertTrue(ModelLoader.honoursSpeakerCount(diarEngine: engine),
+                          "\(engine)'s sidecar reads num_speakers and must be honoured")
+        }
+        for engine in [ModelLoader.diarizenEngineID, ModelLoader.mossEngineID] {
+            XCTAssertFalse(ModelLoader.honoursSpeakerCount(diarEngine: engine),
+                           "\(engine) does not read num_speakers — saying it does would "
+                           + "make the SPK control promise what no pass delivers")
+        }
+    }
+
+    /// PYANNOTE SENDS THE COUNT ONLY ON ITS FULL STOP PASS, and the SPK chip must
+    /// say so rather than lighting up for a session that discards the number.
+    ///
+    /// Found by the 2026-08-10 audit tracing UI → dispatch → wire → sidecar: the
+    /// tail pass is a `chunk` job and `diarizeChunk` carries no `num_speakers`.
+    /// That omission is CORRECT — a few seconds of tail need not contain everyone,
+    /// so forcing the meeting's count onto it would make it invent people — which
+    /// is exactly why the honest fix is in the chip, not in the wire.
+    ///
+    /// The dangerous leg is `finalPass = true, continueOnStop = true`: that toggle
+    /// is visible only while the stop pass is OFF, so a stored `true` can outlive
+    /// the control that set it — the value-outliving-its-control shape.
+    func testPyannoteOnlyGetsTheCountOnAFullStopPass() {
+        func reaches(_ finalPass: Bool, _ continueOnStop: Bool) -> Bool {
+            ModelLoader.speakerCountReachesEngine(diarEngine: ModelLoader.pyannoteEngineID,
+                                                  diarizationEnabled: true,
+                                                  finalPass: finalPass,
+                                                  continueOnStop: continueOnStop)
+        }
+        XCTAssertTrue(reaches(true, false), "the full stop pass is the one that sends it")
+        XCTAssertFalse(reaches(true, true), "a TAIL pass is a chunk job and carries no count")
+        XCTAssertFalse(reaches(false, false), "no stop pass at all means no count")
+        XCTAssertFalse(reaches(false, true))
+
+        // The BATCH engines ignore both keys by design — their stop pass IS the
+        // labels — so neither setting may take the count away from them. Without
+        // this half, folding the pyannote rule in could silently disable spectral,
+        // which is the ONE engine the count measurably helps.
+        for engine in [ModelLoader.spectralEngineID, ModelLoader.nemoEngineID] {
+            for finalPass in [true, false] {
+                for tail in [true, false] {
+                    XCTAssertTrue(
+                        ModelLoader.speakerCountReachesEngine(diarEngine: engine,
+                                                              diarizationEnabled: true,
+                                                              finalPass: finalPass,
+                                                              continueOnStop: tail),
+                        "\(engine) must keep the count whatever finalPass=\(finalPass) "
+                        + "continueOnStop=\(tail) say — it reads neither")
+                }
+            }
+        }
+
+        // And diarization off means nothing is counted, for anyone.
+        XCTAssertFalse(ModelLoader.speakerCountReachesEngine(
+            diarEngine: ModelLoader.spectralEngineID, diarizationEnabled: false,
+            finalPass: true, continueOnStop: false))
+    }
+
+    /// THE REMOTE STREAM IS NEVER TOLD THE ROOM'S HEADCOUNT.
+    ///
+    /// `diarNumSpeakers` describes the room — the chip sits beside the room's RMS
+    /// meter and its own doc says "how many people are in the room". Nothing asks
+    /// how many people are on the far end, and the two streams are separate
+    /// identity spaces precisely because they hold different people.
+    ///
+    /// All four remote passes sent it anyway until the 2026-08-11 audit, and a
+    /// pinned count is an EXACT constraint on three of the four engines (pyannote
+    /// and spectral pass `num_speakers=`, NeMo turns it into
+    /// `oracle_num_speakers`), so a 5-person room with one caller on the line split
+    /// that caller into five remote profiles.
+    ///
+    /// WHICH DISPATCH SITE USES WHICH CONSTANT is pinned in
+    /// `layout/remote-passes-never-send-the-room-count`, both directions — a Swift
+    /// test cannot see a call site. This pins the INTENT: an edit that decides to
+    /// forward the room's count after all has to come here and argue with the
+    /// reason, rather than changing one line in four files.
+    func testTheRemotePassesAlwaysAskForAutomaticCounting() {
+        XCTAssertEqual(AudioRecorder.remoteNumSpeakers, 0,
+                       "0 = auto. Any other value would be this app asserting a "
+                       + "headcount for people it has never been told about.")
+    }
+
+    /// The control and the passes are ONE value, not two readers that agree.
+    /// `AudioRecorder.diarNumSpeakers` must read the same key the chip writes —
+    /// eight dispatch sites go through it, and a stale constant there would send
+    /// `auto` to every engine while the UI showed a number.
+    @MainActor
+    func testTheSpeakerCountControlAndThePassesShareOneValue() {
+        let d = UserDefaults.standard
+        let key = "diarization.numSpeakers"
+        let saved = d.object(forKey: key)
+        defer {
+            if let saved { d.set(saved, forKey: key) } else { d.removeObject(forKey: key) }
+        }
+
+        d.removeObject(forKey: key)
+        XCTAssertEqual(AudioRecorder.diarNumSpeakers, 0, "absent must mean auto")
+
+        d.set(7, forKey: key)
+        XCTAssertEqual(AudioRecorder.diarNumSpeakers, 7)
+
+        // A negative can only arrive from a corrupt domain, and it must not reach a
+        // sidecar: `num_speakers` is compared `> 0` there, so a negative would read
+        // as auto anyway — clamped here so the value the app believes and the value
+        // the sidecar acts on are the same number.
+        d.set(-3, forKey: key)
+        XCTAssertEqual(AudioRecorder.diarNumSpeakers, 0)
     }
 
     // MARK: - 2. Nothing that IS needed is left out

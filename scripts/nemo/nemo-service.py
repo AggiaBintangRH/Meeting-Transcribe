@@ -218,10 +218,16 @@ SPARSE_SEARCH_VOLUME = 30
 #    number; there is no flag for "never chunk".
 EMBEDDINGS_PER_CHUNK = 10_000_000
 
-# 4. Speaker count is AUTO on this engine — there is no Settings control and
-#    `oracle_num_speakers` stays False. `max_num_speakers` only bounds the
-#    eigengap search, and the stock 8 would silently cap a 12-person meeting at
-#    8 speakers. 20 matches the ceiling the rest of the app assumes.
+# 4. Speaker count is AUTO by DEFAULT, and `max_num_speakers` bounds the eigengap
+#    search either way. The stock 8 would silently cap a 12-person meeting at 8
+#    speakers; 20 matches the ceiling the rest of the app assumes.
+#
+#    A COUNT CAN NOW ARRIVE (2026-08-10): the app gained a SPK control in its main
+#    window, so `num_speakers > 0` sets `oracle_num_speakers` and the number
+#    travels in the manifest. This note used to say the count was always automatic
+#    and `oracle_num_speakers` stayed False — true when written, false since that
+#    control landed. `MAX_NUM_SPEAKERS` still applies as the upper bound in both
+#    modes, which is why it is not conditional on the pin.
 MAX_NUM_SPEAKERS = 20
 
 # NOT EXPOSED AND NOT SET, deliberately: `maj_vote_spk_count` and `nme_mat_size`.

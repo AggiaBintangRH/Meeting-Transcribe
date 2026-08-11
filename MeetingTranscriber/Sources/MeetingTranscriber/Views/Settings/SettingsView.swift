@@ -138,11 +138,21 @@ struct SettingsView: View {
                                                       engine: diarEngine,
                                                       chunkedID: chunkedModel,
                                                       chunkedEnabled: chunkedEnabled) {
-            case .mossOwnASR:        return ("included", true)
-            case .mossSecondProcess: return ("MOSS", false)
+            // EVERY CASE NAMED, no `default:` — and that is the point. DiariZen
+            // landed with this switch ending in `default: return "pyannote"`, so
+            // the rail showed **pyannote** for a DiariZen session: the exact
+            // fall-through this project already wrote down for
+            // `ChunkedASRModel.scriptName` ("a switch over model ids needs a
+            // default, and a default is how a future model falls through to a
+            // deleted file"). Spelled out here so the COMPILER reports the next
+            // engine instead of the rail quietly naming the wrong one.
+            case .pyannote:          return ("pyannote", false)
             case .spectral:          return ("spectral", false)
             case .nemo:              return ("NeMo", false)
-            default:                 return ("pyannote", false)
+            case .diarizen:          return ("DiariZen", false)
+            case .mossOwnASR:        return ("included", true)
+            case .mossSecondProcess: return ("MOSS", false)
+            case .none:              return ("off", false)
             }
         case .aligner:  return (alignEnabled ? "on" : "off", false)
         case .overlap:  return (repairEnabled ? "on" : "off", false)
@@ -154,7 +164,12 @@ struct SettingsView: View {
             }
             return (detectEnabled ? "on" : "off", false)
         case .realtime: return (realtimeEnabled ? "on" : "off", false)
-        case .vad:      return ("", false)
+        // VAD returned "" until 2026-08-10 — the only switchable tab in the rail
+        // with no status, so it read as though it had nothing to switch. It always
+        // did: `vad.enabled` is the same key `switchedOffModelTabs` consults two
+        // functions below, so the tab could sit dimmed under SWITCHED OFF while
+        // showing no reason for it. Same shape as its four neighbours now.
+        case .vad:      return (vadEnabled ? "on" : "off", false)
         }
     }
 
@@ -282,8 +297,16 @@ struct SettingsView: View {
                                            detectEnabled: detectEnabled) == nil {
             out.insert(.overlap)
         }
-        // Detection needs rows to mark, nothing more — so it applies under every
-        // engine, and is dimmed only when there is no diarization at all.
+        // Detection needs rows to mark, nothing more — so the tab APPLIES under
+        // every engine, and is dimmed only when there is no diarization at all.
+        //
+        // Deliberately NOT asked through `wantsOverlapDetect`, which is a different
+        // question. That rule answers "does this session load the pyannote
+        // segmentation SIDECAR?", and it is false under DiariZen — but only because
+        // DiariZen IS the detector there, not because the page has nothing to
+        // offer. The tab shows DiariZen as the detection model and its switch turns
+        // the marking on and off, so filing it under NOT USED would hide a control
+        // that works (tried on 2026-08-10 and reverted the same day).
         if !diarEnabled { out.insert(.overlapDetect) }
         return out
     }

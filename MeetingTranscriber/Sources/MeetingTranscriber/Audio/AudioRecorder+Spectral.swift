@@ -219,7 +219,10 @@ extension AudioRecorder {
         }
         remoteDiarAudio = []
         remoteFinalDiarDone = false
-        let numSpeakers = Self.diarNumSpeakers
+        // AUTO, never the room's count — see `AudioRecorder.remoteNumSpeakers`.
+        // This engine is the one a pinned count measurably moves, so it is also
+        // the one a WRONG pinned count moves the furthest.
+        let numSpeakers = Self.remoteNumSpeakers
         spectralLog("REMOTE FINAL PASS start — whole Remote WAV, "
                     + "num_speakers=\(numSpeakers == 0 ? "auto" : String(numSpeakers))")
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers, stream: .remote)

@@ -286,7 +286,8 @@ extension AudioRecorder {
         // clusters globally, `NemoService` has no chunk API, and its sidecar refuses
         // any `cmd` but `final`. Written as one condition rather than a second guard
         // so a future edit cannot fix one engine's buffer leak and miss the other's.
-        guard !spectralDiarizationActive, !nemoDiarizationActive else {
+        guard !spectralDiarizationActive, !nemoDiarizationActive,
+              !diarizenDiarizationActive else {
             chunkAudio = []; chunkAudioStart = lastDiarBoundary; return
         }
         let liveOn = diarLiveEnabled

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build a fully self-contained, portable Meeting Transcriber.app:
 #   • release Swift build + themed icon (via package-app.sh)
-#   • THREE standalone python-build-standalone interpreters:
+#   • FOUR standalone python-build-standalone interpreters:
 #       - Resources/python       — the main MLX stack (every model but DiCoW/NeMo)
 #       - Resources/.venv-dicow  — DiCoW only; it pins transformers 4.55 while
 #                                  the MLX stack needs 5.x (hard conflict, so
@@ -10,6 +10,9 @@
 #                                  3.0.0 pins lightning/hydra and a large tree
 #                                  that conflicts with the MLX stack (a trial
 #                                  install into .venv was reverted 2026-08-07)
+#       - Resources/.venv-diarizen — the DiariZen engine only; it pins torch 2.1.1
+#                                  because its vendored pyannote-audio 3.1.1 needs
+#                                  torchaudio.AudioMetaData, gone in torchaudio 2.9
 #   • scripts/ and models/ bundled as siblings under Contents/Resources
 #   • ad-hoc signed and verified
 #
@@ -25,6 +28,7 @@ CACHE="$ROOT/.build-cache"
 PBS_DIR="$CACHE/python-runtime"
 PBS_DICOW_DIR="$CACHE/python-runtime-dicow"
 PBS_NEMO_DIR="$CACHE/python-runtime-nemo"
+PBS_DIARIZEN_DIR="$CACHE/python-runtime-diarizen"
 APP_NAME="Meeting Transcriber"
 
 # Fail the build if a bundled native lib cannot actually load on a client Mac.
@@ -383,6 +387,25 @@ fi
 # Local filename: decode %2B → + so the cached tarball has a clean name.
 ASSET_NAME="$(basename "$ASSET_URL" | sed 's/%2B/+/g')"
 ASSET_PATH="$CACHE/$ASSET_NAME"
+
+# A SECOND asset, Python 3.11, for the DiariZen runtime ALONE.
+#
+# Every other interpreter here is 3.12. DiariZen cannot be: upstream pins
+# torch==2.1.1, whose last wheels are for 3.11, and the pin is not cosmetic —
+# its vendored pyannote-audio 3.1.1 imports `torchaudio.AudioMetaData`, removed
+# in torchaudio 2.9. Measured on 2026-08-10: the build fails at
+# "No matching distribution found for torch==2.1.1" on a 3.12 interpreter.
+#
+# Resolved from the SAME release JSON, so there is no second network call and no
+# second cache policy — only a different version filter.
+ASSET_URL_311="$(grep -oE 'https://[^"]*cpython-3\.11\.[0-9]+(\+|%2B)[0-9]+-aarch64-apple-darwin-install_only_stripped\.tar\.gz' "$RELEASE_JSON" | sort -u | tail -1 || true)"
+if [[ -z "$ASSET_URL_311" ]]; then
+  echo "ERROR: no cpython-3.11.x aarch64 install_only_stripped asset in the PBS release." >&2
+  echo "       The DiariZen runtime needs 3.11 (torch 2.1.1 has no 3.12 wheels)." >&2
+  exit 1
+fi
+ASSET_NAME_311="$(basename "$ASSET_URL_311" | sed 's/%2B/+/g')"
+ASSET_PATH_311="$CACHE/$ASSET_NAME_311"
 echo "    PBS asset: $ASSET_NAME"
 
 # --- download (skip if cached) ---------------------------------------------
@@ -391,6 +414,16 @@ if [[ ! -f "$ASSET_PATH" ]]; then
   curl -fSL "$ASSET_URL" -o "$ASSET_PATH"
 else
   echo "    Using cached tarball."
+fi
+
+# The 3.11 tarball, same cache policy. Fetched here beside its 3.12 sibling
+# rather than inside [B2d], so both downloads happen before any interpreter is
+# built and a network failure stops the build early instead of halfway through.
+if [[ ! -f "$ASSET_PATH_311" ]]; then
+  echo "    Downloading $ASSET_NAME_311 (DiariZen runtime) ..."
+  curl -fSL "$ASSET_URL_311" -o "$ASSET_PATH_311"
+else
+  echo "    Using cached 3.11 tarball (DiariZen runtime)."
 fi
 
 # --- freeze the current .venv, sanitize ------------------------------------
@@ -720,6 +753,144 @@ prune_pyannoteai_sdk "$RES/.venv-nemo" "NeMo runtime"
 check_relocatable "$RES/.venv-nemo" "NeMo runtime"
 
 # ===========================================================================
+# B2d — FOURTH portable interpreter for the DiariZen engine (.venv-diarizen)
+#
+# `DiarizenService` probes Contents/Resources/.venv-diarizen/bin/python3 when
+# bundled, which is why the copy target below is that exact path.
+#
+# THIS VENV IS UNLIKE THE OTHER THREE, and the difference is the whole reason
+# this section is longer than B2c: TWO of its packages are NOT on PyPI. DiariZen
+# itself and its FORK of pyannote-audio are installed from the vendored source at
+# scripts/diarizen/vendor/, so `pip freeze` writes them as `file://` URLs — which
+# the strip below removes, exactly as it removes `git+` refs. That is correct,
+# and it is also why the two are reinstalled explicitly afterwards from the
+# BUNDLED tree. Freeze alone would ship an interpreter with the dependencies and
+# no engine: the DiCoW failure of 2026-07-27 wearing a different hat.
+#
+# It also pins an OLD stack on purpose — torch 2.1.1 / torchaudio 2.1.1, three
+# majors behind the rest of the app — because the vendored pyannote-audio 3.1.1
+# imports `torchaudio.AudioMetaData`, removed in torchaudio 2.9. Measured: with
+# newer torch the engine does not import at all.
+# ===========================================================================
+echo ""
+echo "==> [B2d] Provisioning portable Python for DiariZen diarization..."
+
+if [[ ! -x "$ROOT/.venv-diarizen/bin/pip" ]]; then
+  echo "ERROR: .venv-diarizen is missing — cannot bundle the DiariZen runtime." >&2
+  echo "       Run ./download-best-models.sh (section 3d) first, then rebuild." >&2
+  exit 1
+fi
+
+# The vendored ENGINE, checked before anything is built: without it the two local
+# installs below have nothing to install from, and the failure would otherwise
+# surface as an import error inside a client's first meeting.
+for d in diarizen pyannote-audio; do
+  if [[ ! -d "$ROOT/scripts/diarizen/vendor/$d" ]]; then
+    echo "ERROR: scripts/diarizen/vendor/$d is missing." >&2
+    echo "       DiariZen and its pyannote fork are not on PyPI; this tree is the" >&2
+    echo "       only source the bundled interpreter can be built from." >&2
+    exit 1
+  fi
+done
+
+FROZEN_DZ="$CACHE/requirements-frozen-diarizen.txt"
+echo "    Freezing .venv-diarizen packages..."
+"$ROOT/.venv-diarizen/bin/pip" freeze --exclude-editable > "$FROZEN_DZ.raw"
+grep -vE '^pip==|file://|@ file://|git\+' "$FROZEN_DZ.raw" > "$FROZEN_DZ" || true
+if grep -qE 'file://|git\+' "$FROZEN_DZ"; then
+  echo "ERROR: local (file://) or VCS (git+) requirements remain after strip:" >&2
+  grep -nE 'file://|git\+' "$FROZEN_DZ" >&2
+  exit 1
+fi
+DZ_STRIPPED="$(( $(grep -c . "$FROZEN_DZ.raw") - $(grep -c . "$FROZEN_DZ") ))"
+echo "    $(wc -l < "$FROZEN_DZ" | tr -d ' ') packages to install ($DZ_STRIPPED stripped as pip/local/VCS)."
+# EXACTLY TWO may be stripped — diarizen and pyannote.audio, both reinstalled
+# from the vendored tree below. A third would be a local package nobody has
+# arranged to reinstall, and it would go missing in silence.
+if [[ "$DZ_STRIPPED" -gt 3 ]]; then
+  echo "ERROR: $DZ_STRIPPED local/VCS requirements were stripped; only pip," >&2
+  echo "       diarizen and pyannote.audio are accounted for. The extras:" >&2
+  grep -E 'file://|git\+' "$FROZEN_DZ.raw" >&2
+  exit 1
+fi
+if ! grep -qE '^torch==2\.1\.1' "$FROZEN_DZ"; then
+  echo "ERROR: torch==2.1.1 is not in the frozen requirements." >&2
+  echo "       The vendored pyannote-audio 3.1.1 imports torchaudio.AudioMetaData," >&2
+  echo "       removed in torchaudio 2.9 — a newer pin means the engine will not" >&2
+  echo "       import at all. Frozen list says:" >&2
+  grep -iE '^torch' "$FROZEN_DZ" >&2 || echo "       (no torch at all)" >&2
+  exit 1
+fi
+
+NEW_SHA_DZ="$(shasum "$FROZEN_DZ" | awk '{print $1}')"
+SHA_FILE_DZ="$CACHE/requirements-diarizen.sha"
+OLD_SHA_DZ="$(cat "$SHA_FILE_DZ" 2>/dev/null || echo "")"
+
+if [[ "$NEW_SHA_DZ" == "$OLD_SHA_DZ" && -x "$PBS_DIARIZEN_DIR/bin/python3" ]]; then
+  echo "    Requirements unchanged and runtime present — skipping reinstall."
+else
+  echo "    (Re)extracting interpreter + installing packages..."
+  rm -rf "$PBS_DIARIZEN_DIR"
+  mkdir -p "$PBS_DIARIZEN_DIR"
+  tar -xzf "$ASSET_PATH_311" -C "$PBS_DIARIZEN_DIR" --strip-components=1
+  PIP_LOG_DZ="$CACHE/build-pip-install-diarizen.log"
+  if ! "$PBS_DIARIZEN_DIR/bin/python3" -m pip install --no-compile --progress-bar off -q \
+        -r "$FROZEN_DZ" >"$PIP_LOG_DZ" 2>&1; then
+    echo "    pip install FAILED — last 30 lines of $PIP_LOG_DZ:"
+    tail -30 "$PIP_LOG_DZ"
+    exit 1
+  fi
+  # THE TWO LOCAL PACKAGES, from the vendored source. `--no-deps` because every
+  # dependency arrived with the frozen list above, and letting pip resolve again
+  # here would let it move torch off the 2.1.1 pin the gate just checked.
+  for pkg in "scripts/diarizen/vendor" "scripts/diarizen/vendor/pyannote-audio"; do
+    if ! "$PBS_DIARIZEN_DIR/bin/python3" -m pip install --no-compile --no-deps \
+          --progress-bar off -q "$ROOT/$pkg" >>"$PIP_LOG_DZ" 2>&1; then
+      echo "    vendored install of $pkg FAILED — last 30 lines of $PIP_LOG_DZ:"
+      tail -30 "$PIP_LOG_DZ"
+      exit 1
+    fi
+  done
+  echo "$NEW_SHA_DZ" > "$SHA_FILE_DZ"
+fi
+
+rm -rf "$RES/.venv-diarizen"
+cp -Rc "$PBS_DIARIZEN_DIR" "$RES/.venv-diarizen"
+
+# Import gate (mandatory). Asserts the ENGINE imports, not just its dependencies —
+# the two vendored installs are the part that can silently go missing.
+echo "    Import gate (DiariZen)..."
+"$RES/.venv-diarizen/bin/python3" -c "
+import torch, torchaudio
+assert torch.__version__.startswith('2.1.'), 'expected torch 2.1.x, got ' + torch.__version__
+from torchaudio import AudioMetaData
+import pyannote.audio
+from diarizen.pipelines.inference import DiariZenPipeline
+print('DIARIZEN IMPORTS OK', torch.__version__, pyannote.audio.__version__)
+"
+
+echo "    Portability checks (DiariZen)..."
+# THE FFMPEG TRAP, FOR THE FOURTH TIME (Whisper, pyannote, spectral, now this).
+#
+# torchaudio 2.1.1 ships OPTIONAL ffmpeg and sox extension backends —
+# `_torchaudio_ffmpeg{4,5,6}.so`, `libtorchaudio_ffmpeg*.so`, `*_sox.so` — each
+# linking `@rpath/libav*` / `@rpath/libsox*` that only exist under Homebrew. They
+# are not in the bundle and never will be, so on a client Mac they are unloadable
+# dead weight; `check_relocatable` refuses them, correctly.
+#
+# PRUNED rather than exempted by name, the `prune_torchcodec` rule: exempting the
+# one offender the guard was written to catch is not a check. Safe because they
+# are LAZY backends — torchaudio picks soundfile when they are absent, which is
+# what every audio path here already uses. The proof is not this comment: the
+# bundled sidecar is driven with the bundled interpreter after the build, where
+# these files are genuinely gone.
+find "$RES/.venv-diarizen" -name '*torchaudio_ffmpeg*.so' -o -name '*torchaudio_sox*.so' \
+  | while read -r f; do rm -f "$f"; done
+echo "    Pruned torchaudio's ffmpeg/sox backends (Homebrew-only, lazily loaded)."
+prune_pyannoteai_sdk "$RES/.venv-diarizen" "DiariZen runtime"
+check_relocatable "$RES/.venv-diarizen" "DiariZen runtime"
+
+# ===========================================================================
 # B3 — scripts + models (siblings under Resources/)
 # ===========================================================================
 echo ""
@@ -754,6 +925,14 @@ echo "                     (spectral/vendor/diarize preserved: $([[ -f "$RES/scr
 # start without it. [B2c]'s gate already refuses to build if it is gone; this is
 # what makes its arrival in the bundle visible in the log.
 echo "                     (nemo/vendor/diar_infer_general.yaml preserved: $([[ -f "$RES/scripts/nemo/vendor/diar_infer_general.yaml" ]] && echo yes || echo NO))"
+# DiariZen's tree earns a line for BOTH of this list's reasons at once. [B2d]
+# builds the runtime FROM it (diarizen and pyannote.audio are not on PyPI, so the
+# freeze strips them as `file://` refs — the DiCoW failure of 2026-07-27), and
+# the sidecar refuses to start without it at RUNTIME, which `ModelCatalog`'s
+# install check mirrors. It was the only vendored tree with no line here when the
+# engine landed, found by the 2026-08-10 audit.
+echo "                     (diarizen/vendor/diarizen preserved: $([[ -d "$RES/scripts/diarizen/vendor/diarizen" ]] && echo yes || echo NO))"
+echo "                     (diarizen/vendor/pyannote-audio preserved: $([[ -d "$RES/scripts/diarizen/vendor/pyannote-audio" ]] && echo yes || echo NO))"
 
 if [[ "${MT_SKIP_MODELS:-0}" == "1" ]]; then
   echo "    MT_SKIP_MODELS=1 — skipping 16GB models copy."
@@ -781,11 +960,16 @@ codesign --force --sign - "$RES/python/bin/"python3* 2>/dev/null || true
 find "$RES/.venv-dicow" \( -name '*.so' -o -name '*.dylib' \) -print0 \
   | xargs -0 -n 50 -P 8 codesign --force --sign - 2>/dev/null || true
 codesign --force --sign - "$RES/.venv-dicow/bin/"python3* 2>/dev/null || true
-# And the NeMo interpreter — same rule, and it is the biggest of the three
+# And the NeMo interpreter — same rule, and it is the biggest of the four
 # (torch's own dylibs plus ~128 packages).
 find "$RES/.venv-nemo" \( -name '*.so' -o -name '*.dylib' \) -print0 \
   | xargs -0 -n 50 -P 8 codesign --force --sign - 2>/dev/null || true
 codesign --force --sign - "$RES/.venv-nemo/bin/"python3* 2>/dev/null || true
+# And DiariZen's. Batched and parallel like its neighbours — one codesign per
+# file is minutes on a venv this size.
+find "$RES/.venv-diarizen" \( -name '*.so' -o -name '*.dylib' \) -print0 \
+  | xargs -0 -n 50 -P 8 codesign --force --sign - 2>/dev/null || true
+codesign --force --sign - "$RES/.venv-diarizen/bin/"python3* 2>/dev/null || true
 codesign --force --deep --sign - "$APP"
 
 echo "    Verifying signature..."
@@ -841,7 +1025,7 @@ echo "    dist/README-INSTALL.txt written."
 
 echo ""
 echo "==> Manifest:"
-for d in python .venv-dicow .venv-nemo models scripts; do
+for d in python .venv-dicow .venv-nemo .venv-diarizen models scripts; do
   if [[ -d "$RES/$d" ]]; then
     printf "    %-10s %s\n" "$d" "$(du -sh "$RES/$d" | awk '{print $1}')"
   else

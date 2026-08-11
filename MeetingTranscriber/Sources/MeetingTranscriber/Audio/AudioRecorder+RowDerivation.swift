@@ -410,7 +410,18 @@ extension AudioRecorder {
 
     /// Windows where two DIFFERENT speakers are active at the same time
     /// (genuine overlap), each at least 0.4s long. Empty in exclusive mode.
+    ///
+    /// UNDER DIARIZEN THIS IS THE DETECTOR, so the Detect overlap switch gates it
+    /// here — at the ONE point that feeds both consumers, `derivedRows` (the
+    /// tags) and `repairWindows` (where repair may work). Gating them separately
+    /// is how a transcript ends up with no tags and repair running anyway.
+    ///
+    /// The guard is deliberately narrow. Every other engine reaches this function
+    /// with `diarizenDiarizationActive == false` and is untouched: pyannote keeps
+    /// marking overlap from its own turns whatever that switch says, which is the
+    /// behaviour it has always had and which the owner asked to leave alone.
     func overlapRegions() -> [(start: Double, end: Double)] {
+        if diarizenDiarizationActive && !diarizenOverlapMarking { return [] }
         let turns = Self.officeTurnsOnly(liveTurns, "overlapRegions")
         guard turns.count > 1 else { return [] }
         var regions: [(start: Double, end: Double)] = []

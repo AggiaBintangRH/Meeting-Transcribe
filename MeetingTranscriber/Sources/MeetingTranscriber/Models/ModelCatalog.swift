@@ -134,6 +134,14 @@ enum ModelCatalog {
     /// on a real 48.2-minute meeting. Its cold import is ~51 s — the slowest load
     /// in the app — and its peak RSS scales with the audio (1.15 GB for 98 s,
     /// 13.33 GB for 67 min).
+    static let diarizenDiarization = ModelInfo(
+        id: "diarizen",
+        name: "DiariZen meeting (BUT Speech@FIT)",
+        detail: "WavLM+Conformer end-to-end segmentation → WeSpeaker clustering · trained on far-field meeting audio · whole recording at stop",
+        badges: ["PyTorch MPS", "whole-file only", "MIT", "own runtime"],
+        hfRepo: "BUT-FIT/diarizen-meeting-base"
+    )
+
     static let nemoDiarization = ModelInfo(
         id: "nemo",
         name: "NVIDIA NeMo clustering diarization",
@@ -144,7 +152,8 @@ enum ModelCatalog {
 
     /// Engines offered on Settings → Models → Diarization (`diarization.engine`).
     static let diarizationEngines: [ModelInfo] = [diarization, spectralDiarization,
-                                                  nemoDiarization, mossDiarization]
+                                                  nemoDiarization, diarizenDiarization,
+                                                  mossDiarization]
 
     /// The `diarization.engine` VALUE a given engine card selects.
     ///
@@ -169,6 +178,7 @@ enum ModelCatalog {
         case mossDiarization.id:     return ModelLoader.mossEngineID
         case spectralDiarization.id: return ModelLoader.spectralEngineID
         case nemoDiarization.id:     return ModelLoader.nemoEngineID
+        case diarizenDiarization.id: return ModelLoader.diarizenEngineID
         default:                     return ModelLoader.pyannoteEngineID
         }
     }
@@ -179,6 +189,7 @@ enum ModelCatalog {
         case ModelLoader.mossEngineID:     return mossDiarization
         case ModelLoader.spectralEngineID: return spectralDiarization
         case ModelLoader.nemoEngineID:     return nemoDiarization
+        case ModelLoader.diarizenEngineID: return diarizenDiarization
         default:                           return diarization
         }
     }
@@ -252,14 +263,58 @@ enum ModelCatalog {
         hfRepo: "pyannote/speaker-diarization-community-1"
     )
 
-    /// Every detector the app can offer. ONE today, and the list exists rather
-    /// than a hardcoded reference so a second one can be added without touching
-    /// the tab: the picker, the stored setting and the "installed" check all read
-    /// this array.
-    static let overlapDetectors: [ModelInfo] = [overlapDetectPyannote]
+    /// DiariZen's own overlap detection — NOT a separate model, and the card says
+    /// so rather than implying a second download.
+    ///
+    /// Its Conformer head is a POWERSET over speaker combinations: for this
+    /// checkpoint, 11 classes = 1 silence + 4 single-speaker + **6 pairs**
+    /// (`powerset_max_classes = 2`, read off the loaded model). Two people at once
+    /// is predicted directly at 50 fps, so the overlap regions fall out of the
+    /// diarization pass that already ran — no second network, no second scan, no
+    /// extra seconds. Measured: 11 intersecting turn pairs over 13.30 s on
+    /// `recordings/Overlap123.wav`.
+    static let overlapDetectDiarizen = ModelInfo(
+        id: "diarizen-powerset",
+        name: "DiariZen (built in)",
+        detail: "Found by the diarization pass itself · no second model, no extra pass",
+        badges: ["PyTorch MPS", "no extra cost", "part of diarization"],
+        hfRepo: "BUT-FIT/diarizen-meeting-base"
+    )
+
+    /// Every detector the app can offer. The list exists rather than a hardcoded
+    /// reference so the picker, the stored setting and the "installed" check all
+    /// read one array.
+    static let overlapDetectors: [ModelInfo] = [overlapDetectPyannote,
+                                                overlapDetectDiarizen]
+
+    /// The detectors OFFERED for a given diarization engine, and this is a
+    /// BICONDITIONAL like the MOSS⟺MOSS rule — one function, because two half-rules
+    /// living apart is how they come to disagree.
+    ///
+    /// Under DiariZen the detector IS DiariZen: its own head already answers the
+    /// question, so running pyannote's segmentation network over the same audio
+    /// would pay for a second opinion nobody asked for. Under every other engine
+    /// DiariZen is not loaded at all, so its detection cannot be offered.
+    ///
+    /// Read by the tab's picker AND by `overlapDetector(id:forDiarEngine:)`, which
+    /// is what corrects a stored id that is no longer on offer — the trap this
+    /// project has hit before with a picker nothing read.
+    static func overlapDetectors(forDiarEngine engine: String) -> [ModelInfo] {
+        engine == ModelLoader.diarizenEngineID ? [overlapDetectDiarizen]
+                                               : [overlapDetectPyannote]
+    }
 
     static func overlapDetector(id: String) -> ModelInfo {
         overlapDetectors.first { $0.id == id } ?? overlapDetectPyannote
+    }
+
+    /// The detector actually in force: the stored id when the current engine still
+    /// offers it, otherwise that engine's own. A stored id must never be able to
+    /// name a detector this session cannot run — the value-outliving-its-control
+    /// failure the 2026-08-06 settings pass exists to forbid.
+    static func overlapDetector(id: String, forDiarEngine engine: String) -> ModelInfo {
+        let offered = overlapDetectors(forDiarEngine: engine)
+        return offered.first { $0.id == id } ?? offered[0]
     }
 
     static func overlapEngine(id: String) -> ModelInfo {
@@ -282,6 +337,18 @@ enum ModelCatalog {
             let path = modelsDir
                 .appendingPathComponent("mossformer2/mossformer2-librimix-2spk/masknet.ckpt")
             return fm.fileExists(atPath: path.path)
+        }
+        if model.id == diarizenDiarization.id {
+            // BOTH halves are required and both are checked. The checkpoint is a
+            // normal HF-hub snapshot, but the ENGINE is a vendored source tree
+            // that `.venv-diarizen` was built from — an editable install of it
+            // freezes as a `git+` ref, which `build.sh` strips, so the tree being
+            // present is what proves the bundle can rebuild the runtime at all.
+            let hub = ModelCatalog.modelsDir
+                .appendingPathComponent("hub/models--BUT-FIT--diarizen-meeting-base")
+            let vendor = PythonRuntime.scriptsDir
+                .appendingPathComponent("diarizen/vendor/diarizen")
+            return fm.fileExists(atPath: hub.path) && fm.fileExists(atPath: vendor.path)
         }
         if model.id == nemoDiarization.id {
             // Non-standard layout, the mossformer2 precedent: NeMo's checkpoints

@@ -1349,10 +1349,10 @@ def run_whisper(rep: Report, ctx):
             # check above is not passing merely because everything is dropped.
             on = module.whisper_transcribe_kwargs(
                 "repo", "en", best_of=5,
-                hallucination_silence_sec=2.0, initial_prompt=" Aggia ")
+                hallucination_silence_sec=2.0, initial_prompt=" pyannote ")
             for key, want in (("best_of", 5),
                               ("hallucination_silence_threshold", 2.0),
-                              ("initial_prompt", "Aggia")):
+                              ("initial_prompt", "pyannote")):
                 if on.get(key) != want:
                     problems.append(f"{key} was {on.get(key)!r}, expected {want!r}")
             # beam_size is NOT a knob here and must stay unrepresentable:
@@ -4307,6 +4307,7 @@ LAYOUT_CHECKS = [
     "layout/tail-window-start-is-recorded-not-derived",
     "layout/diarization-settings-locked-per-session",
     "layout/batch-engines-ignore-final-pass",
+    "layout/remote-passes-never-send-the-room-count",
     "layout/pdf-export-uses-fixed-ink",
 ]
 
@@ -4725,8 +4726,14 @@ def run_layout(rep: Report, ctx):
             return "\n".join(l for l in (audio_dir / name).read_text().splitlines()
                              if not l.strip().startswith("//"))
 
+        # ONE NAME PER BATCH ENGINE, and a new engine must be added here. DiariZen
+        # (2026-08-10) landed with this list still naming two files, so the third
+        # engine's remote pass was unpinned — it happened to pass `true`, but a
+        # future edit making it read the key would have kept this check green while
+        # silently deleting every remote label again.
         problems = []
-        for name in ("AudioRecorder+Spectral.swift", "AudioRecorder+Nemo.swift"):
+        for name in ("AudioRecorder+Spectral.swift", "AudioRecorder+Nemo.swift",
+                     "AudioRecorder+Diarizen.swift"):
             code = _code(name)
             if needle in code:
                 problems.append(f"{name} reads diarization.finalPass — a batch "
@@ -4744,8 +4751,87 @@ def run_layout(rep: Report, ctx):
                             "and must still be honoured, so this check has lost the "
                             "half that lets it fail")
         rep.expect(cid, not problems,
-                   "neither batch engine reads diarization.finalPass (both pass "
+                   "no batch engine reads diarization.finalPass (all three pass "
                    "true), while pyannote's remote pass still honours it",
+                   "; ".join(problems))
+
+    cid = "layout/remote-passes-never-send-the-room-count"
+    if ctx.wants(cid):
+        # A REMOTE stop pass may not send `AudioRecorder.diarNumSpeakers`.
+        #
+        # That value is the ROOM's headcount — the SPK chip sits beside the room's
+        # RMS meter and its own doc says "how many people are in the room". Nothing
+        # anywhere asks how many people are on the far end of the call, so the
+        # number is not a fact about the Remote WAV, and the two streams are
+        # separate identity spaces precisely because they hold different people.
+        #
+        # Sending it was not inert: a pinned count is an EXACT constraint on three
+        # of the four pipeline engines (pyannote and spectral pass `num_speakers=`,
+        # NeMo turns it into `oracle_num_speakers`), so a 5-person room with one
+        # caller split that caller into five remote profiles. Fabrication is the
+        # direction this project treats as worse everywhere else.
+        #
+        # THE POSITIVE HALF IS LOAD-BEARING: the OFFICE passes must still send it.
+        # Without that, a file that had simply stopped sending any count would pass
+        # this check while quietly disabling the one control the owner asked for —
+        # and it is spectral, the engine a count measurably fixes, that would lose
+        # the most.
+        audio_dir = SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+
+        def _body(name, func):
+            """The source of one method, comments stripped, up to the next `func`."""
+            lines = (audio_dir / name).read_text().splitlines()
+            out, inside = [], False
+            for line in lines:
+                if not inside:
+                    if line.strip().startswith(f"func {func}"):
+                        inside = True
+                    continue
+                if line.strip().startswith("func "):
+                    break
+                if line.strip().startswith("//"):
+                    continue
+                out.append(line)
+            return "\n".join(out) if inside else None
+
+        # ONE ENTRY PER ENGINE, remote and office side by side, so a new engine has
+        # to be added to BOTH columns — the `batch-engines-ignore-final-pass` list
+        # was left naming two engines when the third landed, and that is the exact
+        # oversight this shape is meant to make visible.
+        pairs = [
+            ("AudioRecorder+RemoteDiarization.swift", "startRemoteFullDiarization",
+             "AudioRecorder+OfficeDiarization.swift", "startDiarization"),
+            ("AudioRecorder+Spectral.swift", "startRemoteSpectralDiarization",
+             "AudioRecorder+Spectral.swift", "startSpectralDiarization"),
+            ("AudioRecorder+Nemo.swift", "startRemoteNemoDiarization",
+             "AudioRecorder+Nemo.swift", "startNemoDiarization"),
+            ("AudioRecorder+Diarizen.swift", "startRemoteDiarizenDiarization",
+             "AudioRecorder+Diarizen.swift", "startDiarizenDiarization"),
+        ]
+        problems = []
+        for rfile, rfunc, ofile, ofunc in pairs:
+            remote = _body(rfile, rfunc)
+            office = _body(ofile, ofunc)
+            if remote is None:
+                problems.append(f"{rfile}: {rfunc} is gone")
+            else:
+                if "diarNumSpeakers" in remote:
+                    problems.append(f"{rfunc} sends diarNumSpeakers — that is the "
+                                    f"ROOM's count and the remote stream holds "
+                                    f"different people; use remoteNumSpeakers")
+                if "remoteNumSpeakers" not in remote:
+                    problems.append(f"{rfunc} names no speaker count at all — it "
+                                    f"must state the auto rule explicitly, not "
+                                    f"omit the parameter")
+            if office is None:
+                problems.append(f"{ofile}: {ofunc} is gone")
+            elif "diarNumSpeakers" not in office:
+                problems.append(f"{ofunc} no longer sends diarNumSpeakers — the "
+                                f"office pass is where the control is honoured, "
+                                f"so this check has lost the half that lets it fail")
+        rep.expect(cid, not problems,
+                   "all four remote passes send remoteNumSpeakers (auto) while all "
+                   "four office passes still honour the SPK control",
                    "; ".join(problems))
 
     cid = "layout/pdf-export-uses-fixed-ink"
@@ -4883,9 +4969,9 @@ def run_qwen3(rep: Report, ctx):
             # And the positive control: real values DO come through, so the check
             # above is not passing merely because everything is dropped.
             on = module.qwen3_generate_kwargs(
-                "en", system_prompt="  Aggia PREP  ", repetition_penalty=1.2,
+                "en", system_prompt="  pyannote PREP  ", repetition_penalty=1.2,
                 repetition_context_size=20)
-            for key, want in (("system_prompt", "Aggia PREP"),
+            for key, want in (("system_prompt", "pyannote PREP"),
                               ("repetition_penalty", 1.2),
                               ("repetition_context_size", 20)):
                 if on.get(key) != want:

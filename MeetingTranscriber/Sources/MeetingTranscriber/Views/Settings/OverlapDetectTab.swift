@@ -32,9 +32,40 @@ struct OverlapDetectTab: View {
 
     /// pyannote already marks overlap on its own, so switching this on there would
     /// pay for a second pass to learn what the transcript already knows.
+    ///
+    /// DiariZen is NOT in this note even though it also marks its own overlap: it
+    /// does not get pyannote's detector at all — it IS the detector here (see
+    /// `ModelCatalog.overlapDetectors(forDiarEngine:)`), so nothing is redundant
+    /// and nothing is paid for twice.
     private var redundantHere: Bool {
         diarOn && engine == ModelLoader.pyannoteEngineID
     }
+
+    /// This engine supplies its own detection, so the switch turns MARKING on and
+    /// off rather than starting a second model.
+    private var detectorIsTheDiarizer: Bool {
+        engine == ModelLoader.diarizenEngineID
+    }
+
+    /// The detectors this engine offers, and the one in force.
+    private var offered: [ModelInfo] { ModelCatalog.overlapDetectors(forDiarEngine: engine) }
+    private var effective: ModelInfo {
+        ModelCatalog.overlapDetector(id: detector, forDiarEngine: engine)
+    }
+
+    // NO "detection model changed" BANNER (owner, 2026-08-10). One was added with
+    // the engine-filtered picker, by analogy with the MOSS⟺MOSS notice, and the
+    // owner removed it on sight. The analogy does not hold: MOSS's notice reports
+    // that an engine the user DELIBERATELY chose was taken away and something else
+    // put in its place, which is a real loss they need to know about. Here the list
+    // holds exactly one entry per engine, that entry is visibly selected two rows
+    // below, and the switch happens because they changed the diarizer a moment ago
+    // — a banner explaining what the page already shows is the kind nobody reads.
+    //
+    // The CORRECTION itself is untouched and still matters: `effective` is what the
+    // card and the install status read, so a stored id from another engine can
+    // never leave the list looking like nothing is selected, nor name a detector
+    // this session cannot run.
 
     var body: some View {
         VStack(alignment: .leading, spacing: SettingsLayout.row) {
@@ -68,8 +99,14 @@ struct OverlapDetectTab: View {
             SettingBlock(title: "Detection") {
                 SettingToggle(label: "Mark rows where two people spoke at once",
                               isOn: $enabled)
-                Text("Runs once at Stop, over the whole recording. Measured on this "
-                     + "Mac: about 16 seconds for a 43-minute meeting.")
+                // The cost sentence is per detector, because the two are nothing
+                // alike: pyannote's is a second pass over the audio, DiariZen's
+                // already happened.
+                Text(detectorIsTheDiarizer
+                     ? "Free here — the diarization pass already finds it. Nothing "
+                       + "extra runs."
+                     : "Runs once at Stop, over the whole recording. Measured on this "
+                       + "Mac: about 16 seconds for a 43-minute meeting.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -81,18 +118,24 @@ struct OverlapDetectTab: View {
                     // it already gets `SettingsLayout.inBlock`. The hard-coded 8
                     // that used to be here happened to agree — a second copy of a
                     // number is how the two drift apart later.
-                    ForEach(ModelCatalog.overlapDetectors) { m in
+                    //
+                    // FILTERED BY THE DIARIZATION ENGINE (owner, 2026-08-10): under
+                    // DiariZen the only detector is DiariZen. `effective` is what
+                    // the card compares against rather than the raw stored id, so a
+                    // value left by another engine cannot leave the list looking
+                    // like nothing is selected.
+                    ForEach(offered) { m in
                         Button(action: {
                             withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                                 detector = m.id
                             }
                         }) {
-                            ModelCardView(model: m, selected: detector == m.id)
+                            ModelCardView(model: m, selected: effective.id == m.id)
                         }
                         .buttonStyle(.plain)
                     }
 
-                    ModelInstallStatus(model: ModelCatalog.overlapDetector(id: detector))
+                    ModelInstallStatus(model: effective)
                 }
             }
         }

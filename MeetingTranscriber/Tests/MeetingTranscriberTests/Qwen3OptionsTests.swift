@@ -154,7 +154,7 @@ final class Qwen3OptionsTests: XCTestCase {
     func testEachOptionProducesItsFlag() {
         selectQwen3()
         let d = UserDefaults.standard
-        d.set("Aggia ATND1061 PREP", forKey: "qwen3.systemPrompt")
+        d.set("pyannote ATND1061 PREP", forKey: "qwen3.systemPrompt")
         d.set(1.2, forKey: "qwen3.repetitionPenalty")
         d.set(20, forKey: "qwen3.repetitionContextSize")
 
@@ -165,7 +165,7 @@ final class Qwen3OptionsTests: XCTestCase {
             XCTAssertTrue(arguments.contains(flag), "missing \(flag) in \(arguments)")
         }
         XCTAssertEqual(arguments[arguments.firstIndex(of: "--system-prompt")! + 1],
-                       "Aggia ATND1061 PREP")
+                       "pyannote ATND1061 PREP")
         XCTAssertEqual(arguments[arguments.firstIndex(of: "--repetition-penalty")! + 1],
                        "1.2")
     }
@@ -179,7 +179,7 @@ final class Qwen3OptionsTests: XCTestCase {
         selectQwen3()
         let before = ChunkedASRService.Config.fromSettings()
         let cases: [(String, Any)] = [
-            ("qwen3.systemPrompt", "Aggia"),
+            ("qwen3.systemPrompt", "pyannote"),
             ("qwen3.repetitionPenalty", 1.2),
         ]
         for (key, value) in cases {
@@ -218,7 +218,7 @@ final class Qwen3OptionsTests: XCTestCase {
     /// whisper-service.py accepts and would abort the session at startup.
     func testOtherModelsCarryNoQwen3Options() {
         let d = UserDefaults.standard
-        d.set("Aggia ATND1061", forKey: "qwen3.systemPrompt")
+        d.set("pyannote ATND1061", forKey: "qwen3.systemPrompt")
         d.set(1.2, forKey: "qwen3.repetitionPenalty")
         d.set(250, forKey: "qwen3.repetitionContextSize")
         for model in ["whisper", "voxtral", "granite", "moss"] {

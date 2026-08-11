@@ -84,6 +84,11 @@ dist/
 # Listed beside .venv-dicow because `.venv/` above does NOT cover it: that
 # pattern is an exact directory name, not a prefix.
 /.venv-nemo
+# The DiariZen runtime — 1.5 GB, and the ONLY one on Python 3.11 (torch 2.1.1
+# has no 3.12 wheels). Same reason it needs its own line: `.venv/` above is an
+# exact directory name, not a prefix, so this was untracked-but-not-ignored and
+# a `git add -A` would have committed all 1.5 GB.
+/.venv-diarizen
 
 # Exported meeting transcripts. Real client speech, written here by the owner
 # choosing this folder in the export dialog — the one category in this repo that

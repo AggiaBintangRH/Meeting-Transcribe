@@ -179,7 +179,10 @@ extension AudioRecorder {
         }
         remoteDiarAudio = []
         remoteFinalDiarDone = false
-        let numSpeakers = Self.diarNumSpeakers
+        // AUTO, never the room's count — see `AudioRecorder.remoteNumSpeakers`.
+        // Here a pinned count would arrive as `oracle_num_speakers`, i.e. as a
+        // certainty rather than a hint.
+        let numSpeakers = Self.remoteNumSpeakers
         nemoLog("REMOTE FINAL PASS start — whole Remote WAV, "
                 + "num_speakers=\(numSpeakers == 0 ? "auto" : String(numSpeakers))")
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers, stream: .remote)

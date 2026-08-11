@@ -20,7 +20,8 @@ extension AudioRecorder {
         // and never looks at it. Same shape as the `chunkAudio` leak found on
         // 2026-07-31, caught here before it could ship.
         // NEMO takes the same guard for the same reason — see `diarizeLiveChunk`.
-        guard !spectralDiarizationActive, !nemoDiarizationActive else {
+        guard !spectralDiarizationActive, !nemoDiarizationActive,
+              !diarizenDiarizationActive else {
             remoteDiarAudio = []; return
         }
         guard remoteStreamActive, let service = modelLoader.pyannote else { return }
@@ -182,7 +183,8 @@ extension AudioRecorder {
             completeRemoteDiarization(error: "Remote recording is missing")
             return
         }
-        let numSpeakers = Self.diarNumSpeakers
+        // AUTO, never the room's count — see `AudioRecorder.remoteNumSpeakers`.
+        let numSpeakers = Self.remoteNumSpeakers
         let detectOverlap = diarDetectOverlap
         service.diarizeFinal(audio: recording, numSpeakers: numSpeakers,
                              exclusive: !detectOverlap, stream: .remote)

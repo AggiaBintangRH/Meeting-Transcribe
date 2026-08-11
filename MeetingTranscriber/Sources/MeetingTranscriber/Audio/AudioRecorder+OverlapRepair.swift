@@ -32,15 +32,41 @@ extension AudioRecorder {
     /// not of what else is running. pyannote marks overlap itself, so it keeps
     /// using its own turns and its behaviour is byte-for-byte unchanged — the
     /// detector is a second opinion there, never a substitution.
+    ///
+    /// **DIARIZEN IS ON PYANNOTE'S SIDE OF THIS LINE, AND IT IS A MEASUREMENT.**
+    /// It shipped on the other side (2026-08-10) by analogy with the batch engines
+    /// it resembles in every other respect — one whole-file pass, no live labels.
+    /// That analogy was wrong on the one question this property actually asks. Its
+    /// Conformer head is a POWERSET over speaker combinations, and for this
+    /// checkpoint that is **11 classes = 1 silence + 4 single-speaker + 6 PAIRS**
+    /// (`powerset_max_classes = 2`, verified on the loaded model). Two people
+    /// talking at once is a class the network predicts directly, per 20 ms frame —
+    /// not something inferred afterwards from turns that happen to collide. So its
+    /// turns really do intersect: measured on `recordings/Overlap123.wav`,
+    /// **11 intersecting pairs, 13.30 s**, reproduced with the BUNDLED interpreter
+    /// after `./build.sh`.
+    ///
+    /// The engine's own config agrees: `apply_median_filtering` is **false**, and
+    /// measurement shows why it must stay false — the 220 ms kernel halves this
+    /// (11 pairs → 6, 12 turns → 7). The checkpoint is tuned to PRESERVE overlap.
+    ///
+    /// Spectral (Viterbi) and NeMo (NME-SC) remain here for the reason that is
+    /// genuinely structural: both assign exactly one label per instant, so
+    /// `overlapRegions()` is empty under them however the audio sounds.
     var usesDetectedRegionsForRepair: Bool {
         mossDiarizationActive || spectralDiarizationActive || nemoDiarizationActive
     }
 
     /// Which engine to NAME in the log when repair is skipped for want of the
-    /// detector. Derived from the same three flags rather than a `?:` at the call
-    /// site: with three engines a two-way conditional silently mislabels the third,
-    /// and a log line that names the wrong engine sends the next debugging session
-    /// to the wrong page of Settings.
+    /// detector. Derived from the flags rather than a `?:` at the call site: with
+    /// three engines a two-way conditional silently mislabels the third, and a log
+    /// line that names the wrong engine sends the next debugging session to the
+    /// wrong page of Settings.
+    ///
+    /// DiariZen deliberately has NO case here — it never reaches this log, because
+    /// it supplies its own regions (see `usesDetectedRegionsForRepair`). A branch
+    /// for it would be unreachable, and an unreachable branch that names an engine
+    /// is exactly how the next reader concludes the opposite.
     var batchEngineNameForLog: String {
         if mossDiarizationActive { return "MOSS" }
         if nemoDiarizationActive { return "NEMO" }

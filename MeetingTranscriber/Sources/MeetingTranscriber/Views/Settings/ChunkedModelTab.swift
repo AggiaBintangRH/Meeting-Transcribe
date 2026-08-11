@@ -178,7 +178,7 @@ struct ChunkedModelTab: View {
     /// (`fullPassCostNote`) is the only part that varies.
     @ViewBuilder
     private var stopPassBlock: some View {
-        SettingBlock(title: "Re-transcribe at stop") {
+        SettingBlock(title: "") {
             SettingToggle(label: "Re-transcribe at stop", isOn: $finalPass)
             Text("After you stop, transcribe the recording with this model once more so the last "
                  + "seconds — the part no chunk covered yet — are as accurate as the rest.")
@@ -443,7 +443,7 @@ struct WhisperOptionsBlock: View {
             }
 
             SettingBlock(title: "Initial prompt — vocabulary help, with a real risk") {
-                TextField("e.g. Aggia, ATND1061, pyannote, Qwen3", text: $initialPrompt,
+                TextField("e.g. ATND1061, pyannote, Qwen3", text: $initialPrompt,
                           axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(2...4)
@@ -544,7 +544,7 @@ struct Qwen3OptionsBlock: View {
     var body: some View {
         Group {
             SettingBlock(title: "Vocabulary prompt — spelling help, with a real risk") {
-                TextField("e.g. Aggia, ATND1061, pyannote, PREP framework",
+                TextField("e.g. ATND1061, pyannote, PREP framework",
                           text: $systemPrompt, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(2...4)

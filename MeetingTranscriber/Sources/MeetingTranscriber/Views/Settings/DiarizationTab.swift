@@ -45,12 +45,12 @@ struct DiarizationTab: View {
 
     private var isMoss: Bool { engine == ModelLoader.mossEngineID }
 
-    private var engineBoxTitle: String {
-        if isMoss { return "MOSS" }
-        if isSpectral { return "SPECTRAL" }
-        if isNemo { return "NEMO" }
-        return "PYANNOTE"
-    }
+    // `engineBoxTitle` USED TO LIVE HERE and was DEAD — nothing read it. The only
+    // options box left is pyannote's, whose title is a literal and which is shown
+    // only under pyannote, so a computed title had no caller. It was still being
+    // maintained (a DiariZen case was added to it on 2026-08-10 before anyone
+    // noticed), which is the cost of dead code in a file where comments are
+    // load-bearing: it reads like the thing that names the box, and it is not.
 
     /// MOSS keeps its OWN stop pair (`moss.finalPass` / `moss.continueOnStop`) —
     /// their defaults differ from the pyannote pair, so these are two settings
@@ -62,13 +62,17 @@ struct DiarizationTab: View {
     /// no live pass, one whole-file pass at Stop, no tail — so everywhere below it
     /// is grouped with spectral rather than given a branch of its own.
     private var isNemo: Bool { engine == ModelLoader.nemoEngineID }
+    /// DiariZen, the fifth engine (2026-08-10). Same SPECTRAL shape as NeMo —
+    /// no live pass, one whole-file pass at Stop, no tail — so it joins the
+    /// batch group rather than getting a branch of its own.
+    private var isDiarizen: Bool { engine == ModelLoader.diarizenEngineID }
     /// The two WHOLE-FILE BATCH engines. Shared pyannote controls apply to
     /// neither: there is no live pass to time, no live labels for a tail to
     /// continue from, and the stop pass is not optional — it IS the labels.
     /// `runsBatchOfficePass` reads none of the three, so hiding them here is not
     /// hiding something still in force; it is the UI agreeing with a rule that
     /// already ignores them.
-    private var isBatchEngine: Bool { isSpectral || isNemo }
+    private var isBatchEngine: Bool { isSpectral || isNemo || isDiarizen }
     var body: some View {
         Group {
             
@@ -161,16 +165,40 @@ struct DiarizationTab: View {
                 // number. pyannote differs only because it identifies per 30 s
                 // chunk, and chunk 2 onward matches chunk 1's fresh profiles.
                 // A promise the architecture cannot keep is worse than a caveat.
-                Text("No settings. This engine has no live pass and counts the speakers "
-                     + "itself — it diarizes the whole recording once, after you press "
-                     + "Stop, every time. There is no speaker-count control on purpose: "
-                     + "the count is always automatic.\n\n"
-                     + "Saved voice profiles and renaming work normally. spk confidence "
-                     + "usually will not appear: it is a match score, and this engine "
-                     + "identifies every speaker in one pass against a store that starts "
-                     + "empty, so there is nothing yet to match against.\n\n"
-                     + "It cannot mark two people talking at once, so overlap "
-                     + "repair needs Models → Detect overlap switched on.")
+                Text("No settings — the whole recording is diarized once at Stop, "
+                     + "speaker count automatic.\n"
+                     + "Profiles and renaming work. spk confidence usually will not "
+                     + "appear.\n"
+                     + "It cannot mark two people at once, so overlap repair needs "
+                     + "Detect overlap switched on.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isDiarizen {
+                // ITS OWN BRANCH, added 2026-08-10. Without one it fell through to
+                // the `else` below and showed MOSS's copy — "chunk length is the
+                // quality knob… Models → Chunked", which is a CHUNKED-ASR setting
+                // and has no effect on this engine at all. A settings page that
+                // hands out another model's advice is worse than a blank one.
+                //
+                // The last paragraph is the part that differs from NeMo's, and it
+                // is a measurement rather than a family resemblance: this engine's
+                // powerset head predicts two-speaker frames directly, and its turns
+                // were measured intersecting (11 pairs / 13.30 s on Overlap123).
+                // So overlap really is marked here, and repair does NOT need the
+                // separate detector — see `usesDetectedRegionsForRepair`.
+                // THREE SHORT SENTENCES (owner, 2026-08-10, restating the
+                // 2026-08-06 rule): this was three paragraphs and the owner cut it
+                // — "nobody reads it, the client just picks". Every clause that
+                // survived prevents a wrong expectation; the REASONS moved into
+                // this comment, where the next maintainer needs them and the client
+                // does not. Do not grow it back.
+                Text("No settings — the whole recording is diarized once at Stop, "
+                     + "speaker count automatic.\n"
+                     + "Profiles and renaming work. spk confidence usually will not "
+                     + "appear.\n"
+                     + "It marks overlapping speech itself, so Detect overlap is not "
+                     + "used here.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -190,7 +218,7 @@ struct DiarizationTab: View {
                 Text(chunkedModel == "moss"
                      ? "MOSS transcribes and labels in one pass, so with MOSS as the chunked "
                        + "model it is also the diarizer. Pick a different chunked model to use "
-                       + "pyannote, spectral or NeMo."
+                       + "pyannote, spectral, NeMo or DiariZen."
                      : "MOSS diarization is offered only when MOSS is also the chunked model. "
                        + "The engine was set back to pyannote.")
                     .font(.system(size: 11))

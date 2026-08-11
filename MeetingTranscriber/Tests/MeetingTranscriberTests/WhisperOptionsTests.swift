@@ -125,7 +125,7 @@ final class WhisperOptionsTests: XCTestCase {
     func testEachOptionProducesItsFlag() {
         selectWhisper()
         let d = UserDefaults.standard
-        d.set("Aggia ATND1061", forKey: "whisper.initialPrompt")
+        d.set("pyannote ATND1061", forKey: "whisper.initialPrompt")
         d.set(2, forKey: "whisper.bestOf")
         d.set(0.45, forKey: "whisper.noSpeechThreshold")
         d.set(-1.5, forKey: "whisper.logprobThreshold")
@@ -139,7 +139,7 @@ final class WhisperOptionsTests: XCTestCase {
             XCTAssertTrue(arguments.contains(flag), "missing \(flag) in \(arguments)")
         }
         XCTAssertEqual(arguments[arguments.firstIndex(of: "--initial-prompt")! + 1],
-                       "Aggia ATND1061")
+                       "pyannote ATND1061")
         XCTAssertEqual(arguments[arguments.firstIndex(of: "--best-of")! + 1], "2")
     }
 
@@ -152,7 +152,7 @@ final class WhisperOptionsTests: XCTestCase {
         selectWhisper()
         let before = ChunkedASRService.Config.fromSettings()
         let cases: [(String, Any)] = [
-            ("whisper.initialPrompt", "Aggia"),
+            ("whisper.initialPrompt", "pyannote"),
             ("whisper.bestOf", 5),
             ("whisper.noSpeechThreshold", 0.45),
             ("whisper.logprobThreshold", -1.5),
@@ -220,7 +220,7 @@ final class WhisperOptionsTests: XCTestCase {
     /// every Whisper knob moved.
     func testOtherModelsCarryNoWhisperOptions() {
         let d = UserDefaults.standard
-        d.set("Aggia ATND1061", forKey: "whisper.initialPrompt")
+        d.set("pyannote ATND1061", forKey: "whisper.initialPrompt")
         d.set(5, forKey: "whisper.bestOf")
         d.set(2.0, forKey: "whisper.hallucinationSilenceSec")
         for model in ["qwen3", "voxtral", "granite", "moss"] {

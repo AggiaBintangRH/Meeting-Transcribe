@@ -104,10 +104,10 @@ final class TurnConfidenceCarryThroughTests: XCTestCase {
         let renamed = turns.map {
             $0.id == 1
                 ? SpeakerTurn(start: $0.start, end: $0.end, id: $0.id,
-                                          name: "Aggia", conf: $0.conf)
+                                          name: "Renamed", conf: $0.conf)
                 : $0
         }
-        XCTAssertEqual(renamed[0].name, "Aggia")
+        XCTAssertEqual(renamed[0].name, "Renamed")
         XCTAssertEqual(renamed[0].conf ?? -1, 0.82, accuracy: 1e-9)
         XCTAssertEqual(renamed[1].conf ?? -1, 0.55, accuracy: 1e-9)
     }

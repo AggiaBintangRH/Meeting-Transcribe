@@ -229,14 +229,59 @@ final class AudioRecorder: ObservableObject {
     var diarContinueOnStop = false
     var diarDetectOverlap = true
 
-    /// Speakers to ask each diarizer for. ALWAYS 0 = auto (owner, 2026-08-06):
-    /// the "Number of speakers" picker was removed and `diarization.numSpeakers`
-    /// is no longer read anywhere. A constant rather than four literal zeros so
-    /// the four dispatch sites cannot drift, and so pinning a count later is one
-    /// edit — the sidecars still accept it, and B1's measurement (spectral
-    /// auto-counting 20 speakers on a 67-minute recording) is the reason that
-    /// door is left open.
-    static let diarNumSpeakers = 0
+    /// Speakers to ask each diarizer for. **0 = auto**, and the default.
+    ///
+    /// This was a pinned constant from 2026-08-06 (the picker had been removed)
+    /// until the owner asked for the control back on 2026-08-10, on evidence: auto
+    /// vs pinned, measured on the same files, showed **spectral counting 13
+    /// speakers on a 3-person clip and 20 on a 67-minute meeting**, both fixed by
+    /// pinning. The old constant's own comment left this door open for exactly
+    /// that — "pinning a count later is one edit" — and this is that edit.
+    ///
+    /// Read LIVE rather than locked into the session, and that is deliberate: it
+    /// reaches the sidecars only in the stop passes, so there is no second reader
+    /// during recording for it to disagree with. It is the same reasoning
+    /// `runsSpectralOfficePass` gives for reading `finalPass` late, and the reason
+    /// `lockDiarizationSettings` does NOT own this key.
+    ///
+    /// Still ONE place rather than eight literals, so the dispatch sites cannot
+    /// drift. Which engines actually act on it is
+    /// `ModelLoader.honoursSpeakerCount(diarEngine:)` — DiariZen's sidecar never
+    /// reads the field, so the number travels the whole path and dies where the
+    /// truth is (the language-picker rule, 2026-07-31).
+    static var diarNumSpeakers: Int {
+        max(0, UserDefaults.standard.integer(forKey: "diarization.numSpeakers"))
+    }
+
+    /// What the REMOTE stop pass asks for: **always auto, on every engine.**
+    ///
+    /// `diarNumSpeakers` counts the ROOM. The chip says so in its own doc — *"you
+    /// know before you press record how many people are in the room"* — it sits
+    /// beside the room's RMS meter, and nothing anywhere asks how many people are
+    /// on the far end of the call. So the number is simply not a fact about the
+    /// Remote WAV, and the two streams are separate identity spaces precisely
+    /// because they hold DIFFERENT people.
+    ///
+    /// Sending it anyway was not inert. A pinned count is an EXACT constraint on
+    /// three of the four pipeline engines — pyannote and spectral pass it as
+    /// `num_speakers=`, NeMo turns it into `oracle_num_speakers` — so a 5-person
+    /// room with one caller on the line had that caller split into five "Remote
+    /// Speaker" profiles, and a 2-person room with six callers had the six merged
+    /// into two. Fabricating a conversation nobody had is the direction this
+    /// project treats as the worse one everywhere else (the ASR hallucination
+    /// gates, DiariZen's `min_cluster_size`).
+    ///
+    /// **This is the same rule the pyannote CHUNK jobs already follow** and for the
+    /// same reason (2026-08-10 connection audit): a window that need not contain
+    /// everyone must not be told the meeting's headcount. Auto is the safe
+    /// direction — the engines that count well count well here too, and spectral,
+    /// the one that counts badly, is no worse off than it was before the control
+    /// existed.
+    ///
+    /// A separate remote count is deliberately NOT offered: the room is visible
+    /// from the chair, the far end is not, so a second picker would collect a
+    /// number the user is guessing at and hand it to an engine as a certainty.
+    static let remoteNumSpeakers = 0
 
     /// Read the three session-scoped diarization settings once. Called from
     /// `beginCapture` before anything can consume them, and unconditionally —
@@ -255,6 +300,18 @@ final class AudioRecorder: ObservableObject {
         diarLiveEnabled = true
         diarContinueOnStop = d.object(forKey: "diarization.continueOnStop") as? Bool ?? false
         diarDetectOverlap = true
+        // DIARIZEN'S OWN OVERLAP MARKING, and it belongs here for the same reason
+        // the three above do: it is read by the DISPLAY path (`overlapRegions()`,
+        // which rebuilds continuously while recording) and again at Stop by
+        // `repairWindows`. Settings is reachable mid-meeting, so a live read would
+        // let those two disagree about one meeting — half a transcript tagged and
+        // half not, with nothing marking the seam. That is the 2026-08-05 finding,
+        // and this key has exactly its shape.
+        //
+        // Under every other engine this is inert: `overlapRegions()` consults it
+        // only when `diarizenDiarizationActive`, so pyannote keeps tagging overlap
+        // whatever the Detect overlap switch says, byte-for-byte as before.
+        diarizenOverlapMarking = d.object(forKey: "overlap.detect.enabled") as? Bool ?? false
     }
     var chunkFileByWindow: [Double: URL] = [:]
 
@@ -396,6 +453,15 @@ final class AudioRecorder: ObservableObject {
     /// stored properties. Inert for every other session — it stays false, so every
     /// guard that reads it is a no-op.
     var nemoDiarizationActive = false
+    /// This session runs the DiariZen engine. Locked at `beginCapture` like the
+    /// other engine flags — half a transcript labelled by each engine is not a
+    /// state any display path can render honestly.
+    var diarizenDiarizationActive = false
+    /// Whether DiariZen's own overlap marking is switched on for this session
+    /// (Settings → Models → Detect overlap, where DiariZen is the detector).
+    /// Read once in `lockDiarizationSettings`; see there for why. Inert unless
+    /// `diarizenDiarizationActive`.
+    var diarizenOverlapMarking = false
     /// True when the chunked ASR model IS MOSS, so one process fills both roles
     /// and the segments arriving on `onChunkSegments` describe the very text
     /// `onChunkTranscript` is about to deliver.
@@ -959,6 +1025,7 @@ final class AudioRecorder: ObservableObject {
         // false unless its engine is the selected one, so this order leaves exactly
         // one of the four true and the other three have already no-op'd cleanly.
         configureNemo()
+        configureDiarizen()
         configureOverlapDetect()
         // The second MOSS process for this session, or nil — captured once, like
         // `chunked`, so the escaping tap closure never touches the recorder to
@@ -1480,7 +1547,14 @@ final class AudioRecorder: ObservableObject {
             batchActive: nemoDiarizationActive,
             hasService: modelLoader.nemo != nil,
             hasRecording: lastRecordingURL != nil)
-        let willRunStopPass = runsSpectralPass || runsNemoPass
+        // Its OWN rule, not folded into NeMo's: `runsBatchOfficePass` takes the
+        // engine's flag AND its service, and sharing one call would have asked
+        // whether NeMo's sidecar was up for a DiariZen session.
+        let runsDiarizenPass = Self.runsBatchOfficePass(
+            batchActive: diarizenDiarizationActive,
+            hasService: modelLoader.diarizen != nil,
+            hasRecording: lastRecordingURL != nil)
+        let willRunStopPass = runsSpectralPass || runsNemoPass || runsDiarizenPass
             || (finalOn && modelLoader.pyannote != nil)
         // The remote pass is dispatched HERE, before the overlay is built, so the
         // step list knows whether to show a remote-diarization row. Queued ahead
@@ -1496,6 +1570,8 @@ final class AudioRecorder: ObservableObject {
             willRunRemoteDiar = startRemoteSpectralDiarization()
         } else if nemoDiarizationActive {
             willRunRemoteDiar = startRemoteNemoDiarization()
+        } else if diarizenDiarizationActive {
+            willRunRemoteDiar = startRemoteDiarizenDiarization()
         } else {
             willRunRemoteDiar = startRemoteDiarization()
         }
@@ -1519,8 +1595,9 @@ final class AudioRecorder: ObservableObject {
         // ONE budget for both batch engines rather than two, because a session runs
         // at most one of them — see `stopWatchdogSeconds(batchPassSeconds:)`.
         let batchEngineActive = spectralDiarizationActive || nemoDiarizationActive
+            || diarizenDiarizationActive
         let batchBudget = batchEngineActive
-            && (runsSpectralPass || runsNemoPass || willRunRemoteDiar)
+            && (runsSpectralPass || runsNemoPass || runsDiarizenPass || willRunRemoteDiar)
             ? Self.batchPassWatchdogSeconds(recordingLength: recordingElapsed)
                 * (willRunRemoteDiar ? 2 : 1)
             : 0
@@ -1560,6 +1637,8 @@ final class AudioRecorder: ObservableObject {
                 startSpectralDiarization(recording)
             } else if runsNemoPass, let recording = lastRecordingURL {
                 startNemoDiarization(recording)
+            } else if runsDiarizenPass, let recording = lastRecordingURL {
+                startDiarizenDiarization(recording)
             } else if continueOnStop {
                 diarizeTailChunk()
             } else if let recording = lastRecordingURL {

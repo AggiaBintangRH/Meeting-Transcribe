@@ -183,9 +183,28 @@ pipi() { # pipi <package-spec...>
 }
 
 echo "==> Installing huggingface_hub CLI into venv..."
-# Pin <1.0: main venv's transformers needs huggingface_hub<1.0; unpinned
-# --upgrade pulls 1.x and breaks mlx-audio/transformers.
-pipi "huggingface_hub[cli]<1.0" || { echo "!! could not install huggingface_hub"; exit 1; }
+# THE BOUND IS >=1.5,<2.0, AND IT IS READ OFF THE PACKAGES THAT DECLARE IT —
+# `transformers` asks for `huggingface-hub<2.0,>=1.5.0` and `mlx-audio` for
+# `>=1.0`, so this is their intersection, not a number chosen here.
+#
+# It used to be `huggingface_hub[cli]<1.0`, whose comment claimed "main venv's
+# transformers needs huggingface_hub<1.0". That was TRUE WHEN WRITTEN and became
+# false when transformers moved to 5.x. A pin outliving its reason is the shape
+# this project keeps finding, and here it had inverted into the very thing it
+# claimed to prevent: measured on the 2026-08-10 run, it DOWNGRADED 1.23.0 ->
+# 0.36.2 and printed
+#     ERROR: ... transformers 5.12.1 requires huggingface-hub>=1.5.0, but you
+#     have huggingface-hub 0.36.2 which is incompatible.
+# The very next install then dragged it back up to 1.27.0. The run still ended
+# "ALL OK" because pip's resolver ERROR is not a non-zero exit — which is why
+# this was invisible until the log was read line by line.
+#
+# `[cli]` IS DROPPED, and that is required rather than tidiness: huggingface_hub
+# 1.x has NO `cli` extra (its Provides-Extra list is oauth/torch/fastai/hf-xet/
+# mcp/testing/gradio/typing/quality/all/dev) because the `hf` command now ships
+# in the base package. Keeping `[cli]` here would ask for an extra that does not
+# exist and warn on every run. Verified: `.venv/bin/hf --version` -> 1.27.0.
+pipi "huggingface_hub>=1.5,<2.0" || { echo "!! could not install huggingface_hub"; exit 1; }
 HF_CLI="$VENV/bin/hf"
 [ -x "$HF_CLI" ] || HF_CLI="$VENV/bin/huggingface-cli"
 
@@ -559,6 +578,149 @@ if [ -f "$SCRIPT_DIR/scripts/nemo/vendor/diar_infer_general.yaml" ]; then
 else
   echo "!! scripts/nemo/vendor/diar_infer_general.yaml is missing — the NeMo engine will not run"
   FAILED+=("scripts/nemo/vendor/diar_infer_general.yaml")
+fi
+
+# -------------------------------------------------------------
+# 3d. DIARIZATION ENGINE 4 — DiariZen (its own venv, .venv-diarizen)
+#     WavLM-Base+ encoder + Conformer -> END-TO-END NEURAL SEGMENTATION (EEND),
+#     then WeSpeaker embeddings + agglomerative clustering.
+#     Selectable as diarization.engine = diarizen.
+#
+#     ITS OWN INTERPRETER, AND THE ONLY PYTHON 3.11 ONE IN THE PROJECT. This is
+#     not a preference: upstream pins torch 2.1.1, which has no 3.12 wheels, and
+#     the vendored pyannote-audio 3.1.1 imports `torchaudio.AudioMetaData`,
+#     removed in torchaudio 2.9. Both halves fail loudly if this is "simplified"
+#     into a newer interpreter or the main .venv.
+#
+#     THE TWO PACKAGES ARE NOT ON PyPI, and that is why they are vendored under
+#     scripts/diarizen/vendor/ and installed FROM THAT TREE, non-editable. An
+#     editable install freezes as a `git+`/`file://` ref, and build.sh strips
+#     those out of the frozen requirements — the exact failure that shipped a
+#     broken DiCoW to a client machine on 2026-07-27.
+#
+#     LICENCE, AND IT IS A HARD CLIENT REQUIREMENT: only
+#     BUT-FIT/diarizen-meeting-base is MIT. The other five DiariZen checkpoints
+#     (wavlm-large-s80-md, -mlc, -v2, -origin, wavlm-base-s80-md) are
+#     CC BY-NC 4.0 because they add RAMC / MSDWild / DIHARD-3 to the training
+#     mix. This project ships to a paying client. DO NOT swap the checkpoint for
+#     a "better" one without re-reading its licence.
+# -------------------------------------------------------------
+echo ""
+echo "==> Setting up the DiariZen diarization runtime venv (.venv-diarizen)..."
+DZ_VENV="$SCRIPT_DIR/.venv-diarizen"
+DZ_PY="$DZ_VENV/bin/python3"
+DZ_VENDOR="$SCRIPT_DIR/scripts/diarizen/vendor"
+
+# Idempotent: skip the install when the venv already satisfies the pins. The
+# torch check is part of the CONTRACT, not a nicety — a resolver that quietly
+# moved torch off 2.1.1 leaves an engine that imports and then dies at the first
+# job, which is the stop pass, which under this engine IS the labels.
+dz_venv_ok() {
+  [ -x "$DZ_PY" ] || return 1
+  "$DZ_PY" - <<'EOF' >/dev/null 2>&1
+import sys
+import torch, torchaudio, soundfile  # noqa: F401
+from torchaudio import AudioMetaData  # noqa: F401  (gone in torchaudio 2.9)
+import pyannote.audio  # noqa: F401
+from diarizen.pipelines.inference import DiariZenPipeline  # noqa: F401
+assert torch.__version__.startswith("2.1."), torch.__version__
+sys.exit(0)
+EOF
+}
+
+if [ ! -d "$DZ_VENDOR/diarizen" ] || [ ! -d "$DZ_VENDOR/pyannote-audio" ]; then
+  echo "!! scripts/diarizen/vendor is incomplete — DiariZen and its pyannote fork"
+  echo "   are not on PyPI, so this tree IS the engine. Restore it from git."
+  FAILED+=("scripts/diarizen/vendor")
+elif dz_venv_ok; then
+  echo "   OK: .venv-diarizen already satisfies torch 2.1.1 + DiariZen — skipping"
+else
+  if [ ! -x "$DZ_PY" ]; then
+    echo "   creating $DZ_VENV (Python 3.11 — required, see the note above)"
+    # 3.11 SPECIFICALLY. $PYBIN is deliberately NOT reused here: it is whatever
+    # interpreter the main venv was built with (3.12), and torch 2.1.1 has no
+    # 3.12 wheels, so pip would fail with an unhelpful "no matching distribution".
+    if find_uv; then
+      "$UV_BIN" venv --seed --python 3.11 "$DZ_VENV" || FAILED+=(".venv-diarizen creation")
+    elif command -v python3.11 >/dev/null 2>&1; then
+      python3.11 -m venv "$DZ_VENV" || FAILED+=(".venv-diarizen creation")
+    else
+      echo "!! No Python 3.11 found for .venv-diarizen."
+      echo "   Install uv (https://astral.sh/uv) or python3.11, then re-run."
+      FAILED+=(".venv-diarizen creation")
+    fi
+  fi
+  if [ -x "$DZ_PY" ]; then
+    "$DZ_VENV/bin/pip" install --quiet --upgrade pip wheel || true
+    # THE FILE REDIRECT IS NOT COSMETIC (the [Errno 35] lesson, build.sh B2/B2b
+    # and 3c above). This script's stdout is piped to tee; a large pip run's one
+    # enormous "Installing collected packages: …" line through a non-blocking
+    # pipe aborts the install.
+    DZ_PIP_LOG="$SCRIPT_DIR/logs/setup-pip-diarizen.log"
+    echo "   installing DiariZen + its pinned stack (log: $DZ_PIP_LOG)"
+    : >"$DZ_PIP_LOG"
+
+    # UPSTREAM'S OWN ORDER (vendor/README.md "Installation"), with exactly two
+    # deviations, both forced and both noted where they happen. Following the
+    # order matters: `pip install -e .` for pyannote-audio resolves against
+    # whatever torch is already present, so installing torch LAST would let it
+    # move off the pin.
+    dz_pip() {
+      if ! "$DZ_VENV/bin/pip" install --progress-bar off "$@" >>"$DZ_PIP_LOG" 2>&1; then
+        echo "!! pip install FAILED ($1 …) — last 30 lines of $DZ_PIP_LOG:"
+        tail -30 "$DZ_PIP_LOG"
+        FAILED+=("DiariZen venv deps (.venv-diarizen)")
+        return 1
+      fi
+    }
+
+    # DEVIATION 1: upstream installs the CUDA 12.1 build from
+    # download.pytorch.org. There is no CUDA on a Mac; the DEFAULT PyPI index
+    # gives the arm64 build whose MPS backend this engine actually runs on. The
+    # VERSIONS are upstream's, unchanged, and come from vendor/constraints.txt.
+    dz_pip torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 &&
+    dz_pip -r "$DZ_VENDOR/requirements.txt" -c "$DZ_VENDOR/constraints.txt" &&
+    # DEVIATION 2: NON-EDITABLE, where upstream uses `-e`. An editable install
+    # freezes as a `file://` ref and build.sh strips those out of the frozen
+    # requirements — the exact failure that shipped a broken DiCoW to a client
+    # on 2026-07-27. The constraints file is kept on the pyannote install
+    # exactly as upstream has it, so its resolve cannot move torch.
+    dz_pip --no-deps "$DZ_VENDOR" &&
+    # `[dev,testing]` IS UPSTREAM'S, and it is kept deliberately rather than
+    # trimmed: this is the exact combination the working .venv-diarizen was built
+    # from and verified against, and reproducing a verified environment beats
+    # shipping a smaller one nobody has run. It does cost bundle size (pytest,
+    # jupyterlab and tensorboard reach the .app this way) — see the audit note if
+    # that is ever worth revisiting, but re-verify the engine after trimming.
+    dz_pip "$DZ_VENDOR/pyannote-audio[dev,testing]" -c "$DZ_VENDOR/constraints.txt"
+
+    dz_venv_ok || FAILED+=("DiariZen venv verification (.venv-diarizen)")
+  fi
+fi
+
+echo ""
+echo "==> Fetching the DiariZen checkpoint (BUT-FIT/diarizen-meeting-base)..."
+# Into the SAME models/ hub cache every other engine uses, because the sidecar
+# points HF_HOME there. It also REUSES the WeSpeaker checkpoint this app already
+# ships (pyannote/wespeaker-voxceleb-resnet34-LM, fetched in an earlier section),
+# so there is no second copy of a 26 MB embedder.
+if [ -x "$DZ_PY" ]; then
+  HF_HOME="$HF_HOME" "$DZ_PY" - <<'EOF' || FAILED+=("DiariZen checkpoint")
+import os, sys
+# The one moment the network is allowed — a one-time download. HF_HUB_OFFLINE is
+# deliberately NOT set here, and is set by the sidecar at runtime.
+os.environ.pop("HF_HUB_OFFLINE", None)
+try:
+    from huggingface_hub import snapshot_download
+    path = snapshot_download("BUT-FIT/diarizen-meeting-base")
+    print(f"   OK: BUT-FIT/diarizen-meeting-base -> {path}")
+except Exception as exc:
+    print(f"!! could not fetch BUT-FIT/diarizen-meeting-base: {type(exc).__name__}: {exc}")
+    sys.exit(1)
+EOF
+else
+  echo "!! .venv-diarizen is missing — cannot fetch the DiariZen checkpoint"
+  FAILED+=("DiariZen checkpoint")
 fi
 
 # -------------------------------------------------------------
