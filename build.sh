@@ -408,23 +408,82 @@ ASSET_NAME_311="$(basename "$ASSET_URL_311" | sed 's/%2B/+/g')"
 ASSET_PATH_311="$CACHE/$ASSET_NAME_311"
 echo "    PBS asset: $ASSET_NAME"
 
-# --- download (skip if cached) ---------------------------------------------
-if [[ ! -f "$ASSET_PATH" ]]; then
-  echo "    Downloading $ASSET_NAME ..."
-  curl -fSL "$ASSET_URL" -o "$ASSET_PATH"
-else
-  echo "    Using cached tarball."
-fi
+# --- download (skip if cached, fall back to any cached build) ---------------
+#
+# The SAME argument the release-metadata fallback above makes, applied one step
+# later — and this is the half that actually blocked a build (2026-08-12:
+# `curl: (28) Failed to connect to github.com port 443 after 75009 ms`).
+#
+# The asset name embeds the PBS BUILD DATE, so the moment astral publishes a new
+# release the resolved filename stops matching the cache and the build MUST
+# reach GitHub — while seven perfectly good interpreters sit in `.build-cache/`.
+# For a project whose headline requirement is offline operation, a build that
+# cannot proceed from what it already has is the wrong failure.
+#
+# What is interchangeable here is narrow and worth stating: these tarballs are
+# the same CPython (3.12.13 / 3.11.15) packaged on different days. Falling back
+# changes the PBS build date, never the Python version — `PY_MINOR` still
+# decides which one is used, and every later gate (imports, relocatability,
+# no-torchcodec, signing) runs unchanged against whichever is chosen.
+# $3 is a FILENAME pattern only, never a full path — `$CACHE` contains a space
+# ("Meeting Transcribe"), so an unquoted full-path glob word-splits and matches
+# nothing. Caught by driving this function directly before shipping it; the
+# fallback silently found no candidates and the build would have died with a
+# network error while the right tarball sat in the cache.
+fetch_pbs_asset() {
+  local url="$1" path="$2" pattern="$3" label="$4"
+  if [[ -f "$path" ]]; then
+    echo "    Using cached ${label}tarball."
+    printf -v "$5" '%s' "$path"
+    return 0
+  fi
+  echo "    Downloading $(basename "$path") ${label}..."
+  # Temp file then move — `curl -o` truncates its target before it knows the
+  # request succeeded, the same trap the release JSON above documents.
+  if curl -fSL --max-time 900 "$url" -o "$path.tmp"; then
+    mv "$path.tmp" "$path"
+    return 0
+  fi
+  rm -f "$path.tmp"
+  # Newest cached build of the SAME Python minor, by mtime. The directory is
+  # QUOTED and only the pattern is left bare, so a space in the project path
+  # cannot split the glob; `nullglob` makes "no match" an empty array rather
+  # than the literal pattern.
+  local -a matches=()
+  shopt -s nullglob
+  matches=("$CACHE"/$pattern)
+  shopt -u nullglob
+  local fallback=""
+  if (( ${#matches[@]} > 0 )); then
+    fallback="$(ls -t "${matches[@]}" 2>/dev/null | head -1)"
+  fi
+  if [[ -z "$fallback" ]]; then
+    # EXITS rather than returning non-zero: this script does not `set -e`, so a
+    # failing return would be ignored and the build would carry on to unpack a
+    # tarball that is not there.
+    echo "ERROR: could not download $(basename "$path") and no cached ${label}" >&2
+    echo "       interpreter exists in $CACHE." >&2
+    echo "       This build needs the network once to fetch a portable Python." >&2
+    exit 1
+  fi
+  echo "    !! GitHub unreachable — could not download $(basename "$path")."
+  echo "    !! Falling back to CACHED ${label}interpreter: $(basename "$fallback")"
+  echo "    !! Same CPython version, older python-build-standalone build date."
+  printf -v "$5" '%s' "$fallback"
+}
+
+# The glob mirrors the 3.12 filter used to resolve the URL above — same Python
+# minor, any PBS build date.
+fetch_pbs_asset "$ASSET_URL" "$ASSET_PATH" \
+  "cpython-3.12.*-aarch64-apple-darwin-install_only_stripped.tar.gz" \
+  "" ASSET_PATH
 
 # The 3.11 tarball, same cache policy. Fetched here beside its 3.12 sibling
 # rather than inside [B2d], so both downloads happen before any interpreter is
 # built and a network failure stops the build early instead of halfway through.
-if [[ ! -f "$ASSET_PATH_311" ]]; then
-  echo "    Downloading $ASSET_NAME_311 (DiariZen runtime) ..."
-  curl -fSL "$ASSET_URL_311" -o "$ASSET_PATH_311"
-else
-  echo "    Using cached 3.11 tarball (DiariZen runtime)."
-fi
+fetch_pbs_asset "$ASSET_URL_311" "$ASSET_PATH_311" \
+  "cpython-3.11.*-aarch64-apple-darwin-install_only_stripped.tar.gz" \
+  "3.11 (DiariZen runtime) " ASSET_PATH_311
 
 # --- freeze the current .venv, sanitize ------------------------------------
 FROZEN="$CACHE/requirements-frozen.txt"
