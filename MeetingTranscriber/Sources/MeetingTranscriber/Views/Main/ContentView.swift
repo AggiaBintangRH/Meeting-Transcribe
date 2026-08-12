@@ -20,8 +20,17 @@ struct ContentView: View {
                 LoadingOverlayView(loader: recorder.modelLoader)
             }
 
-            if recorder.state == .processing {
+            // Outlives `.processing` when a leg failed, so a red row can be
+            // read instead of flashing past as the panel closes.
+            if recorder.showsStopOverlay {
                 ProcessingOverlayView(recorder: recorder)
+            }
+
+            // Last, so it draws ABOVE the others. An audio engine that dies
+            // during the stop passes can raise both at once, and the one the
+            // user must act on is the error.
+            if recorder.showsErrorPopup {
+                ErrorOverlayView(recorder: recorder)
             }
 
             // Position-ID enrollment prompt: only built when the feature is on
@@ -37,6 +46,10 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: recorder.state)
+        // `state` alone no longer decides either overlay: both can now outlive
+        // the transition that used to carry them off screen.
+        .animation(.easeOut(duration: 0.2), value: recorder.showsStopOverlay)
+        .animation(.easeOut(duration: 0.2), value: recorder.showsErrorPopup)
         .background(Theme.bg)
         .ignoresSafeArea()
         .sheet(isPresented: $showSettings) {

@@ -193,6 +193,11 @@ extension AudioRecorder {
     /// nothing. Degrades to the pre-overlay behaviour — work continues silently.
     func continueInBackground() {
         guard state == .processing else { return }
+        // Pressing this IS reading the panel and choosing to stop looking at it.
+        // Without this line a leg that had already gone red would hold the panel
+        // open the moment `.processing` ended — the hatch would visibly fail to
+        // do the one thing it exists for. See `showsStopOverlay`.
+        dismissStopFailure()
         // The user stopped WAITING; the passes did not stop RUNNING. Locking the
         // mic matters more here than anywhere else — starting a second recording
         // now would collide with work still in flight.

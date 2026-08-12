@@ -18,10 +18,15 @@ struct OverlayStepRow: View {
                     .foregroundColor(textColor)
                     .lineLimit(1)
                 if case .failed(let message) = state {
+                    // Selectable: a sidecar failure arrives as the last three
+                    // lines of a Python traceback, which is the one thing worth
+                    // pasting somewhere. Not truncated either — it is the only
+                    // evidence the user has without opening a log file.
                     Text(message)
                         .font(.system(size: 10))
                         .foregroundColor(Theme.red)
                         .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
             }
             Spacer(minLength: 0)

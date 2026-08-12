@@ -557,11 +557,32 @@ def main() -> None:
                 f"{len(segments)} turns, {len({s['label'] for s in segments})} speakers"
                 f"{' [remote]' if is_remote else ''}")
             emit({"type": "result", "audio": audio, "segments": segments, **echo})
-        except Exception:  # noqa: BLE001 — job error: report, keep serving
+        except Exception as exc:  # noqa: BLE001 — job error: report, keep serving
             # The stream is echoed so the app fails only THAT stream's gate —
             # a remote failure must never abort the office transcript.
-            emit({"type": "error",
-                  "text": f"Diarization failed: {brief_traceback()}", **echo})
+            #
+            # ONE failure is translated, because it is not a fault: NeMo's VAD
+            # raises when it finds no speech at all, which is the honest verdict
+            # on a recording of silence. The owner met it on 2026-08-12 with a
+            # 1.3 s test recording and a Remote channel capturing nothing, and
+            # what the app showed was three lines of `speaker_utils.py`
+            # traceback — a correct refusal wearing the costume of a crash.
+            #
+            # The precedent is `spectral/rejects-zero-frame-audio`: a sidecar
+            # that cannot proceed must say so in a sentence that names the
+            # cause. Matched on the upstream text rather than the exception
+            # type, since `ValueError` is raised for many other reasons here;
+            # anything unmatched keeps the traceback, which is the right
+            # default for a failure nobody has diagnosed yet.
+            if "contains silence" in str(exc):
+                where = "remote audio" if is_remote else "recording"
+                emit({"type": "error",
+                      "text": f"No speech found in the {where}, so there was "
+                              f"nothing to identify speakers in. The transcript "
+                              f"is unaffected.", **echo})
+            else:
+                emit({"type": "error",
+                      "text": f"Diarization failed: {brief_traceback()}", **echo})
         finally:
             shutil.rmtree(work, ignore_errors=True)
 

@@ -62,6 +62,59 @@ final class AudioRecorder: ObservableObject {
     @Published var lastRecordingURL: URL?
     @Published var errorMessage: String?
 
+    /// The `errorMessage` the user has already read and closed.
+    ///
+    /// The popup is driven by comparing the CURRENT message against this one
+    /// rather than by a `hasBeenDismissed` Bool, and that is the whole point: a
+    /// Bool would have to be reset at every one of the nine sites that assign
+    /// `errorMessage`, and a site added later would set an error the popup then
+    /// refused to show — a failure with no error and no trace, which is the
+    /// shape this codebase treats as worst. Comparing the text needs nothing at
+    /// the assignment sites: a DIFFERENT error re-opens the popup on its own.
+    ///
+    /// The two places that clear `errorMessage` clear this with it, so pressing
+    /// Start again and hitting the SAME wall (a denied microphone, say) shows
+    /// the popup again instead of failing silently.
+    @Published var dismissedErrorMessage: String?
+
+    /// Whether the error popup is on screen. Never true while `.preparing`:
+    /// `LoadingOverlayView` is already up then and owns startup refusals through
+    /// `ModelLoader.failureMessage`, so two overlays would stack on one failure.
+    var showsErrorPopup: Bool {
+        guard state != .preparing, let message = errorMessage else { return false }
+        return message != dismissedErrorMessage
+    }
+
+    func dismissError() { dismissedErrorMessage = errorMessage }
+
+    /// Set when the user closes a stop panel that ended in red. Reset only by
+    /// `clearVisibleMeetingState`, i.e. by the next meeting or Start Over —
+    /// which is also the one place `stopSteps` is emptied, so the flag and the
+    /// rows it describes can never disagree about which meeting they belong to.
+    @Published var stopFailureAcknowledged = false
+
+    /// Did any leg of this stop end in red?
+    var stopFailed: Bool {
+        stopSteps.contains { if case .failed = $0.state { return true } else { return false } }
+    }
+
+    /// Whether the stop panel is on screen.
+    ///
+    /// Before 2026-08-12 this was simply `state == .processing`, so the panel
+    /// vanished the instant the gate settled — including when a leg had just
+    /// failed. The owner reported exactly that: a red row appeared and the panel
+    /// closed before it could be read, leaving the failure recorded only in a
+    /// log file inside `~/Library/Application Support`.
+    ///
+    /// A failed stop now holds the panel until the user closes it. The mic is
+    /// already unlocked underneath (`leaveProcessing` ran), so this blocks
+    /// nothing that matters — it only refuses to throw the evidence away.
+    var showsStopOverlay: Bool {
+        state == .processing || (stopFailed && !stopFailureAcknowledged)
+    }
+
+    func dismissStopFailure() { stopFailureAcknowledged = true }
+
     @Published var segments: [TranscriptSegment] = []
     @Published var displayRows: [SpeakerUtterance] = []
     @Published var partialTranscript = ""
@@ -647,6 +700,12 @@ final class AudioRecorder: ObservableObject {
         speakerCount = nil
         remoteSpeakerCount = nil
         errorMessage = nil
+        // Both "already read this" markers travel with the state they describe.
+        // Left behind, they would suppress the popup for an identical error in
+        // the NEXT meeting and hide a stop panel whose red rows had just been
+        // rebuilt — in both cases a failure the user is never shown.
+        dismissedErrorMessage = nil
+        stopFailureAcknowledged = false
         chunkedError = nil
         diarizationError = nil
         overlapRepairError = nil
@@ -687,6 +746,11 @@ final class AudioRecorder: ObservableObject {
 
     private func start() {
         errorMessage = nil
+        // Paired with the line above — see `dismissedErrorMessage`. Pressing
+        // Start again after closing the popup must be able to show the same
+        // wall again, because hitting it twice is the commonest case (a denied
+        // microphone is still denied the second time).
+        dismissedErrorMessage = nil
         AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
             Task { @MainActor in
                 guard let self else { return }

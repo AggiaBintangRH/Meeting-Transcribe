@@ -4715,6 +4715,7 @@ LAYOUT_CHECKS = [
     "layout/batch-engines-ignore-final-pass",
     "layout/remote-passes-never-send-the-room-count",
     "layout/pdf-export-uses-fixed-ink",
+    "layout/error-popup-marker-is-cleared-with-the-message",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5300,6 +5301,62 @@ def run_layout(rep: Report, ctx):
         rep.expect(cid, not problems,
                    "the PDF exporter draws with fixed ink, never a dynamic "
                    "appearance colour",
+                   "; ".join(problems))
+
+    cid = "layout/error-popup-marker-is-cleared-with-the-message"
+    if ctx.wants(cid):
+        # `dismissedErrorMessage` holds the error the user has already closed, and
+        # `showsErrorPopup` compares it against the CURRENT one. That comparison is
+        # what lets the popup work without any of the nine `errorMessage = …` sites
+        # remembering to reset a flag — but it makes the two CLEARS a pair: a
+        # cleared message beside a surviving marker means the identical error
+        # cannot raise the popup a second time.
+        #
+        # That case is the commonest one, not a corner: a denied microphone is
+        # still denied when the user presses Start again, and `start()` clears
+        # `errorMessage` on entry before re-assigning the same text. Left alone,
+        # the second press would produce no visible outcome at all.
+        #
+        # PINNED HERE RATHER THAN IN A UNIT TEST because a unit test cannot reach
+        # it — `start()` is private and hands off to `AVCaptureDevice.requestAccess`,
+        # which would put a system permission prompt in the middle of the suite.
+        # `FailurePanelTests` asserts the RULE; this asserts the CALL SITES obey
+        # it, which is the 2026-08-06 MOSS lesson (a component test cannot see a
+        # missing call site) applied to a two-line coupling.
+        path = SWIFT_SOURCES / "MeetingTranscriber" / "Audio" / "AudioRecorder.swift"
+        problems = []
+        if not path.exists():
+            problems.append("AudioRecorder.swift is gone")
+        else:
+            # Comments stripped first — this fix explains itself at length in the
+            # very file it checks, and a textual search matches its own
+            # documentation (the lesson this check's siblings learned by failing
+            # on their own comments).
+            lines = [l for l in path.read_text().splitlines()
+                     if not l.strip().startswith("//")]
+            # `dismissedErrorMessage` carries a capital E, so the lowercase needle
+            # cannot match the marker's own clear. Verified below rather than
+            # assumed — if that ever stops holding, this check silently passes.
+            if "errorMessage = nil" in "dismissedErrorMessage = nil":
+                problems.append("the needle now matches the marker's own clear, so "
+                                "this check can no longer tell the two apart")
+            clears = [i for i, l in enumerate(lines)
+                      if re.search(r"(?<![A-Za-z])errorMessage\s*=\s*nil", l)]
+            if not clears:
+                problems.append("nothing clears `errorMessage` any more — this "
+                                "check has lost the half that lets it fail")
+            for i in clears:
+                window = "\n".join(lines[i:i + 8])
+                if "dismissedErrorMessage = nil" not in window:
+                    problems.append(f"`errorMessage = nil` at line {i + 1} does not "
+                                    f"clear `dismissedErrorMessage` with it — the "
+                                    f"same error would then be unable to raise the "
+                                    f"popup a second time")
+            if "var dismissedErrorMessage" not in "\n".join(lines):
+                problems.append("`dismissedErrorMessage` is gone from AudioRecorder")
+        rep.expect(cid, not problems,
+                   "every clear of `errorMessage` clears the already-read marker "
+                   "with it, so an identical second failure is still shown",
                    "; ".join(problems))
 
     cid = "layout/log-name-matches-folder"
