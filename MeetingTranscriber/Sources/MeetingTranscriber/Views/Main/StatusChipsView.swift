@@ -124,6 +124,16 @@ struct StatusChipsView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            // LOCKED FOR THE SESSION, like every control behind the gear (owner,
+            // 2026-08-12). This one lives in the MAIN window, so shutting the
+            // settings sheet left it reachable — and it is a real setting: the
+            // stop passes read it, so a change made mid-meeting would decide the
+            // speaker count of a recording already half over.
+            //
+            // Its own doc still stands: it is read LATE and has no second reader
+            // during recording, so it was never INCOHERENT. What changed is the
+            // rule — a meeting's settings are fixed once it starts.
+            .disabled(recorder.state != .idle)
         }
         .help(speakerCountHelp)
     }
@@ -150,6 +160,12 @@ struct StatusChipsView: View {
     }
 
     private var speakerCountHelp: String {
+        // The lock comes FIRST: while a meeting is running it is the only reason
+        // that matters, and the engine/pass explanations below would send the
+        // user to a Settings page they cannot open yet.
+        guard recorder.state == .idle else {
+            return "Locked for this meeting — set the speaker count before recording starts."
+        }
         guard diarOn else {
             return "Speaker diarization is switched off, so nothing is counted."
         }

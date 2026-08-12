@@ -31,6 +31,60 @@ final class ModelLoader: ObservableObject {
         failureMessage = nil
     }
 
+    /// Rows for models this session TORE DOWN, shown above the load rows.
+    ///
+    /// Switching a model used to be invisible: the old sidecar was terminated
+    /// silently and the overlay only ever listed what was being loaded, so a
+    /// user changing engine had no way to see that the previous one had gone —
+    /// the same complaint the owner raised on 2026-08-12.
+    ///
+    /// They are recorded as `.done` rather than animated, and that is honest
+    /// rather than lazy: `terminate()` closes stdin and signals the process, it
+    /// does not wait, so there is no interval to animate. The value is that the
+    /// rows STAY on screen beside the load rows for the seconds a model load
+    /// takes — "Unloaded Nemotron ASR" sitting above "Parakeet TDT 0.6b v3" is
+    /// the whole answer to what just happened.
+    private var unloadRows: [Item] = []
+
+    /// Record one teardown. Call ONLY when something was really loaded — a row
+    /// for a service that was already nil would claim work that never happened.
+    private func noteUnload(_ name: String) {
+        unloadRows.append(Item(id: "unload-\(unloadRows.count)-\(name)",
+                               name: "Unloaded \(name)", state: .done))
+    }
+
+    /// Rows for the models a model SWITCH is about to replace.
+    ///
+    /// The teardown block in `loadAll` never sees these. Switching realtime from
+    /// Nemotron to Parakeet leaves realtime ENABLED, so no `if !wants…` branch
+    /// fires; the old sidecar is replaced inside its own load step instead. That
+    /// is the commonest way a user changes a model, and without this it was the
+    /// one case that showed no unload at all.
+    ///
+    /// Detected HERE, before the overlay list is built, so the unload gets its
+    /// own row ABOVE the load rows rather than being folded into the loading
+    /// model's line.
+    ///
+    /// Safe to compare against `fromSettings()` twice — here and again in the
+    /// load step — because it is a pure read of settings that are already locked
+    /// for this session. Both calls see the same values by construction.
+    ///
+    /// Runs AFTER the teardown block, which is what stops a double row: a
+    /// service being switched OFF has already been terminated and nil'd there,
+    /// so `if let` finds nothing here.
+    private func noteReplacements() {
+        if let old = realtimeASR, old.config != RealtimeASRService.Config.fromSettings() {
+            noteUnload(ModelCatalog.realtimeModel(id: old.config.modelID).name)
+        }
+        if let old = chunkedASR, old.config != ChunkedASRService.Config.fromSettings() {
+            noteUnload(old.config.modelName)
+        }
+        if let old = mossDiarization,
+           old.config != ChunkedASRService.Config.mossDiarization() {
+            noteUnload(ModelCatalog.mossDiarization.name)
+        }
+    }
+
     /// Refuse to start the session BEFORE any model loads, showing the reason in
     /// the same overlay a load failure uses (one failed row + `failureMessage`,
     /// which is what keeps the overlay on screen). The only caller today is the
@@ -573,6 +627,9 @@ final class ModelLoader: ObservableObject {
     func loadAll() async -> Bool {
         isLoading = true
         failureMessage = nil
+        // Cleared per session, or the second start would still be showing what
+        // the first one unloaded.
+        unloadRows = []
         defer { isLoading = false }
 
         let d = UserDefaults.standard
@@ -591,6 +648,9 @@ final class ModelLoader: ObservableObject {
         // the finished recorder, so detach it. Nothing feeds the lane afterwards,
         // so it stays silent.
         if !Self.wantsRealtime(realtimeEnabled: realtimeOn) {
+            if let loaded = realtimeASR {
+                noteUnload(ModelCatalog.realtimeModel(id: loaded.config.modelID).name)
+            }
             realtimeASR?.terminate()
             realtimeASR = nil
         } else if !wantsRemote {
@@ -632,11 +692,13 @@ final class ModelLoader: ObservableObject {
         // alive without the pipeline is a state no code path expects, and
         // leaving either alive when diarization is off is what let a switched-off
         // feature keep running. See `wantedDiarizationStack`.
-        if wantedDiar != .pyannote {
+        if wantedDiar != .pyannote, pyannote != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.pyannoteEngineID).name)
             pyannote?.terminate()
             pyannote = nil
         }
-        if wantedDiar != .spectral {
+        if wantedDiar != .spectral, spectral != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.spectralEngineID).name)
             spectral?.terminate()
             spectral = nil
         }
@@ -646,14 +708,16 @@ final class ModelLoader: ObservableObject {
         // this is the largest offender yet if it happened again: NeMo's peak RSS
         // scales with the audio it was last given (measured 1.15 GB for 98 s,
         // 7.02 GB for 48 min, 13.33 GB for 67 min).
-        if wantedDiar != .nemo {
+        if wantedDiar != .nemo, nemo != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.nemoEngineID).name)
             nemo?.terminate()
             nemo = nil
         }
         // The same want/teardown PAIR, from the same function. DiariZen holds a
         // WavLM encoder plus the pyannote 3.1 stack, measured at 1.7-3.7 GB — the
         // third-largest idle process this app can hold, after MOSS and DiCoW.
-        if wantedDiar != .diarizen {
+        if wantedDiar != .diarizen, diarizen != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.diarizenEngineID).name)
             diarizen?.terminate()
             diarizen = nil
         }
@@ -662,7 +726,8 @@ final class ModelLoader: ObservableObject {
         // being loaded by a switch and stopped by nothing (1.70 GB resident until
         // quit). CAM++ is the smallest of them (66 MB of weights plus torch), but
         // "small" is not a reason to be the one service without a teardown.
-        if wantedDiar != .camPlus {
+        if wantedDiar != .camPlus, camPlus != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.camPlusEngineID).name)
             camPlus?.terminate()
             camPlus = nil
         }
@@ -671,11 +736,13 @@ final class ModelLoader: ObservableObject {
         // stack use identity?" — rather than as a second `!=` beside each
         // pipeline's own, because two independent tests would each have dropped
         // it for the other engine's session.
-        if wantedDiar?.usesSpeakerIdentity != true {
+        if wantedDiar?.usesSpeakerIdentity != true, embedding != nil {
+            noteUnload(ModelCatalog.speakerEmbedding.name)
             embedding?.terminate()
             embedding = nil
         }
-        if wantedDiar != .mossSecondProcess {
+        if wantedDiar != .mossSecondProcess, mossDiarization != nil {
+            noteUnload(ModelCatalog.mossDiarization.name)
             mossDiarization?.terminate()
             mossDiarization = nil
         }
@@ -688,6 +755,10 @@ final class ModelLoader: ObservableObject {
         // the largest process in the app (Qwen3 4.29 GB, MOSS 5.65 GB) resident
         // and unreachable until quit.
         if !Self.wantsChunked(chunkedEnabled: chunkedOn) {
+            // `modelName` off the live config, not a catalog lookup by id: it
+            // names the model this process ACTUALLY loaded, which is the honest
+            // answer even if the stored setting has since changed.
+            if let loaded = chunkedASR { noteUnload(loaded.config.modelName) }
             chunkedASR?.terminate()
             chunkedASR = nil
         }
@@ -697,6 +768,7 @@ final class ModelLoader: ObservableObject {
         // asking whether this service exists.
         if !Self.wantsAligner(alignEnabled: d.object(forKey: "align.enabled") as? Bool ?? false,
                               chunkedID: chunkedID, chunkedEnabled: chunkedOn) {
+            if aligner != nil { noteUnload(ModelCatalog.wordAligner.name) }
             aligner?.terminate()
             aligner = nil
         }
@@ -721,10 +793,12 @@ final class ModelLoader: ObservableObject {
             diarEngine: diarEngine,
             detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false)
         if wantedRepair != ModelCatalog.overlapSeparation.id {
+            if overlapRepair != nil { noteUnload(ModelCatalog.overlapSeparation.name) }
             overlapRepair?.terminate()
             overlapRepair = nil
         }
         if wantedRepair != ModelCatalog.overlapDicow.id {
+            if dicowRepair != nil { noteUnload(ModelCatalog.overlapDicow.name) }
             dicowRepair?.terminate()
             dicowRepair = nil
         }
@@ -742,17 +816,30 @@ final class ModelLoader: ObservableObject {
         // Built once and reused for both the overlay list and the run below, so
         // the indices into `items` can never disagree with the steps executed.
         // The remote lane adds NO step: it rides the one realtime sidecar.
+        // Must run AFTER every teardown above and BEFORE the overlay is built —
+        // see `noteReplacements()` for both halves of that ordering.
+        noteReplacements()
+
         let steps = buildSteps()
-        items = steps.map { Item(id: $0.model.id, name: $0.model.name) }
+        // The unload rows come FIRST, so the overlay reads in the order things
+        // actually happened: what went, then what is arriving.
+        //
+        // ⚠ `loadOffset` is why this stayed correct. The loop below indexes
+        // `items` by step position, and that alignment is the invariant the
+        // comment above `buildSteps` exists to protect — prepending rows without
+        // it would silently mark the WRONG row as loading/failed, which looks
+        // like a load failure in a model that was never touched.
+        let loadOffset = unloadRows.count
+        items = unloadRows + steps.map { Item(id: $0.model.id, name: $0.model.name) }
         var allOK = true
 
         for (index, step) in steps.enumerated() {
-            items[index].state = .loading
+            items[loadOffset + index].state = .loading
             do {
                 try await load(step)
-                items[index].state = .done
+                items[loadOffset + index].state = .done
             } catch {
-                items[index].state = .failed(error.localizedDescription)
+                items[loadOffset + index].state = .failed(error.localizedDescription)
                 failureMessage = error.localizedDescription
                 allOK = false
                 break
@@ -956,6 +1043,8 @@ final class ModelLoader: ObservableObject {
             if let existing = realtimeASR, existing.config == config {
                 return
             }
+            // The unload already has its OWN row above, added by
+            // `noteReplacements()` before the overlay was built.
             realtimeASR?.terminate()
             realtimeASR = nil
             // Throws with the sidecar's exact error message (shown in overlay)
@@ -971,6 +1060,7 @@ final class ModelLoader: ObservableObject {
             if let existing = chunkedASR, existing.config == config {
                 return
             }
+            // Its unload row was added by `noteReplacements()` above.
             chunkedASR?.terminate()
             chunkedASR = nil
             chunkedASR = try await Task.detached(priority: .userInitiated) {
