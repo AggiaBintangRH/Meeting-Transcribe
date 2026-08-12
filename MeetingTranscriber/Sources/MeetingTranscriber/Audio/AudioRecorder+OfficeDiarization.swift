@@ -230,26 +230,41 @@ extension AudioRecorder {
         for file in files { try? FileManager.default.removeItem(at: file) }
     }
 
-    func handleDiarizationFailure(_ message: String, stream: PyannoteService.Stream) {
+    /// `noSpeech` marks the ONE outcome that arrives down this path without
+    /// being a failure: the engine ran and correctly found nothing to label.
+    ///
+    /// It takes this path because the settling is identical — the same six
+    /// watchdogs, flags and gates have to be released either way, and a second
+    /// near-copy of that sequence is how one of them comes to be forgotten. Only
+    /// the two REPORTING lines differ, and both matter:
+    ///
+    ///   * the step is `.skipped`, not `.failed`, so the panel neither turns red
+    ///     nor demands an acknowledgement for a correct result;
+    ///   * `diarizationError` stays nil. `TranscriptView` renders it as a red
+    ///     banner over the transcript, so setting it would put the alarm back on
+    ///     screen after the panel had carefully avoided raising one.
+    func handleDiarizationFailure(_ message: String, stream: PyannoteService.Stream,
+                                  noSpeech: Bool = false) {
         // Nothing will ask for these windows again on this stream.
         releaseAllDiarChunkFiles(stream: stream)
         // A remote job's failure settles only the remote leg. Remote
         // trouble must never cost the user their office transcript —
         // the same rule the remote chunk path already follows.
         guard stream == .office else {
-            self.dualStreamLog("remote diarization failed: \(message)")
-            self.completeRemoteDiarization(error: message)
+            self.dualStreamLog(noSpeech ? "remote diarization found no speech: \(message)"
+                                        : "remote diarization failed: \(message)")
+            self.completeRemoteDiarization(error: message, noSpeech: noSpeech)
             return
         }
         self.diarizing = false
-        self.diarizationError = message
+        if !noSpeech { self.diarizationError = message }
         self.finalDiarDone = true
         self.awaitingTailWindowStart = nil
         self.diarTailWatchdog?.cancel()
         self.diarTailWatchdog = nil
         self.finalDiarWatchdog?.cancel()
         self.finalDiarWatchdog = nil
-        self.setStopStep("diarize", .failed(message))
+        self.setStopStep("diarize", noSpeech ? .skipped(message) : .failed(message))
         self.maybeStartOverlapRepair()
         self.checkStopProcessingDone()
     }

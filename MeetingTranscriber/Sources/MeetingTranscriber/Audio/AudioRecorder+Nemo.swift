@@ -82,6 +82,18 @@ extension AudioRecorder {
                 self?.handleDiarizationFailure(message, stream: stream)
             }
         }
+        // The one reply that comes down the error channel without being an error.
+        // Same settling as a failure — deliberately, see `handleDiarizationFailure`
+        // — but logged and reported as the verdict it is. NO SPEECH is not FAILED,
+        // and the log has to say so too: this file is the evidence a later audit
+        // reads, and it called a correct result a failure until 2026-08-12.
+        service.onNoSpeech = { [weak self] message, stream in
+            Task { @MainActor in
+                self?.nemoLog("NO SPEECH (\(stream == .office ? "office" : "remote")): "
+                              + "\(message)")
+                self?.handleDiarizationFailure(message, stream: stream, noSpeech: true)
+            }
+        }
     }
 
     // MARK: - The office whole-file pass

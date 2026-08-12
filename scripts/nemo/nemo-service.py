@@ -576,10 +576,15 @@ def main() -> None:
             # default for a failure nobody has diagnosed yet.
             if "contains silence" in str(exc):
                 where = "remote audio" if is_remote else "recording"
-                emit({"type": "error",
-                      "text": f"No speech found in the {where}, so there was "
-                              f"nothing to identify speakers in. The transcript "
-                              f"is unaffected.", **echo})
+                # `kind` is what makes this MACHINE-readable. The app has to tell
+                # a correct verdict from a fault, and it must not do that by
+                # matching this sentence — a wording change here would silently
+                # turn the panel red again, and prose is not a protocol. An older
+                # app ignores the extra key and still shows the sentence.
+                emit({"type": "error", "kind": "no_speech",
+                      "text": f"No speech found in the {where}, so there were "
+                              f"no speakers to identify. The transcript is "
+                              f"unaffected.", **echo})
             else:
                 emit({"type": "error",
                       "text": f"Diarization failed: {brief_traceback()}", **echo})

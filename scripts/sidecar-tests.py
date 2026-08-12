@@ -3076,9 +3076,25 @@ def run_nemo(rep: Report, ctx):
                 if status_shapes != {("type", "text")}:
                     problems.append(f"{label}: `status` emit shapes were {status_shapes}")
                 errors = {k for kind, k, _, _ in shapes if kind == "error"}
-                if errors != {("type", "text")}:
+                # ONE additive shape is allowed, and only for nemo: the classified
+                # `kind` key that tells a VERDICT from a FAULT ("no speech in this
+                # recording" is not a failure — see
+                # layout/no-speech-is-routed-by-kind-not-prose). Additive by
+                # design, so a reader that ignores the key still gets the sentence.
+                #
+                # DELIBERATELY NOT widened to pyannote: it does not raise on silent
+                # audio, so a `kind` appearing there would be a real drift and this
+                # check must still say so. And the plain shape stays REQUIRED —
+                # without that, a sidecar that classified EVERY error would pass,
+                # and the app would be back to understanding every kind or reading
+                # prose.
+                allowed = {("type", "text")}
+                if label == "nemo":
+                    allowed.add(("type", "kind", "text"))
+                if ("type", "text") not in errors or not errors <= allowed:
                     problems.append(f"{label}: `error` emit shapes were {errors}, "
-                                    f'expected only ("type","text")')
+                                    f"expected a subset of {allowed} with "
+                                    f'("type","text") always present')
                 # ABSENT MEANS OFFICE: every reply raised once the job's stream is
                 # known must splice `**echo`. The sole exception in both files is
                 # the bad-job-line reply, emitted BEFORE `stream` has been read.
@@ -4716,6 +4732,7 @@ LAYOUT_CHECKS = [
     "layout/remote-passes-never-send-the-room-count",
     "layout/pdf-export-uses-fixed-ink",
     "layout/error-popup-marker-is-cleared-with-the-message",
+    "layout/no-speech-is-routed-by-kind-not-prose",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5357,6 +5374,59 @@ def run_layout(rep: Report, ctx):
         rep.expect(cid, not problems,
                    "every clear of `errorMessage` clears the already-read marker "
                    "with it, so an identical second failure is still shown",
+                   "; ".join(problems))
+
+    cid = "layout/no-speech-is-routed-by-kind-not-prose"
+    if ctx.wants(cid):
+        # "No speech in the recording" is a VERDICT, not a fault, and the app
+        # draws it as a skipped step rather than a red one. Telling the two
+        # apart is a cross-process contract, and it is carried by a machine key
+        # (`kind: "no_speech"`) precisely so it is not carried by the sentence.
+        #
+        # PROSE IS NOT A PROTOCOL. If Swift ever matched the wording instead,
+        # rewording the sentence — the most innocent edit imaginable, and one a
+        # copy editor would make — would silently paint the panel red again and
+        # put an error banner back over the transcript. Nothing would fail to
+        # build and no test elsewhere would notice.
+        #
+        # Both ends are pinned, because either alone is satisfiable by a broken
+        # pair: a sidecar that stopped sending the key, or an app that stopped
+        # reading it.
+        py = SCRIPTS / "nemo" / "nemo-service.py"
+        sw = SWIFT_SOURCES / "MeetingTranscriber" / "Transcription" / "NemoService.swift"
+        problems = []
+        for path, what in ((py, "nemo-service.py"), (sw, "NemoService.swift")):
+            if not path.exists():
+                problems.append(f"{what} is gone")
+        if not problems:
+            # Comments stripped on both sides — each file explains this contract
+            # at length, so a textual search matches its own documentation. The
+            # lesson `assert_no_torchcodec_use` and this check's siblings learned.
+            py_code = "\n".join(l for l in py.read_text().splitlines()
+                                if not l.lstrip().startswith("#"))
+            sw_code = "\n".join(l for l in sw.read_text().splitlines()
+                                if not l.strip().startswith("//"))
+            if '"kind": "no_speech"' not in py_code:
+                problems.append("nemo-service.py no longer emits "
+                                "`\"kind\": \"no_speech\"` — the app can then only "
+                                "tell a verdict from a fault by reading prose")
+            if 'kind == "no_speech"' not in sw_code:
+                problems.append("NemoService no longer routes on `kind` — a "
+                                "reworded sentence would turn the panel red again")
+            if "let kind: String?" not in sw_code:
+                problems.append("NemoService.Message dropped `kind`, so the key is "
+                                "decoded nowhere and the branch above is dead")
+            # The POSITIVE half that stops a decoupled pair from passing: the
+            # fallback exists, so an app that has not adopted `onNoSpeech` still
+            # SETTLES the stop gate instead of hanging the blocking overlay until
+            # the 600 s watchdog.
+            if "onNoSpeech" not in sw_code:
+                problems.append("`onNoSpeech` is gone — its fallback to onError is "
+                                "what keeps an unadopted caller from hanging the "
+                                "stop gate")
+        rep.expect(cid, not problems,
+                   "the no-speech verdict travels as a machine key on both sides "
+                   "of the wire, never as a sentence to be matched",
                    "; ".join(problems))
 
     cid = "layout/log-name-matches-folder"

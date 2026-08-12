@@ -222,13 +222,18 @@ extension AudioRecorder {
 
     /// Settle the remote leg of the stop gate exactly once. Idempotent; every
     /// remote diarization exit path (result, error, timeout) calls it.
-    func completeRemoteDiarization(error: String? = nil) {
+    /// `noSpeech` re-reads the SAME `error` string as an explanation rather than
+    /// a fault — a remote channel that captured nothing is the case this exists
+    /// for, and it is the commonest one: a loopback device left selected while
+    /// nobody dials in produces it on every single meeting.
+    func completeRemoteDiarization(error: String? = nil, noSpeech: Bool = false) {
         remoteFinalDiarWatchdog?.cancel()
         remoteFinalDiarWatchdog = nil
         awaitingRemoteTailWindowStart = nil
         guard !remoteFinalDiarDone else { return }
         remoteFinalDiarDone = true
-        setStopStep("remote-diarize", error.map { .failed($0) } ?? .done)
+        setStopStep("remote-diarize",
+                    error.map { noSpeech ? .skipped($0) : .failed($0) } ?? .done)
         checkStopProcessingDone()
     }
 }

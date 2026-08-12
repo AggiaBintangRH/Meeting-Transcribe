@@ -17,14 +17,23 @@ struct OverlayStepRow: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(textColor)
                     .lineLimit(1)
+                // Selectable: a sidecar failure arrives as the last three lines
+                // of a Python traceback, which is the one thing worth pasting
+                // somewhere. Not truncated either — it is the only evidence the
+                // user has without opening a log file.
+                //
+                // A skipped step carries a reason too, in the FAINT colour: it
+                // is an explanation, not an alarm.
                 if case .failed(let message) = state {
-                    // Selectable: a sidecar failure arrives as the last three
-                    // lines of a Python traceback, which is the one thing worth
-                    // pasting somewhere. Not truncated either — it is the only
-                    // evidence the user has without opening a log file.
                     Text(message)
                         .font(.system(size: 10))
                         .foregroundColor(Theme.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                } else if case .skipped(let message) = state {
+                    Text(message)
+                        .font(.system(size: 10))
+                        .foregroundColor(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
@@ -53,6 +62,12 @@ struct OverlayStepRow: View {
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundColor(Theme.red)
+        case .skipped:
+            // A dash, not a tick and not a cross. Nothing happened here and
+            // nothing was supposed to.
+            Image(systemName: "minus.circle.fill")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(Theme.textFaint)
         }
     }
 
@@ -61,6 +76,7 @@ struct OverlayStepRow: View {
         case .pending: return Theme.textDim
         case .loading, .done: return Theme.textPrimary
         case .failed: return Theme.red
+        case .skipped: return Theme.textDim
         }
     }
 }

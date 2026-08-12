@@ -12,6 +12,19 @@ final class ModelLoader: ObservableObject {
     enum ItemState: Equatable {
         case pending, loading, done
         case failed(String)
+        /// The step ran and correctly had nothing to do.
+        ///
+        /// A THIRD outcome, because the other two both lie about this case. The
+        /// owner recorded two silent seconds on 2026-08-12 to watch the progress
+        /// panel, and NeMo's VAD said — correctly — that there was no speech to
+        /// identify speakers in. That is not a failure, and painting it red
+        /// reported a broken app to someone whose app was working. A green tick
+        /// would be the opposite lie: nothing was identified.
+        ///
+        /// `AudioRecorder.stopFailed` counts `.failed` ONLY, so a skipped step
+        /// does not hold the panel open — a correct outcome must not demand an
+        /// acknowledgement.
+        case skipped(String)
     }
 
     struct Item: Identifiable {

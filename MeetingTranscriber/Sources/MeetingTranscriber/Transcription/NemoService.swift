@@ -104,6 +104,17 @@ final class NemoService: @unchecked Sendable {
     /// never settles the other's gate. Startup errors carry no stream → office.
     var onError: ((String, Stream) -> Void)?
 
+    /// The pass ran and correctly found no speech — a silent recording, or a
+    /// remote channel capturing nothing. NOT a failure, and given its own door
+    /// so a caller cannot mistake one for the other.
+    ///
+    /// ⚠ **Falls back to `onError` when unset, and that is deliberate.** Every
+    /// one of these replies settles a leg of the stop gate; a caller that had
+    /// not adopted this callback would otherwise hold the blocking overlay open
+    /// until the 600 s watchdog. Degrading to a red row is a cosmetic loss, a
+    /// silent hang is not.
+    var onNoSpeech: ((String, Stream) -> Void)?
+
     let config: Config
 
     private let process = Process()
@@ -204,6 +215,9 @@ final class NemoService: @unchecked Sendable {
     private struct Message: Decodable {
         let type: String
         let text: String?
+        /// Present only on an `error` the sidecar can classify — today just
+        /// `"no_speech"`. Absent ⇒ an ordinary failure.
+        let kind: String?
         let segments: [LocalTurn]?
         /// The file this reply is about — echoed straight back, so the caller can
         /// hand it to the identity stage without a lookup.
@@ -269,7 +283,15 @@ final class NemoService: @unchecked Sendable {
                 case "result":
                     self.onFinalResult?(message.audio ?? "", message.segments ?? [], stream)
                 case "error":
-                    self.onError?(message.text ?? "unknown diarization error", stream)
+                    let text = message.text ?? "unknown diarization error"
+                    // Routed on `kind`, never on the sentence — see the sidecar,
+                    // where the same reasoning is written down. See `onNoSpeech`
+                    // for why an unset callback falls back rather than dropping.
+                    if message.kind == "no_speech", let handler = self.onNoSpeech {
+                        handler(text, stream)
+                    } else {
+                        self.onError?(text, stream)
+                    }
                 // NO `chunk_result` CASE, deliberately. This engine cannot produce
                 // one — see the type comment — and a case here would be the first
                 // step towards someone adding the job that fills it.

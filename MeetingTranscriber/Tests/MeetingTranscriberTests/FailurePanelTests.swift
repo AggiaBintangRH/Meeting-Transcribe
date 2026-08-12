@@ -124,6 +124,80 @@ final class FailurePanelTests: XCTestCase {
                       + "meeting that simply finished")
     }
 
+    // MARK: - "No speech" is a verdict, not a fault
+
+    /// The owner recorded two silent seconds to watch the progress panel, and
+    /// NeMo's VAD correctly reported that there was no speech to identify
+    /// speakers in. The panel painted it red and demanded a Close — reporting a
+    /// broken app to someone whose app was working.
+    func testAStepThatCorrectlyHadNothingToDoIsNotAFailure() {
+        let r = AudioRecorder()
+        r.state = .idle
+        r.stopSteps = [step("chunk", .done),
+                       step("remote-diarize", .skipped("No speech found"))]
+
+        XCTAssertFalse(r.stopFailed,
+                       "a correct outcome is not a failure, however it is drawn")
+        XCTAssertFalse(r.showsStopOverlay,
+                       "and it must not demand an acknowledgement — the panel "
+                       + "should close itself exactly as it does for a clean stop")
+    }
+
+    /// The office path, through the real handler. `.skipped` is only half of it:
+    /// `diarizationError` drives a RED BANNER over the transcript in
+    /// `TranscriptView`, so setting it would put the alarm back on screen after
+    /// the panel had carefully avoided raising one.
+    func testANoSpeechVerdictLeavesNoErrorBannerOnTheTranscript() {
+        let r = AudioRecorder()
+        r.stopSteps = [step("diarize", .loading)]
+
+        r.handleDiarizationFailure("No speech found in the recording.",
+                                   stream: .office, noSpeech: true)
+
+        XCTAssertEqual(r.stopSteps.first?.state,
+                       .skipped("No speech found in the recording."))
+        XCTAssertNil(r.diarizationError,
+                     "TranscriptView renders this as a red banner — a correct "
+                     + "verdict must not raise one")
+        XCTAssertTrue(r.finalDiarDone,
+                      "and the gate still settles: the whole reason this shares "
+                      + "the failure path is that the settling is identical")
+    }
+
+    /// The same call WITHOUT the flag must be unchanged in both respects, or the
+    /// new parameter would have quietly disarmed real failure reporting.
+    func testARealDiarizationFailureIsStillRedAndStillBanners() {
+        let r = AudioRecorder()
+        r.stopSteps = [step("diarize", .loading)]
+
+        r.handleDiarizationFailure("Diarization failed: boom", stream: .office)
+
+        XCTAssertEqual(r.stopSteps.first?.state, .failed("Diarization failed: boom"))
+        XCTAssertEqual(r.diarizationError, "Diarization failed: boom")
+        XCTAssertTrue(r.stopFailed)
+    }
+
+    /// The remote leg, which is where the owner actually met this: a loopback
+    /// device left selected while nobody dials in produces it every meeting.
+    func testTheRemoteLegCanBeSkippedWithoutTurningThePanelRed() {
+        let r = AudioRecorder()
+        r.state = .idle
+        r.stopSteps = [step("remote-diarize", .loading)]
+        // TAKE the gate first, exactly as `startRemoteDiarization` does. It is
+        // declared `true` so a single-stream session has no remote leg to wait
+        // on, and `completeRemoteDiarization` returns early otherwise — which is
+        // how the first version of this test failed, correctly.
+        r.remoteFinalDiarDone = false
+
+        r.completeRemoteDiarization(error: "No speech found in the remote audio.",
+                                    noSpeech: true)
+
+        XCTAssertEqual(r.stopSteps.first?.state,
+                       .skipped("No speech found in the remote audio."))
+        XCTAssertFalse(r.stopFailed)
+        XCTAssertTrue(r.remoteFinalDiarDone)
+    }
+
     // MARK: - The recording-error popup
 
     /// Start / during-recording errors reach a popup, and Close leaves the
