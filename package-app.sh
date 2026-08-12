@@ -14,16 +14,28 @@ APP="$ROOT/$APP_NAME.app"
 
 echo "==> Project root: $ROOT"
 
-# --- Stage 1: ensure themed icon variants exist ---------------------------
-if [[ ! -f "$ICONSET/1024-dark.png" || ! -f "$ICONSET/1024-tinted.png" ]]; then
-  echo "==> Icon variants missing; generating..."
-  if [[ ! -x "$VENV_PY" ]]; then
-    echo "ERROR: project venv python not found at $VENV_PY" >&2
-    echo "       Create the .venv and install Pillow before packaging." >&2
-    exit 1
-  fi
-  "$VENV_PY" "$ROOT/scripts/tools/make-icon-variants.py"
-fi
+# --- Stage 1: REMOVED 2026-08-12 — the icon variants cannot be used -------
+#
+# This stage ran `scripts/tools/make-icon-variants.py` whenever
+# `1024-dark.png` / `1024-tinted.png` were missing from the iconset. Both are
+# real files and both are UNUSABLE: a macOS `.appiconset` cannot express
+# luminosity appearance variants at all. Measured 2026-08-11 — declaring them
+# with `"appearances":[{"appearance":"luminosity","value":"dark"}]` makes actool
+# PARSE the entry and still report `has 2 unassigned children`, identically at
+# --minimum-deployment-target 14.0, 15.0 AND 26.0. Dark/tinted macOS icons are
+# an Icon Composer `.icon` feature, which is macOS 26+ and would drop this
+# build's 14.0 target.
+#
+# So the generated files only ever produced the build's one first-party
+# warning. Worse, this block made that warning SELF-HEALING: moving the two
+# PNGs out of the iconset silenced it, and the next `./build.sh` regenerated
+# them and brought it straight back — which is exactly what happened.
+#
+# `make-icon-variants.py` is deliberately KEPT (and is still pruned from the
+# bundle by build.sh): it is the right starting point if this app ever migrates
+# to a `.icon` file. It is simply no longer run automatically. The shipped icon
+# is unaffected — `AppIcon.icns` is byte-identical with or without these two
+# files, since actool never assigned them.
 
 # --- Stage 2: release build ------------------------------------------------
 echo "==> Building release..."
