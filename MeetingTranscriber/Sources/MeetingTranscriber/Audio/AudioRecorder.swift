@@ -263,6 +263,9 @@ final class AudioRecorder: ObservableObject {
     /// give one stream's utterance the other stream's start time.
     var lastRemoteRealtimeFinalElapsed: Double = 0
 
+    /// When the far end has finished an utterance — see `RemoteUtteranceGate`.
+    var remoteUtteranceGate = RemoteUtteranceGate()
+
     // Live chunked diarization — runs on its OWN interval, independent of ASR
     var chunkAudio: [Float] = []                       // 16k samples pending diarization
     /// Recording time at which the FIRST sample now in `chunkAudio` was captured.
@@ -1129,6 +1132,7 @@ final class AudioRecorder: ObservableObject {
         pendingChunkWindows = []
         lastRealtimeFinalElapsed = 0
         lastRemoteRealtimeFinalElapsed = 0
+        remoteUtteranceGate.reset()
         diarizing = false
         // Fresh overlap-repair state for this session. `overlapRepairProgress` and
         // `overlapRepairError` are display fields and went to the shared helper;
@@ -1421,6 +1425,23 @@ final class AudioRecorder: ObservableObject {
                     // cadences are separate settings, so one buffer cleared on the
                     // ASR boundary could not also feed the diarization boundary.
                     self.remoteDiarAudio.append(contentsOf: remoteSamples16k)
+
+                    // END OF A REMOTE UTTERANCE — flush the far end's realtime lane
+                    // so its text becomes a ROW placed in time, instead of piling
+                    // into one caption that grows for a whole chunk interval. See
+                    // `remoteSilenceElapsed` for why the office trigger cannot be
+                    // reused here.
+                    //
+                    // The threshold is `utterancePauseSec`, the SAME 1.0 s that
+                    // decides where one utterance ends when a chunk is split.
+                    // "When has someone finished speaking" is one question and must
+                    // not get two answers. The level gate is `remoteSilenceRMS`, the
+                    // same one that already decides a remote chunk is silent.
+                    if self.remoteUtteranceGate.note(
+                        level: AudioBufferProcessor.rms(remoteSamples16k),
+                        duration: duration) {
+                        remoteASR?.flush()
+                    }
                 }
 
                 // The ASR boundary is also what feeds the SECOND MOSS process, so

@@ -113,6 +113,51 @@ extension AudioRecorder {
     /// several seconds the confirmed remote chunk takes to come back. The
     /// caption instead survives until `commit()`, which every terminal outcome
     /// of that chunk calls — transcribed, empty, skipped as silence, or failed.
+    /// Decides when the far end has finished saying something, from its own audio
+    /// level alone.
+    ///
+    /// **Its own type rather than two loose properties in the tap**, for the reason
+    /// `RemoteCaption` is: the rule is the whole point, it lives inside the audio
+    /// callback where no test can reach it, and a rule nothing can pin is a rule
+    /// that drifts.
+    ///
+    /// **Why the far end needs this at all (owner, 2026-08-13).** The office
+    /// realtime lane is flushed on an ATND cluster change AND at the chunk
+    /// boundary; the remote lane only ever had the boundary — ONE final every two
+    /// minutes at the owner's interval. So the far end's speech stayed in a single
+    /// caption card that kept growing, and captions render below the row list, so
+    /// the room appeared to jump above it.
+    ///
+    /// The office trigger is deliberately not shared: a beam change describes the
+    /// ROOM and says nothing about the conferencing stream. Silence is the one
+    /// signal that is genuinely the far end's own.
+    struct RemoteUtteranceGate: Equatable {
+        private(set) var silenceElapsed = 0.0
+        /// There is speech behind this silence that has not been flushed yet. An
+        /// idle channel must not flush forever — one final per utterance, not one
+        /// per second of quiet.
+        private(set) var pending = false
+
+        /// Feed one tap block. Returns true exactly once per utterance, at the
+        /// moment the far end has been quiet for `minPauseSec`.
+        mutating func note(level: Float, duration: Double,
+                           minPauseSec: Double = utterancePauseSec) -> Bool {
+            guard level < remoteSilenceRMS else {
+                silenceElapsed = 0
+                pending = true
+                return false
+            }
+            guard pending else { return false }
+            silenceElapsed += duration
+            guard silenceElapsed >= minPauseSec else { return false }
+            pending = false
+            silenceElapsed = 0
+            return true
+        }
+
+        mutating func reset() { self = RemoteUtteranceGate() }
+    }
+
     struct RemoteCaption: Equatable {
         /// What the view draws; empty means no caption card at all.
         private(set) var text = ""
