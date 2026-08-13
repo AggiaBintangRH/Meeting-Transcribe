@@ -10,6 +10,11 @@ struct SidebarView: View {
             header
             Spacer()
             RecordCardView(recorder: recorder)
+            // Directly under the mic (owner, 2026-08-13). It used to be a chip in
+            // the top-right row, where a run of read-only readings made a real
+            // setting look like one more number the app was reporting.
+            SpeakerCountView(recorder: recorder)
+                .padding(.top, 18)
             Spacer()
             Spacer()
             // Under the record card, at the very bottom (owner, 2026-08-10).

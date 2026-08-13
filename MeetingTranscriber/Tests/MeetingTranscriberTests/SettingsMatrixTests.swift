@@ -455,15 +455,48 @@ final class SettingsMatrixTests: XCTestCase {
     /// test cannot see a call site. This pins the INTENT: an edit that decides to
     /// forward the room's count after all has to come here and argue with the
     /// reason, rather than changing one line in four files.
-    /// `@MainActor` like its sibling below, and required rather than stylistic:
+    /// `@MainActor` on the test below is required rather than stylistic:
     /// `remoteNumSpeakers` is main-actor isolated, and `XCTAssertEqual` takes its
-    /// arguments as nonisolated autoclosures — which is a warning today and an
-    /// ERROR in the Swift 6 language mode.
+    /// arguments as nonisolated autoclosures — a warning today and an ERROR in
+    /// the Swift 6 language mode.
+    ///
+    /// RE-AIMED 2026-08-13, when the owner asked for a Remote picker. It used to
+    /// assert `remoteNumSpeakers == 0` — "remote is always automatic" — which was
+    /// true of the pinned constant but was never the invariant worth pinning.
+    ///
+    /// **The invariant is that the two counts are DIFFERENT VALUES.** The 🔴 bug
+    /// this test was written for was the ROOM's headcount reaching the remote
+    /// passes: a 5-person room with one caller split that caller into five
+    /// profiles. A number the user typed FOR the far end is a different thing
+    /// entirely; a number typed for the room leaking across is the defect. So the
+    /// test now asserts they cannot be the same reader, which is what would let
+    /// the leak return.
     @MainActor
-    func testTheRemotePassesAlwaysAskForAutomaticCounting() {
+    func testTheRoomsCountCannotReachTheRemotePasses() {
+        let d = UserDefaults.standard
+        let office = "diarization.numSpeakers"
+        let remote = "diarization.remoteNumSpeakers"
+        let savedOffice = d.object(forKey: office)
+        let savedRemote = d.object(forKey: remote)
+        defer {
+            savedOffice.map { d.set($0, forKey: office) } ?? d.removeObject(forKey: office)
+            savedRemote.map { d.set($0, forKey: remote) } ?? d.removeObject(forKey: remote)
+        }
+
+        // The room is pinned to 5; the far end is left on Auto — the owner's own
+        // failing case, and the one a shared reader would get wrong.
+        d.set(5, forKey: office)
+        d.removeObject(forKey: remote)
+        XCTAssertEqual(AudioRecorder.diarNumSpeakers, 5)
         XCTAssertEqual(AudioRecorder.remoteNumSpeakers, 0,
-                       "0 = auto. Any other value would be this app asserting a "
-                       + "headcount for people it has never been told about.")
+                       "the room's 5 reached the far end — this is the bug that "
+                       + "split one caller into five Remote Speaker profiles")
+
+        // …and the far end can carry its own number without disturbing the room.
+        d.set(2, forKey: remote)
+        XCTAssertEqual(AudioRecorder.remoteNumSpeakers, 2)
+        XCTAssertEqual(AudioRecorder.diarNumSpeakers, 5,
+                       "and it must not leak back the other way either")
     }
 
     /// The control and the passes are ONE value, not two readers that agree.

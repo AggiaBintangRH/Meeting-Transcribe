@@ -331,10 +331,24 @@ final class AudioRecorder: ObservableObject {
     /// the one that counts badly, is no worse off than it was before the control
     /// existed.
     ///
-    /// A separate remote count is deliberately NOT offered: the room is visible
-    /// from the chair, the far end is not, so a second picker would collect a
-    /// number the user is guessing at and hand it to an engine as a certainty.
-    static let remoteNumSpeakers = 0
+    /// **A separate remote count IS now offered (owner, 2026-08-13)**, and this
+    /// reads it. It replaces a pinned `0`, whose doc argued the opposite — kept
+    /// here because the argument is still the risk, not because it was overruled
+    /// in error: *the room is visible from the chair, the far end is not*, so this
+    /// picker can collect a number the user is guessing at and hand it to an
+    /// engine as a certainty. Defaulting to Auto and saying so in the control is
+    /// what keeps that a choice rather than a trap.
+    ///
+    /// ⚠ **THE INVARIANT THAT MATTERS IS UNCHANGED, and it is not "remote is
+    /// always automatic".** It is that a remote pass must never be handed the
+    /// OFFICE count — two streams, two identity spaces, different people. That is
+    /// what `layout/remote-passes-never-send-the-room-count` pins, and it still
+    /// pins it: the passes reference THIS property, never `diarNumSpeakers`.
+    /// A remote number the user typed for the remote stream is a different thing
+    /// entirely from the room's headcount leaking across.
+    static var remoteNumSpeakers: Int {
+        UserDefaults.standard.integer(forKey: "diarization.remoteNumSpeakers")
+    }
 
     /// Read the three session-scoped diarization settings once. Called from
     /// `beginCapture` before anything can consume them, and unconditionally —
