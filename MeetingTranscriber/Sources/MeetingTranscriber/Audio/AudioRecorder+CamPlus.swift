@@ -174,7 +174,10 @@ extension AudioRecorder {
         }
         remoteDiarAudio = []
         remoteFinalDiarDone = false
-        // AUTO, never the room's count — see `AudioRecorder.remoteNumSpeakers`.
+        // THE FAR END'S OWN count, never the room's — see
+        // `AudioRecorder.remoteNumSpeakers`. It was a pinned 0 until the owner
+        // asked for a Remote picker (2026-08-13); what has never changed is that
+        // it must not be `diarNumSpeakers`, which counts the ROOM.
         // The SPK chip reports the ROOM; nothing anywhere asks how many people
         // are on the far end, so sending that number would force the room's
         // headcount onto the callers.

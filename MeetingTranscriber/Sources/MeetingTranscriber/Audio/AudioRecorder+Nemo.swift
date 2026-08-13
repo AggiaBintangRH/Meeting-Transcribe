@@ -191,7 +191,10 @@ extension AudioRecorder {
         }
         remoteDiarAudio = []
         remoteFinalDiarDone = false
-        // AUTO, never the room's count — see `AudioRecorder.remoteNumSpeakers`.
+        // THE FAR END'S OWN count, never the room's — see
+        // `AudioRecorder.remoteNumSpeakers`. It was a pinned 0 until the owner
+        // asked for a Remote picker (2026-08-13); what has never changed is that
+        // it must not be `diarNumSpeakers`, which counts the ROOM.
         // Here a pinned count would arrive as `oracle_num_speakers`, i.e. as a
         // certainty rather than a hint.
         let numSpeakers = Self.remoteNumSpeakers
