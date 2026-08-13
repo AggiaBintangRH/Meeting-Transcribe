@@ -74,9 +74,9 @@ struct SpeakerCountView: View {
         // each row independently would let "Office" and "Remote" — different
         // string widths — push their pickers to different places, which reads as
         // sloppier than not centring at all.
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("SPEAKERS")
-                .font(.system(size: 13, weight: .bold)).kerning(1.0)
+                .font(.system(size: 15, weight: .bold)).kerning(1.1)
                 .foregroundColor(Theme.textFaint)
                 .frame(maxWidth: .infinity, alignment: .center)
 
@@ -90,7 +90,7 @@ struct SpeakerCountView: View {
             // so it stays.
             if !hasRemote {
                 Text("No Remote channel — pick one in Settings → Microphone.")
-                    .font(.system(size: 12))
+                    .font(.system(size: 13))
                     .foregroundColor(Theme.textFaint)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -123,14 +123,14 @@ struct SpeakerCountView: View {
                      available: Bool = true) -> some View {
         HStack(spacing: 12) {
             Image(systemName: "person.2")
-                .font(.system(size: 15, weight: .bold))
+                .font(.system(size: 17, weight: .bold))
                 .foregroundColor(available ? tint : Theme.textDim)
             Text(label)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundColor(Theme.textBody)
-                // Wide enough for "Office" and "Remote" at 15pt, so the two
+                // Wide enough for "Office" and "Remote" at 17pt, so the two
                 // pickers line up under each other.
-                .frame(width: 72, alignment: .leading)
+                .frame(width: 80, alignment: .leading)
 
             // A `Menu`, NOT a `Picker(.menu)` — the reason is carried over from
             // the chip this replaced: on macOS the picker draws its own bevelled
@@ -149,11 +149,11 @@ struct SpeakerCountView: View {
             } label: {
                 HStack(spacing: 5) {
                     Text(text(value.wrappedValue))
-                        .font(.system(size: 15, weight: .bold).monospaced())
+                        .font(.system(size: 17, weight: .bold).monospaced())
                         .foregroundColor(honoured && available
                                          ? Theme.textBright : Theme.textDim)
                     Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Theme.textDim)
                 }
             }
