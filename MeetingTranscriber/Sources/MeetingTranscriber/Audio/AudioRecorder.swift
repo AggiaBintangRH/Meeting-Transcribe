@@ -171,6 +171,12 @@ final class AudioRecorder: ObservableObject {
         return remote < office
     }
 
+    /// Signature of the last row order written to `logs/row-order.log`, so the log
+    /// records CHANGES rather than state. `rebuildDisplayRows` runs on every
+    /// realtime partial — logging each one would bury the moment a row moved,
+    /// which is the only thing that file exists to show.
+    var lastLoggedRowOrder: String?
+
     @Published var diarizationError: String?
 
     /// A speaker count that looks like clustering fragmentation — see
@@ -784,6 +790,9 @@ final class AudioRecorder: ObservableObject {
         // rebuilt — in both cases a failure the user is never shown.
         dismissedErrorMessage = nil
         stopFailureAcknowledged = false
+        // …and the row-order signature, or the first order of the NEXT meeting
+        // matches the last order of this one and is never written down.
+        lastLoggedRowOrder = nil
         chunkedError = nil
         diarizationError = nil
         // Travels with the transcript it describes: a caution about the LAST

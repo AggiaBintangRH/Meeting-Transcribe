@@ -11,7 +11,14 @@ extension AudioRecorder {
     /// Rebuild the rendered transcript from the raw ASR segments and the
     /// diarization turns collected so far. Each confirmed chunk is split into
     /// one row per speaker turn; undiarized/realtime text stays a single row.
-    func rebuildDisplayRows() {
+    /// `caller` defaults to `#function`, which Swift fills in with the name of
+    /// whoever called this — so all 24 call sites report WHY the rows were rebuilt
+    /// without a single one being edited. That is the field that makes
+    /// `logs/row-order.log` diagnostic rather than merely descriptive: a row that
+    /// moves tells you nothing on its own, and a row that moves *when
+    /// `applyAlignedWords` landed* tells you everything.
+    func rebuildDisplayRows(caller: String = #function) {
+        defer { logRowOrderIfChanged(caller: caller) }
         var rows: [SpeakerUtterance] = []
         // Pyannote-derived regions PLUS anything the standalone detector found.
         // The union is used for DISPLAY only; overlap REPAIR still reads
@@ -55,6 +62,51 @@ extension AudioRecorder {
         displayRows = Self.annotateSpeakerConfidence(rows: settled,
                                                      officeTurns: liveTurns,
                                                      remoteTurns: remoteLiveTurns)
+    }
+
+    /// Write the confirmed row order to `logs/row-order.log`, but ONLY when it has
+    /// changed since the last write.
+    ///
+    /// Owner, 2026-08-13: *"speaker row office terus pindah pindah ke atas kenapa
+    /// … kamu bikin lognya, saya test"*. Nothing in this app recorded the order the
+    /// rows ended up in, so a row that jumped left no trace at all.
+    ///
+    /// **Changes, not state.** `rebuildDisplayRows` runs on every realtime partial
+    /// — several times a second — and a file with one entry per rebuild would be
+    /// megabytes of identical lines with the interesting moment buried in it. The
+    /// signature test means one entry per actual movement.
+    ///
+    /// Each entry names the CALLER, which is what turns "a row moved" into a cause:
+    /// a move under `applyAlignedWords` is late word times arriving and re-placing a
+    /// row that had only its chunk window to go on; a move under `applyFinalTurns`
+    /// is the stop pass replacing the labels; a move under `flushRemoteChunk` is a
+    /// new remote row landing between existing ones.
+    ///
+    /// Unconfirmed rows are excluded deliberately: realtime text is rewritten
+    /// constantly and its churn is not what is being investigated.
+    func logRowOrderIfChanged(caller: String) {
+        let confirmed = displayRows.filter(\.confirmed)
+        let signature = confirmed.map { row in
+            "\(row.isRemote ? "R" : "O")\(row.speakerID.map(String.init) ?? "-")"
+            + "@\(fmt(row.start ?? -1))"
+        }.joined(separator: " ")
+        guard signature != lastLoggedRowOrder else { return }
+        lastLoggedRowOrder = signature
+        guard !confirmed.isEmpty else { return }
+
+        var lines = ["ORDER CHANGED after \(caller) — \(confirmed.count) row(s)"]
+        for (i, row) in confirmed.enumerated() {
+            // The text prefix is what lets two consecutive entries be compared by
+            // eye: ids change when a row is re-split, the words do not.
+            let text = row.text.prefix(48).replacingOccurrences(of: "\n", with: " ")
+            lines.append(String(format: "  %2d %@ %7.2f-%7.2f  %@  %@",
+                                i + 1,
+                                row.isRemote ? "REMOTE" : "OFFICE",
+                                row.start ?? -1, row.end ?? -1,
+                                row.speaker ?? "(no speaker)",
+                                text))
+        }
+        PythonRuntime.appendAppLog(name: "row-order", message: lines.joined(separator: "\n"))
     }
 
     /// Attach each row's speaker confidence: the MINIMUM matched cosine over the
