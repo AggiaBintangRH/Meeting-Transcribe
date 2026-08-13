@@ -465,7 +465,68 @@ extension AudioRecorder {
         let turns = Self.officeTurnsOnly(turns, "applyFinalSpeakers")
         speakerCount = Set(turns.map(\.id)).count
         liveTurns = turns
+        noteImplausibleSpeakerCount(turns, stream: .office)
         rebuildDisplayRows()
+    }
+
+    /// Does this speaker count look like clustering fragmentation rather than a
+    /// room? Returns the caution to show, or nil.
+    ///
+    /// **The rule: four or more speakers, of whom the MEDIAN spoke exactly once.**
+    /// A real participant takes more than one turn; a set of speakers who each
+    /// appear once is the signature of one voice split many ways. Both halves are
+    /// load-bearing — the count alone would flag a genuine 5-person meeting, and
+    /// the median alone would flag a correct 2- or 3-speaker clip where each
+    /// person legitimately has a single turn.
+    ///
+    /// **MEASURED on 2026-08-13 against nine known-answer cases across three
+    /// recordings, and it separates them exactly** — the three wrong results are
+    /// flagged and the six correct ones are not:
+    ///
+    /// | engine | file | truth | got | median turns | flagged |
+    /// |---|---|---|---|---|---|
+    /// | CAM++ | 25 s remote | 2 | **9** | 1.0 | yes |
+    /// | spectral | 25 s remote | 2 | **12** | 1.0 | yes |
+    /// | NeMo | 25 s remote | 2 | **12** | 1.0 | yes |
+    /// | pyannote | 25 s remote | 2 | 2 | 1.0 | no (under 4) |
+    /// | DiariZen | 25 s remote | 2 | 2 | 1.5 | no |
+    /// | pyannote | Meeting5People | 5 | 5 | 3.0 | no |
+    /// | CAM++ | Meeting5People | 5 | 5 | 3.0 | no |
+    /// | pyannote | Overlap123 | 3 | 3 | 1.0 | no (under 4) |
+    /// | DiariZen | Overlap123 | 3 | 3 | 3.0 | no |
+    ///
+    /// ⚠ **What it deliberately does NOT catch**, so nobody reads more into it:
+    /// spectral's 20 speakers on the 67-minute recording, where each cluster holds
+    /// ~93 turns. That case is not fragmentation-by-this-signature and is still an
+    /// open question in this project — a wider rule would be guessing at it.
+    ///
+    /// It CAUTIONS and never corrects. The count came from the engine, and
+    /// silently overriding a model's answer is the substitution this project
+    /// refuses everywhere else.
+    nonisolated static func implausibleSpeakerCount(_ turns: [SpeakerTurn]) -> String? {
+        var turnsPerSpeaker: [Int: Int] = [:]
+        for turn in turns { turnsPerSpeaker[turn.id, default: 0] += 1 }
+        let speakers = turnsPerSpeaker.count
+        guard speakers >= 4 else { return nil }
+        let counts = turnsPerSpeaker.values.sorted()
+        // Lower median on an even count — the conservative side, so a borderline
+        // set is left alone rather than accused.
+        let median = counts[(counts.count - 1) / 2]
+        guard median <= 1 else { return nil }
+        return "\(speakers) speakers were found, and most of them speak only once — "
+             + "that usually means one voice was split rather than a room this full. "
+             + "Set the speaker count beside the record button, or switch the "
+             + "diarization engine in Settings → Models → Diarization."
+    }
+
+    /// Log the caution and surface it under the transcript. Same text both places:
+    /// the log is the record, the banner is what the user can act on.
+    func noteImplausibleSpeakerCount(_ turns: [SpeakerTurn],
+                                     stream: PyannoteService.Stream) {
+        guard let caution = Self.implausibleSpeakerCount(turns) else { return }
+        let where_ = stream == .office ? "office" : "remote"
+        positionLog("SPEAKER COUNT CAUTION (\(where_)) — \(caution)")
+        diarizationCaution = caution
     }
 
     /// Write 16 kHz mono float samples to a temp WAV (chunk diarization, and the

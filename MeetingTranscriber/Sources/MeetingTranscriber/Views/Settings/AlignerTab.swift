@@ -26,7 +26,16 @@ import SwiftUI
 /// saying why neither would act.** That is the rule the 2026-08-06 settings pass
 /// set out ("a control that cannot act says so") broken in the quietest way.
 struct AlignerTab: View {
-    @AppStorage("align.enabled") private var enabled = false
+    // Default TRUE since 2026-08-13. It was false, which meant the shipped
+    // configuration placed each sentence by its CHARACTER POSITION in the chunk
+    // and never used word times — while pyannote's turn boundaries were measured
+    // wrong by a median 263 ms, and `WordAttribution.snapRanges`, which exists to
+    // fix exactly that, only runs inside the word-exact path. The accurate route
+    // was built, tested and switched off.
+    //
+    // ⚠ Only reaches a user who has never touched this toggle: @AppStorage takes
+    // the default when the KEY IS ABSENT, so anyone with a stored `false` keeps it.
+    @AppStorage("align.enabled") private var enabled = true
     @AppStorage("chunked.model") private var chunkedModel = "qwen3"
     @AppStorage("chunked.enabled") private var chunkedEnabled = true
 

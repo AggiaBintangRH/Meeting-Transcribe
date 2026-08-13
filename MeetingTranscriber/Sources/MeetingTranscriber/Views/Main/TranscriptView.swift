@@ -65,6 +65,18 @@ struct TranscriptView: View {
                                 .textSelection(.enabled)
                         }
 
+                        // AMBER, not red, and its own block rather than another
+                        // `??` on the line above: nothing failed here. The
+                        // transcript is complete and usable — the speaker COUNT
+                        // is what looks wrong, and the text says what to change.
+                        if let caution = recorder.diarizationCaution {
+                            Text(caution)
+                                .font(.system(size: 11))
+                                .foregroundColor(Theme.amber)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+
                         Color.clear.frame(height: 1).id("bottom")
                     }
                     .padding(24)

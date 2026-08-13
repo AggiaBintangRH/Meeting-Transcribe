@@ -220,6 +220,10 @@ extension AudioRecorder {
         let turns = Self.remoteTurnsOnly(turns, "applyRemoteFinalSpeakers")
         remoteSpeakerCount = Set(turns.map(\.id)).count
         remoteLiveTurns = turns
+        // The far end needs this MORE than the room does: you can see how many
+        // people are in the room and notice a wrong count, and you cannot see the
+        // call. Both streams were fragmenting in the 2026-08-13 measurements.
+        noteImplausibleSpeakerCount(turns, stream: .remote)
         rebuildDisplayRows()
     }
 

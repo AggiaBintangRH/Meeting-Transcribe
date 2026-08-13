@@ -279,7 +279,7 @@ struct SettingsView: View {
     @AppStorage("diarization.engine")     private var diarEngine = "pyannote"
     @AppStorage("diarization.enabled")    private var diarEnabled = true
     @AppStorage("overlap.engine")         private var overlapEngineID = ModelCatalog.overlapSeparation.id
-    @AppStorage("align.enabled")          private var alignEnabled = false
+    @AppStorage("align.enabled")          private var alignEnabled = true
     @AppStorage("overlap.repair.enabled") private var repairEnabled = false
     @AppStorage("realtime.enabled")       private var realtimeEnabled = true
     @AppStorage("overlap.detect.enabled") private var detectEnabled = false

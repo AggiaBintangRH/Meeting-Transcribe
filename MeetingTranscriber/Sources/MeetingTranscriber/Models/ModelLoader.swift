@@ -825,7 +825,7 @@ final class ModelLoader: ObservableObject {
         // session that does not align must not keep a previous session's sidecar
         // alive, because `AudioRecorder` decides whether to align at all by
         // asking whether this service exists.
-        if !Self.wantsAligner(alignEnabled: d.object(forKey: "align.enabled") as? Bool ?? false,
+        if !Self.wantsAligner(alignEnabled: d.object(forKey: "align.enabled") as? Bool ?? true,
                               chunkedID: chunkedID, chunkedEnabled: chunkedOn) {
             if aligner != nil { noteUnload(ModelCatalog.wordAligner.name) }
             aligner?.terminate()
@@ -938,7 +938,7 @@ final class ModelLoader: ObservableObject {
         // verifies the weights and starts the process. Kept BEFORE the chunked
         // step so "aligner not downloaded" is reported before a multi-GB ASR
         // load, not after it. Skipped for MOSS — see `wantsAligner`.
-        if Self.wantsAligner(alignEnabled: d.object(forKey: "align.enabled") as? Bool ?? false,
+        if Self.wantsAligner(alignEnabled: d.object(forKey: "align.enabled") as? Bool ?? true,
                              chunkedID: chunkedID, chunkedEnabled: chunkedOn) {
             steps.append(Step(model: ModelCatalog.wordAligner, checkInstalled: true))
         }

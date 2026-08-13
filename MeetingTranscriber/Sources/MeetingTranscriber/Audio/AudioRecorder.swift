@@ -138,6 +138,14 @@ final class AudioRecorder: ObservableObject {
     @Published var speakerCount: Int?
     @Published var diarizationError: String?
 
+    /// A speaker count that looks like clustering fragmentation — see
+    /// `implausibleSpeakerCount`. Deliberately SEPARATE from `diarizationError`:
+    /// nothing failed, the engine answered, and the answer is merely suspect.
+    /// Rendering it as an error would report a working app as broken, which is
+    /// the mistake the 2026-08-12 no-speech work already had to correct once.
+    /// Cleared with the rest of the visible meeting state.
+    @Published var diarizationCaution: String?
+
     // Overlap repair (MossFormer2, runs at stop after diarization + last chunk)
     @Published var overlapRepairing = false
     @Published var overlapRepairProgress: String?
@@ -743,6 +751,10 @@ final class AudioRecorder: ObservableObject {
         stopFailureAcknowledged = false
         chunkedError = nil
         diarizationError = nil
+        // Travels with the transcript it describes: a caution about the LAST
+        // meeting's speaker count, left standing over a fresh one, accuses a
+        // result nobody has produced yet.
+        diarizationCaution = nil
         overlapRepairError = nil
         overlapRepairProgress = nil
         stopSteps = []
