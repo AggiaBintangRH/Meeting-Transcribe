@@ -36,37 +36,62 @@ extension AudioRecorder {
         alignChunkAudio = []
     }
 
+    /// Which stream an alignment reply belongs to.
+    ///
+    /// A parameter rather than a second `requestAlignment` copy: the request's
+    /// gates, its temp-WAV lifetime and its three log outcomes are identical for
+    /// both streams, and this project has already paid twice for two near-copies
+    /// of one rule drifting apart (`whisper/protocol-matches-chunked` exists for
+    /// exactly that). The ONLY thing that differs is which collection the reply
+    /// lands in, so that is the only thing this decides.
+    enum AlignTarget {
+        case office
+        case remote
+
+        /// Tags every log line, so `logs/position-diarization.log` — one file,
+        /// one writer, now two streams — still says which stream each ALIGN
+        /// decision belonged to.
+        var logTag: String { self == .office ? "ALIGN" : "ALIGN[remote]" }
+    }
+
     /// Ask the aligner for this chunk's word times, off the main actor, and hand
-    /// the reply to `applyAlignedWords`.
+    /// the reply to `applyAlignedWords` / `applyAlignedRemoteWords`.
     ///
     /// The WAV is written in the same task and deleted on EVERY exit path — the
     /// placement `flushRemoteChunk` already uses. A crash leaves `align-chunk-*`
     /// files in the temp dir exactly as it leaves `diar-chunk-*`/`remote-chunk-*`
     /// ones; there is deliberately no new sweeper.
     func requestAlignment(aligner: AlignerService, samples: [Float],
-                          segmentID: UUID, text: String) {
+                          segmentID: UUID, text: String,
+                          target: AlignTarget = .office) {
         Task { [weak self] in
             guard let self else { return }
             let url = await Task.detached(priority: .utility) {
                 Self.writeTempWAV(samples: samples, prefix: "align-chunk")
             }.value
             guard let url else {
-                self.positionLog("ALIGN FAIL — could not write a temp WAV")
+                self.positionLog("\(target.logTag) FAIL — could not write a temp WAV")
                 return
             }
             do {
                 let result = try await aligner.align(path: url.path, text: text)
                 if let words = result.words {
-                    self.applyAlignedWords(segmentID: segmentID, requestText: text,
-                                           words: words, dur: result.dur)
+                    switch target {
+                    case .office:
+                        self.applyAlignedWords(segmentID: segmentID, requestText: text,
+                                               words: words, dur: result.dur)
+                    case .remote:
+                        self.applyAlignedRemoteWords(segmentID: segmentID, requestText: text,
+                                                     words: words, dur: result.dur)
+                    }
                 } else {
                     // A rejected alignment is a NORMAL outcome (the sidecar's own
                     // gates), and its reason is already in logs/aligner.log.
-                    self.positionLog("ALIGN none — the sidecar's gates rejected "
+                    self.positionLog("\(target.logTag) none — the sidecar's gates rejected "
                                      + "this chunk; keeping the estimated split")
                 }
             } catch {
-                self.positionLog("ALIGN FAIL — \(error.localizedDescription)")
+                self.positionLog("\(target.logTag) FAIL — \(error.localizedDescription)")
             }
             try? FileManager.default.removeItem(at: url)
         }
@@ -93,8 +118,27 @@ extension AudioRecorder {
     nonisolated static func indexForAlignedWords(segments: [TranscriptSegment],
                                                  id: UUID,
                                                  requestText: String) -> Int? {
-        guard let index = segments.firstIndex(where: { $0.id == id }) else { return nil }
-        guard segments[index].text == requestText else { return nil }
+        indexForAlignedWords(count: segments.count, id: id, requestText: requestText,
+                             idAt: { segments[$0].id }, textAt: { segments[$0].text })
+    }
+
+    /// The Remote twin, and the SAME rule — it delegates rather than repeating
+    /// the two guards, because "which reply may be applied" is one decision about
+    /// stale word indices and must not be able to differ per stream.
+    nonisolated static func indexForAlignedWords(segments: [RemoteSegment],
+                                                 id: UUID,
+                                                 requestText: String) -> Int? {
+        indexForAlignedWords(count: segments.count, id: id, requestText: requestText,
+                             idAt: { segments[$0].id }, textAt: { segments[$0].text })
+    }
+
+    /// The rule itself, stated once, over indices so neither segment type has to
+    /// know about the other.
+    private nonisolated static func indexForAlignedWords(
+        count: Int, id: UUID, requestText: String,
+        idAt: (Int) -> UUID, textAt: (Int) -> String) -> Int? {
+        guard let index = (0..<count).first(where: { idAt($0) == id }) else { return nil }
+        guard textAt(index) == requestText else { return nil }
         return index
     }
 
@@ -116,6 +160,29 @@ extension AudioRecorder {
         }
         segments[index].words = words
         segments[index].alignedChunkDuration = dur
+        rebuildDisplayRows()
+    }
+
+    /// The Remote twin of `applyAlignedWords`.
+    ///
+    /// Both guards are kept even though the office reasons for them are weaker
+    /// here — `applyRepair` and `TranscriptMerge` COMBINE are office-only, so a
+    /// remote segment's text is not rewritten today. "Today" is the whole point:
+    /// the guard costs one string comparison and its absence would be silent, and
+    /// a remote repair path has already been discussed once this month.
+    func applyAlignedRemoteWords(segmentID: UUID, requestText: String,
+                                 words: [ChunkedASRService.AlignedWord], dur: Double?) {
+        guard let index = Self.indexForAlignedWords(segments: remoteSegments, id: segmentID,
+                                                    requestText: requestText) else {
+            let vanished = !remoteSegments.contains { $0.id == segmentID }
+            positionLog("ALIGN[remote] LATE drop — "
+                        + (vanished ? "the segment is gone"
+                                    : "the segment's text changed after the request "
+                                      + "(src indices no longer valid)"))
+            return
+        }
+        remoteSegments[index].words = words
+        remoteSegments[index].alignedChunkDuration = dur
         rebuildDisplayRows()
     }
 }

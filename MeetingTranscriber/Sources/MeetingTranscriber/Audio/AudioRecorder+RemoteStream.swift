@@ -190,8 +190,26 @@ extension AudioRecorder {
                     // Remote rows carry the same ASR confidence office rows do:
                     // it is the SAME model over unmixed audio of one real stream,
                     // so the number means exactly what it means for the room.
-                    self.remoteSegments.append(RemoteSegment(text: trimmed, window: window,
-                                                             conf: result.conf))
+                    let segment = RemoteSegment(text: trimmed, window: window,
+                                                conf: result.conf)
+                    self.remoteSegments.append(segment)
+                    // No `words` yet, exactly as the office chunk handler does it:
+                    // the row is shown NOW with the estimated split and the aligner
+                    // is asked separately, so a slow or dead aligner can only ever
+                    // cost precision, never text.
+                    //
+                    // No `alignAudioByWindow` twin is needed here, and that is not
+                    // an omission. Office needs that map because its ASR reply
+                    // arrives on a callback carrying no window id, so the audio has
+                    // to be parked and matched up again; this closure still HOLDS
+                    // the very samples it just transcribed. One less FIFO to keep
+                    // in step is one less way for a reply to pair with the wrong
+                    // window (see `pendingChunkWindows`, which exists for that bug).
+                    if let aligner = self.modelLoader.aligner, !samples.isEmpty {
+                        self.requestAlignment(aligner: aligner, samples: samples,
+                                              segmentID: segment.id, text: trimmed,
+                                              target: .remote)
+                    }
                     self.rebuildDisplayRows()
                     self.dualStreamLog("remote [\(self.fmt(window.lowerBound))-"
                                        + "\(self.fmt(window.upperBound))] \(trimmed)")

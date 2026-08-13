@@ -56,6 +56,22 @@ extension AudioRecorder {
         var text: String
         var window: ClosedRange<Double>   // recording-time span (shared clock)
         var conf: Double? = nil           // chunked-ASR confidence (Whisper only)
+
+        /// Word times from the aligner, or nil until (and unless) they arrive.
+        ///
+        /// The office twin of these two fields lives on `TranscriptSegment`, and
+        /// they exist here for the same reason: without them a remote row's
+        /// speaker boundary is placed by each sentence's CHARACTER POSITION in the
+        /// chunk, which is a guess, while the office side places every word by the
+        /// turn that covers it IN TIME. Owner, 2026-08-13, on feeding one source
+        /// into both channels and getting two different splits: *"saya test nya
+        /// sama audio sama dll sama tapi kenapa remote hasilnya kurang bagus"*.
+        /// The audio and the model were the same; only this was missing.
+        var words: [ChunkedASRService.AlignedWord]? = nil
+
+        /// The aligner's view of how long the audio it was given was — checked
+        /// against `window`'s span before any word time is trusted.
+        var alignedChunkDuration: Double? = nil
     }
 
     /// The live Remote caption — what the Remote realtime engine has produced

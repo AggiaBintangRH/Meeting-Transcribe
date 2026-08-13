@@ -37,7 +37,12 @@ extension AudioRecorder {
                                     // the detector is the only source — which is
                                     // exactly why it is run per stream.
                                     regions: remoteOverlapRegions()
-                                             + remoteDetectedOverlapRegions))
+                                             + remoteDetectedOverlapRegions,
+                                    // Same writer, same file as the office
+                                    // WORDS OK/SKIP lines — tagged per stream by
+                                    // `WordAttribution` itself, which prints the
+                                    // window it was judging.
+                                    log: { self.positionLog($0) }))
         // Relabel sub-second speaker "islands" first (an ATND beam flicker that
         // caught one word), THEN coalesce — because relabeling restores the
         // adjacency that lets the surrounding rows merge.
@@ -574,7 +579,8 @@ extension AudioRecorder {
     /// nothing and is the honest half.
     nonisolated static func remoteRows(_ segments: [RemoteSegment],
                                        turns: [SpeakerTurn] = [],
-                                       regions: [(start: Double, end: Double)] = [])
+                                       regions: [(start: Double, end: Double)] = [],
+                                       log: (String) -> Void = { _ in })
         -> [SpeakerUtterance] {
         segments.sorted { $0.window.lowerBound < $1.window.lowerBound }
             .flatMap { seg -> [SpeakerUtterance] in
@@ -594,6 +600,34 @@ extension AudioRecorder {
                                              end: seg.window.upperBound,
                                              text: text, confirmed: true, overlapped: hit,
                                              isRemote: true, asrConf: seg.conf)]
+                }
+                // Word-exact path, the same one `derivedRows` takes and reached the
+                // same way — the aligner ran on this chunk, so every word goes to
+                // the turn that covers it IN TIME rather than to the turn its
+                // character offset guesses. Added 2026-08-13: the office side has
+                // had this since the aligner became its own sidecar and the remote
+                // side never did, which is why one source fed into both channels
+                // came back split two different ways.
+                //
+                // `WordAttribution.attribute` also snaps speaker-change boundaries
+                // onto real pauses, so this closes the second half of the same gap.
+                // Any failed gate returns nil → the estimate below, unchanged.
+                if let words = seg.words,
+                   let pieces = WordAttribution.attribute(text: text, words: words,
+                                                          chunkDuration: seg.alignedChunkDuration,
+                                                          window: seg.window, ranges: ranges,
+                                                          log: log) {
+                    return pieces.enumerated().map { i, p in
+                        let overlapped = regions.contains {
+                            max($0.start, p.start) < min($0.end, p.end)
+                        }
+                        return SpeakerUtterance(id: "\(seg.id.uuidString)-\(i)",
+                                                speaker: remoteDisplayName(p.name),
+                                                speakerID: p.id, start: p.start, end: p.end,
+                                                text: p.text, confirmed: true,
+                                                overlapped: overlapped,
+                                                isRemote: true, asrConf: seg.conf)
+                    }
                 }
                 return assignSentences(text, window: seg.window, ranges: ranges,
                                        segID: seg.id.uuidString, regions: regions,
