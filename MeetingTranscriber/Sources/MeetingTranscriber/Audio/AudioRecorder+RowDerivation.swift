@@ -330,9 +330,15 @@ extension AudioRecorder {
             let nearest = displayTurns.min { a, b in
                 Self.timeDistance(from: a, to: window) < Self.timeDistance(from: b, to: window)
             }
+            // Real speech times when the aligner ran, so this row can be ordered
+            // against the other stream's rows instead of tying on the chunk start
+            // — see `spokenSpan`. Falls back to the whole window unchanged.
+            let span = Self.spokenSpan(words: seg.words,
+                                       chunkDuration: seg.alignedChunkDuration,
+                                       window: window) ?? window
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: nearest?.name,
-                                     speakerID: nearest?.id, start: window.lowerBound,
-                                     end: window.upperBound, text: seg.text,
+                                     speakerID: nearest?.id, start: span.lowerBound,
+                                     end: span.upperBound, text: seg.text,
                                      confirmed: true, asrConf: seg.asrConf)]
         }
         // Word-exact path: when the aligner ran, each word goes to the turn that
@@ -560,6 +566,49 @@ extension AudioRecorder {
     /// The same clipping/merging, parameterised by the turn set — so the Remote
     /// stream can reuse it against `remoteLiveTurns` without any chance of the
     /// two identity spaces meeting (each call sees exactly one of them).
+    /// When speech actually happened inside a chunk, taken from the aligner's word
+    /// times — or nil when there is no trustworthy answer.
+    ///
+    /// **Why this exists (owner, 2026-08-13).** With a batch diarization engine
+    /// there are NO turns during recording — the pass runs once at Stop — so every
+    /// row in a chunk was given the CHUNK's span. All rows in one 30 s chunk then
+    /// share a start time, and `mergeRowsByStartTime` has to break a tie it cannot
+    /// break: its rule is `remote < office`, so Office wins every tie and the far
+    /// end is forced underneath whatever the room said, whoever really spoke first.
+    ///
+    /// The symptom is exactly that shape: two utterances in DIFFERENT chunks order
+    /// correctly, two in the SAME chunk always come out office-first.
+    ///
+    /// ⚠ **Arrival order cannot be used instead, and it is the obvious idea.** Both
+    /// streams are driven through ONE sidecar on ONE queue with the office FLUSH
+    /// always enqueued ahead of the remote frame, so office replies always land
+    /// first. Ordering by arrival would encode our own dispatch order and pin Office
+    /// on top permanently — the reported bug, made structural.
+    ///
+    /// So the only honest source of within-chunk timing is the word times, and they
+    /// carry the same `chunkDuration` sanity gate `WordAttribution` applies: a
+    /// duration disagreeing with the window means the aligner and the app are
+    /// describing different spans, and the times would land in the wrong place.
+    ///
+    /// Returns nil rather than guessing when the aligner did not run. With no turns
+    /// AND no words, nothing in the data knows who spoke first, and inventing an
+    /// order would be fabrication.
+    nonisolated static func spokenSpan(words: [ChunkedASRService.AlignedWord]?,
+                                       chunkDuration: Double?,
+                                       window: ClosedRange<Double>)
+        -> ClosedRange<Double>? {
+        guard let words, !words.isEmpty else { return nil }
+        let span = window.upperBound - window.lowerBound
+        if let dur = chunkDuration, abs(dur - span) > 1.0 { return nil }
+        // Word times are chunk-local, exactly as `WordAttribution` reads them.
+        let first = words.map(\.start).min() ?? 0
+        let last = words.map(\.end).max() ?? 0
+        let start = min(max(window.lowerBound + first, window.lowerBound), window.upperBound)
+        let end = min(max(window.lowerBound + last, start), window.upperBound)
+        guard end > start else { return nil }
+        return start...end
+    }
+
     nonisolated static func speakerRanges(in window: ClosedRange<Double>,
                                           turns: [SpeakerTurn])
         -> [(start: Double, end: Double, id: Int, name: String)] {
@@ -653,16 +702,21 @@ extension AudioRecorder {
                 }
                 let ranges = speakerRanges(in: seg.window, turns: turns)
                 guard !ranges.isEmpty else {
-                    // No turns for this window: the row spans the whole window, so
-                    // it is overlapped if ANY region touches that window — the same
-                    // test the office no-turns path makes.
+                    // No turns for this window. The row's span is the real speech
+                    // when the aligner ran (`spokenSpan`) — which is what lets it be
+                    // ordered against the office rows instead of tying on the chunk
+                    // start and losing the tie by rule — and the whole window
+                    // otherwise, exactly as before.
+                    let span = spokenSpan(words: seg.words,
+                                          chunkDuration: seg.alignedChunkDuration,
+                                          window: seg.window) ?? seg.window
                     let hit = regions.contains {
-                        max($0.start, seg.window.lowerBound) < min($0.end, seg.window.upperBound)
+                        max($0.start, span.lowerBound) < min($0.end, span.upperBound)
                     }
                     return [SpeakerUtterance(id: seg.id.uuidString,
                                              speaker: remoteSpeakerLabel, speakerID: nil,
-                                             start: seg.window.lowerBound,
-                                             end: seg.window.upperBound,
+                                             start: span.lowerBound,
+                                             end: span.upperBound,
                                              text: text, confirmed: true, overlapped: hit,
                                              isRemote: true, asrConf: seg.conf)]
                 }
