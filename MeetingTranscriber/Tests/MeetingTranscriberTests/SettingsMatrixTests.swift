@@ -227,6 +227,56 @@ final class SettingsMatrixTests: XCTestCase {
                       "read as prose, not as a comma-separated dump")
     }
 
+    /// The pure overlap rule and the recorder's own property must agree, engine
+    /// by engine.
+    ///
+    /// `ModelLoader.marksItsOwnOverlap` exists because a Settings tab cannot see
+    /// the recorder's per-session `*Active` flags — and the moment there are two
+    /// expressions of one fact, they drift. That is not hypothetical here: the
+    /// Detect overlap tab spent from the NeMo release until the 2026-08-13 audit
+    /// telling users only "MOSS and spectral" were affected while the recorder
+    /// had four engines in that set.
+    @MainActor
+    func testTheOverlapRuleAgreesWithTheRecorder() {
+        for engine in ModelCatalog.diarizationEngines {
+            let value = ModelCatalog.diarizationEngineValue(engine)
+            let r = AudioRecorder()
+            r.mossDiarizationActive = value == ModelLoader.mossEngineID
+            r.spectralDiarizationActive = value == ModelLoader.spectralEngineID
+            r.nemoDiarizationActive = value == ModelLoader.nemoEngineID
+            r.camPlusDiarizationActive = value == ModelLoader.camPlusEngineID
+            r.diarizenDiarizationActive = value == ModelLoader.diarizenEngineID
+
+            XCTAssertEqual(r.usesDetectedRegionsForRepair,
+                           !ModelLoader.marksItsOwnOverlap(diarEngine: value),
+                           "\(value): the tab's rule and the recorder's disagree — "
+                           + "one of them is lying to somebody")
+        }
+    }
+
+    /// …and the sentence built from it names every one of them.
+    func testTheDetectorNoteNamesEveryEngineThatCannotMarkOverlap() {
+        let sentence = ModelCatalog.diarizationEnginesWithoutOwnOverlap
+        let expected = ModelCatalog.diarizationEngines
+            .map { ModelCatalog.diarizationEngineValue($0) }
+            .filter { !ModelLoader.marksItsOwnOverlap(diarEngine: $0) }
+
+        XCTAssertEqual(expected.count, 4,
+                       "four engines cannot mark their own overlap today")
+        for value in expected {
+            let name = ModelCatalog.diarizationEngineShortName(value) ?? "?"
+            XCTAssertTrue(sentence.contains(name),
+                          "the detector note omits \(name): \"\(sentence)\"")
+        }
+        // The two that DO mark it must stay out, or the note would send users to
+        // a detector that has nothing to add for them.
+        for value in [ModelLoader.pyannoteEngineID, ModelLoader.diarizenEngineID] {
+            let name = ModelCatalog.diarizationEngineShortName(value) ?? "?"
+            XCTAssertFalse(sentence.contains(name),
+                           "\(name) marks its own overlap and must not be listed")
+        }
+    }
+
     /// The built-in card must NOT claim word timestamps, because MOSS does not
     /// produce them: it returns `{start, end, speaker, text}` per SEGMENT and its
     /// own sidecar docstring says "No `conf` and no `words`, ever".

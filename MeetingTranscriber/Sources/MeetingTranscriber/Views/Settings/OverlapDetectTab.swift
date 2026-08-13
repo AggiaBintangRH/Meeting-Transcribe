@@ -72,11 +72,18 @@ struct OverlapDetectTab: View {
             if redundantHere {
                 Note(color: Theme.textDim,
                      icon: "checkmark.circle",
+                     // The second list is DERIVED. Typed out, it said "MOSS and
+                     // spectral" — two of the four engines that cannot mark
+                     // overlap — so users of NeMo and CAM++ were told a feature
+                     // they need did not concern them. Third sentence of this
+                     // shape to go stale in a week; see
+                     // `ModelLoader.marksItsOwnOverlap`.
                      text: "The pyannote engine already reports overlapping speech "
                          + "itself, so this detector has nothing to add while it is "
-                         + "selected. It matters for MOSS and spectral, which assign "
-                         + "exactly one speaker per instant and cannot mark overlap "
-                         + "at all.")
+                         + "selected. It matters for "
+                         + ModelCatalog.diarizationEnginesWithoutOwnOverlap
+                         + ", which assign exactly one speaker per instant and "
+                         + "cannot mark overlap at all.")
             } else if !diarOn {
                 Note(color: Theme.amber, icon: "info.circle",
                      text: "Speaker diarization is switched off, so there are no rows "

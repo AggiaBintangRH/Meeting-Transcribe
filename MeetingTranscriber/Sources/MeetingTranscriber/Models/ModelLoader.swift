@@ -611,6 +611,25 @@ final class ModelLoader: ObservableObject {
     /// to exactly that many when one is sent — measured, pinning `Overlap123` to
     /// 2 returns 2. An engine that would ACT on a count belongs in this set
     /// whether or not our two short fixtures happen to need it.
+    /// Does this engine report overlapping speech in its OWN turns?
+    ///
+    /// Two do. **pyannote** has always done it, and **DiariZen**'s powerset
+    /// Conformer head predicts two-speaker frames directly (11 classes = 1
+    /// silence + 4 single-speaker + 6 PAIRS) — measured, 11 intersecting pairs
+    /// over 13.30 s on `recordings/Overlap123.wav`. The other four assign
+    /// exactly one speaker per instant, so their turns can never intersect and
+    /// `overlapRegions()` is empty under them however the audio sounds.
+    ///
+    /// THE COMPLEMENT OF `AudioRecorder.usesDetectedRegionsForRepair`, and
+    /// `testTheOverlapRuleAgreesWithTheRecorder` sweeps every engine to keep the
+    /// two from drifting. It exists as a pure function because the recorder's
+    /// version is keyed on per-session `*Active` flags, which a Settings tab has
+    /// no access to — and the tab had been telling users only TWO engines were
+    /// affected since NeMo landed, then CAM++ made it two of four.
+    nonisolated static func marksItsOwnOverlap(diarEngine: String) -> Bool {
+        diarEngine == pyannoteEngineID || diarEngine == diarizenEngineID
+    }
+
     nonisolated static func honoursSpeakerCount(diarEngine: String) -> Bool {
         diarEngine == pyannoteEngineID || diarEngine == spectralEngineID
             || diarEngine == nemoEngineID || diarEngine == camPlusEngineID

@@ -189,9 +189,17 @@ struct StatusChipsView: View {
                   + "Settings → Models → Diarization."
         }
         return numSpeakers == 0
+            // NAMES ONLY THE EXCEPTION, and that is deliberate. This used to end
+            // "pyannote and NeMo count correctly on their own" — a list that had
+            // gone stale the moment CAM++ landed, since it also honours the count
+            // and measured correct on both known-answer files. Naming the one
+            // engine a number DEMONSTRABLY helps says the same thing and cannot
+            // go stale as engines are added: a seventh engine is covered by
+            // "every other engine" without anyone editing this line.
             ? "Auto — the engine decides. Worth setting a number for the spectral "
               + "engine, which has been measured counting 13 speakers on a 3-person "
-              + "recording; pyannote and NeMo count correctly on their own."
+              + "recording; every other engine counted correctly on its own in "
+              + "testing."
             // NAMES THE ROOM, not "the recording". With a Remote channel there are
             // two recordings, and this number describes only the one you can see —
             // `AudioRecorder.remoteNumSpeakers` keeps the far end automatic, so

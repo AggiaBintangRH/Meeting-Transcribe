@@ -268,14 +268,33 @@ enum ModelCatalog {
         diarizationEngineNames(forChunkedModel: "")
     }
 
-    static func diarizationEngineNames(forChunkedModel chunkedID: String) -> String {
-        let names = diarizationEngines
-            .map { diarizationEngineValue($0) }
-            .filter { ModelLoader.diarizationEngineIsSelectable($0, chunkedID: chunkedID) }
-            .compactMap { diarizationEngineShortName($0) }
+    /// The engines that CANNOT mark overlap themselves, written for a sentence —
+    /// the ones the separate detector exists for.
+    ///
+    /// Derived for the same reason the list above is: the Detect overlap tab said
+    /// "MOSS and spectral" while `ModelLoader.marksItsOwnOverlap` put FOUR engines
+    /// in that set, so users of NeMo and CAM++ were told a feature they needed did
+    /// not concern them. Third time this shape of sentence has gone stale in a
+    /// week; none of them will again.
+    static var diarizationEnginesWithoutOwnOverlap: String {
+        prose(diarizationEngines
+                .map { diarizationEngineValue($0) }
+                .filter { !ModelLoader.marksItsOwnOverlap(diarEngine: $0) }
+                .compactMap { diarizationEngineShortName($0) })
+    }
+
+    /// "a", "a or b", "a, b or c" — one place, so every derived list reads alike.
+    private static func prose(_ names: [String]) -> String {
         guard let last = names.last else { return "" }
         guard names.count > 1 else { return last }
         return names.dropLast().joined(separator: ", ") + " or " + last
+    }
+
+    static func diarizationEngineNames(forChunkedModel chunkedID: String) -> String {
+        prose(diarizationEngines
+                .map { diarizationEngineValue($0) }
+                .filter { ModelLoader.diarizationEngineIsSelectable($0, chunkedID: chunkedID) }
+                .compactMap { diarizationEngineShortName($0) })
     }
 
     /// The `diarization.engine` VALUE a given engine card selects.

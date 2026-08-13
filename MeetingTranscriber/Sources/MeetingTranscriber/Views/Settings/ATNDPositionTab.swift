@@ -58,7 +58,14 @@ struct ATNDPositionTab: View {
                 .frame(maxWidth: 480, alignment: .leading)
                 .disabled(!enabled)
                 VStack(alignment: .leading, spacing: 6) {
-                    sourceRow("Both", "Voice labels win wherever pyannote has a turn; talker direction fills only the stretches it left uncovered.")
+                    // "the voice diarizer", not "pyannote". The position layer
+                    // overlays whichever engine is selected — spectral, NeMo,
+                    // DiariZen and CAM++ all included; only MOSS switches it off
+                    // (`AudioRecorder+RowDerivation`). Naming pyannote here was an
+                    // internal name (`PositionSource.pyannote`) leaking into user
+                    // text, and told four engines' users the feature was not
+                    // theirs.
+                    sourceRow("Both", "Voice labels win wherever the voice diarizer has a turn; talker direction fills only the stretches it left uncovered.")
                     sourceRow("Position only", "Every row is labeled by talker direction. Voice diarization still runs underneath — its labels just aren't shown.")
                     sourceRow("Voice only", "Pure voice labels, no direction at all. Effectively the same as turning this feature off; it's here so you can A/B the two layers on one recording.")
                     sourceRow("Position timing", "Direction decides where each row starts and ends; voice decides the name. Rows keep voice speaker numbers wherever voice had a turn, so overlap repair and saved speaker profiles still apply to them — unlike \"Position only\".")
@@ -132,7 +139,7 @@ struct ATNDPositionTab: View {
 
             SettingBlock(title: "What to expect") {
                 VStack(alignment: .leading, spacing: 8) {
-                    expectRow("This needs the ATND array connected and listening. Whenever it's down — including if it drops mid-recording — labeling falls back to voice-based pyannote, so a single transcript can end up mixing position and voice labels.")
+                    expectRow("This needs the ATND array connected and listening. Whenever it's down — including if it drops mid-recording — labeling falls back to the voice diarizer you have selected, so a single transcript can end up mixing position and voice labels.")
                     expectRow("The array reports only one talker direction at a time, so genuinely simultaneous speech still can't be split into two texts — same hard limit as everywhere else.")
                     expectRow("Two people sitting at nearly the same bearing from the array can merge into one speaker. Raise the merge threshold only if you're over-splitting; lower it if distinct people are collapsing together.")
                     expectRow("Someone who gets up and changes seats will be treated as a new speaker from their new direction.")
