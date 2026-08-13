@@ -828,6 +828,21 @@ extension AudioRecorder {
             .flatMap { seg -> [SpeakerUtterance] in
                 let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return [] }
+                // UNCONFIRMED (realtime): one provisional row, not split and not
+                // attributed. The office branch reasons the same way — the text is
+                // not final, so splitting it would move words between speakers and
+                // then move them back when the chunked pass replaces it. What it
+                // DOES get is its own span, which is the whole point: that is what
+                // lets a live remote utterance sit between two office ones instead
+                // of piling into a caption below them.
+                guard seg.confirmed else {
+                    return [SpeakerUtterance(id: seg.id.uuidString,
+                                             speaker: remoteSpeakerLabel, speakerID: nil,
+                                             start: seg.window.lowerBound,
+                                             end: seg.window.upperBound,
+                                             text: text, confirmed: false,
+                                             isRemote: true)]
+                }
                 // PINNED: repair already decided whose words these are, from a
                 // separated track. The turns describe the MIXED audio and no longer
                 // describe this text, so re-splitting by them would hand one

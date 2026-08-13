@@ -446,7 +446,11 @@ extension AudioRecorder {
         let regions = remoteOverlapRegions() + remoteDetectedOverlapRegions
         let affected = remoteSegments.indices.filter { i in
             let s = remoteSegments[i]
-            guard !s.isSeparationDebug else { return false }
+            // Repair runs at Stop, over CONFIRMED text only. An unconfirmed
+            // realtime row is about to be replaced by the chunked pass anyway, and
+            // folding recovered words into it would splice them into text with no
+            // future.
+            guard s.confirmed, !s.isSeparationDebug else { return false }
             return min(s.window.upperBound, we) - max(s.window.lowerBound, ws) > 0
         }
 

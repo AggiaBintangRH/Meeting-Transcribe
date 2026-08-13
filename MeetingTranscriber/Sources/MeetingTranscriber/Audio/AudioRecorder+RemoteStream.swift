@@ -190,6 +190,13 @@ extension AudioRecorder {
                     // Remote rows carry the same ASR confidence office rows do:
                     // it is the SAME model over unmixed audio of one real stream,
                     // so the number means exactly what it means for the room.
+                    // The accurate text for this window replaces the realtime rows
+                    // it covers — the office chunk callback's
+                    // `segments.removeAll { !$0.confirmed }`, applied to the
+                    // collection that holds remote rows. Without it every remote
+                    // utterance would appear twice, once provisional and once
+                    // confirmed.
+                    self.remoteSegments.removeAll { !$0.confirmed }
                     let segment = RemoteSegment(text: trimmed, window: window,
                                                 conf: result.conf)
                     self.remoteSegments.append(segment)

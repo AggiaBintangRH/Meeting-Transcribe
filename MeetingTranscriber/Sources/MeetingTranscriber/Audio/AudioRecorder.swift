@@ -258,6 +258,11 @@ final class AudioRecorder: ObservableObject {
     // start–end range rather than a single point-in-time timestamp.
     private var lastRealtimeFinalElapsed: Double = 0
 
+    /// The Remote twin of `lastRealtimeFinalElapsed` — its own marker, never the
+    /// office one. The two lanes flush independently, so sharing a marker would
+    /// give one stream's utterance the other stream's start time.
+    var lastRemoteRealtimeFinalElapsed: Double = 0
+
     // Live chunked diarization — runs on its OWN interval, independent of ASR
     var chunkAudio: [Float] = []                       // 16k samples pending diarization
     /// Recording time at which the FIRST sample now in `chunkAudio` was captured.
@@ -1076,15 +1081,36 @@ final class AudioRecorder: ObservableObject {
             // wanted it. Detach so a previous meeting's closure can never fire.
             modelLoader.realtimeASR?.detachRemoteLane()
         }
-        remoteASR?.onTranscript = { [weak self] text, _ in
+        remoteASR?.onTranscript = { [weak self] text, isFinal in
             Task { @MainActor in
                 guard let self else { return }
-                // Partial and final are handled identically — see `RemoteCaption`
-                // for why a final is kept rather than cleared. After Stop the
-                // remote chunk pass owns the remaining audio, exactly as the
-                // office branch above reasons about its own trailing final.
+                // After Stop the remote chunk pass owns the remaining audio,
+                // exactly as the office branch above reasons about its own
+                // trailing final.
                 guard !self.stopped else { self.remoteCaption.commit(); return }
-                self.remoteCaption.update(to: text, at: self.recordingElapsed)
+                guard isFinal else {
+                    self.remoteCaption.update(to: text, at: self.recordingElapsed)
+                    return
+                }
+                // A FINAL becomes its own unconfirmed ROW, the office branch's
+                // shape. Until 2026-08-13 finals were treated exactly like
+                // partials and only ever grew the caption, so the far end's whole
+                // meeting accumulated into one card that could not interleave with
+                // the room — and at a 120 s chunk interval that card lived for two
+                // minutes at a time.
+                let end = self.recordingElapsed
+                let start = min(self.lastRemoteRealtimeFinalElapsed, end)
+                // Advanced on EVERY final, empty ones included: the sidecar's
+                // buffer resets on each flush, so the next utterance starts here
+                // whether or not this one had words.
+                self.lastRemoteRealtimeFinalElapsed = end
+                if !text.isEmpty {
+                    self.remoteSegments.append(RemoteSegment(text: text,
+                                                             window: start...max(end, start),
+                                                             confirmed: false))
+                    self.rebuildDisplayRows()
+                }
+                self.remoteCaption.commit()
             }
         }
 
@@ -1102,6 +1128,7 @@ final class AudioRecorder: ObservableObject {
         lastChunkBoundary = 0
         pendingChunkWindows = []
         lastRealtimeFinalElapsed = 0
+        lastRemoteRealtimeFinalElapsed = 0
         diarizing = false
         // Fresh overlap-repair state for this session. `overlapRepairProgress` and
         // `overlapRepairError` are display fields and went to the shared helper;

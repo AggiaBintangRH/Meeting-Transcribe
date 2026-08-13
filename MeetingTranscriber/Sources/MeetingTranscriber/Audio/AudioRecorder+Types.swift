@@ -57,6 +57,17 @@ extension AudioRecorder {
         var window: ClosedRange<Double>   // recording-time span (shared clock)
         var conf: Double? = nil           // chunked-ASR confidence (Whisper only)
 
+        /// False while this is REALTIME text waiting to be replaced by the chunked
+        /// pass — the office twin of `TranscriptSegment.confirmed`.
+        ///
+        /// Added 2026-08-13. Before it, a remote realtime final had nowhere to go
+        /// but the caption card, so every remote utterance piled into ONE growing
+        /// card while every office utterance became its own row placed by time:
+        /// *"row remote panjang banget ketika realtime"*. The cards render below
+        /// the row list, so the room also appeared to jump above the far end. One
+        /// asymmetry, both symptoms.
+        var confirmed = true
+
         /// Word times from the aligner, or nil until (and unless) they arrive.
         ///
         /// The office twin of these two fields lives on `TranscriptSegment`, and
