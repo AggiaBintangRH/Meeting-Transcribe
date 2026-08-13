@@ -29,22 +29,21 @@ struct TranscriptView: View {
                             rowView(row)
                         }
 
-                        if !recorder.partialTranscript.isEmpty {
-                            partialCard(label: recorder.partialSpeakerName ?? "SPEAKER UNKNOWN",
-                                        labelColor: Theme.speakerNameText,
-                                        text: recorder.partialTranscript)
-                        }
-
-                        // The Remote stream's own live caption, below the office
-                        // one (the room is the primary record). Amber is the
-                        // Remote capture role everywhere in the app, so the two
-                        // provisional cards can never be mistaken for each other.
-                        // It disappears the moment its confirmed remote row lands.
-                        if !recorder.remoteCaption.text.isEmpty {
-                            partialCard(label: AudioRecorder.remoteSpeakerLabel,
-                                        labelColor: Theme.remoteRole,
-                                        text: recorder.remoteCaption.text,
-                                        accent: Theme.remoteRoleBorder)
+                        // The two live captions, ordered by WHO STARTED SPEAKING
+                        // FIRST rather than office-always-on-top (owner,
+                        // 2026-08-13: the far end kept appearing under a room
+                        // caption the room had not produced). Amber is the Remote
+                        // capture role everywhere in the app, so the two cards can
+                        // never be mistaken for each other whichever order they
+                        // take. Each disappears the moment its confirmed row lands.
+                        if AudioRecorder.remoteCaptionComesFirst(
+                            officeStartedAt: recorder.partialStartedAt,
+                            remoteStartedAt: recorder.remoteCaption.startedAt) {
+                            remoteCaptionCard
+                            officeCaptionCard
+                        } else {
+                            officeCaptionCard
+                            remoteCaptionCard
                         }
 
                         if recorder.chunkedBusy {
@@ -210,6 +209,28 @@ struct TranscriptView: View {
     }
 
     /// A provisional (realtime) card: speaker label + italic, not-yet-confirmed
+    /// The office live caption, or nothing when there is none. Its own property so
+    /// the ordering above reads as two names rather than two duplicated blocks —
+    /// the pair is emitted in both orders, and a copy-paste there would be a card
+    /// that renders differently depending on who spoke first.
+    @ViewBuilder private var officeCaptionCard: some View {
+        if !recorder.partialTranscript.isEmpty {
+            partialCard(label: recorder.partialSpeakerName ?? "SPEAKER UNKNOWN",
+                        labelColor: Theme.speakerNameText,
+                        text: recorder.partialTranscript)
+        }
+    }
+
+    /// The Remote live caption, or nothing when there is none.
+    @ViewBuilder private var remoteCaptionCard: some View {
+        if !recorder.remoteCaption.text.isEmpty {
+            partialCard(label: AudioRecorder.remoteSpeakerLabel,
+                        labelColor: Theme.remoteRole,
+                        text: recorder.remoteCaption.text,
+                        accent: Theme.remoteRoleBorder)
+        }
+    }
+
     /// text. Shared by the Office and Remote captions so the two stay visually
     /// identical apart from the Remote accent (label colour + card spine).
     private func partialCard(label: String, labelColor: Color, text: String,

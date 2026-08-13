@@ -54,8 +54,8 @@ final class DualStreamRealtimeTests: XCTestCase {
 
     func testPartialsReplaceEachOther() {
         var caption = AudioRecorder.RemoteCaption()
-        caption.update(to: "so the")
-        caption.update(to: "so the budget")
+        caption.update(to: "so the", at: 0)
+        caption.update(to: "so the budget", at: 0)
         XCTAssertEqual(caption.text, "so the budget")
     }
 
@@ -65,7 +65,7 @@ final class DualStreamRealtimeTests: XCTestCase {
     /// the caption for the seconds the confirmed remote chunk takes to return.
     func testFinalTextStaysOnScreenUntilTheChunkCommits() {
         var caption = AudioRecorder.RemoteCaption()
-        caption.update(to: "so the budget is approved")   // the flush's final
+        caption.update(to: "so the budget is approved", at: 0)   // the flush's final
         XCTAssertEqual(caption.text, "so the budget is approved")
         caption.commit()                                   // the confirmed row landed
         XCTAssertTrue(caption.text.isEmpty)
@@ -78,7 +78,7 @@ final class DualStreamRealtimeTests: XCTestCase {
     func testCommitClearsRegardlessOfOutcome() {
         for text in ["some remote speech", "", "   "] {
             var caption = AudioRecorder.RemoteCaption()
-            caption.update(to: text)
+            caption.update(to: text, at: 0)
             caption.commit()
             XCTAssertTrue(caption.text.isEmpty)
         }
@@ -86,7 +86,7 @@ final class DualStreamRealtimeTests: XCTestCase {
 
     func testCommitIsIdempotent() {
         var caption = AudioRecorder.RemoteCaption()
-        caption.update(to: "hello")
+        caption.update(to: "hello", at: 0)
         caption.commit()
         caption.commit()
         XCTAssertTrue(caption.text.isEmpty)
@@ -96,15 +96,15 @@ final class DualStreamRealtimeTests: XCTestCase {
     /// card behind — the view draws the card only for non-empty text.
     func testWhitespaceOnlyResultsRenderNothing() {
         var caption = AudioRecorder.RemoteCaption()
-        caption.update(to: "hello")
-        caption.update(to: "   \n ")
+        caption.update(to: "hello", at: 0)
+        caption.update(to: "   \n ", at: 0)
         XCTAssertTrue(caption.text.isEmpty)
     }
 
     /// Trimming is applied on the way in, so the view never has to.
     func testTextIsTrimmed() {
         var caption = AudioRecorder.RemoteCaption()
-        caption.update(to: "  hello from the call\n")
+        caption.update(to: "  hello from the call\n", at: 0)
         XCTAssertEqual(caption.text, "hello from the call")
     }
 
@@ -114,9 +114,9 @@ final class DualStreamRealtimeTests: XCTestCase {
         var a = AudioRecorder.RemoteCaption()
         var b = AudioRecorder.RemoteCaption()
         XCTAssertEqual(a, b)
-        a.update(to: "x")
+        a.update(to: "x", at: 0)
         XCTAssertNotEqual(a, b)
-        b.update(to: "x")
+        b.update(to: "x", at: 0)
         XCTAssertEqual(a, b)
     }
 }

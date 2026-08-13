@@ -118,6 +118,11 @@ final class AudioRecorder: ObservableObject {
     @Published var segments: [TranscriptSegment] = []
     @Published var displayRows: [SpeakerUtterance] = []
     @Published var partialTranscript = ""
+
+    /// The office twin of `RemoteCaption.startedAt` — when the current office
+    /// provisional utterance began. Written ONLY by `setPartialTranscript`, so the
+    /// text and its start time cannot disagree about which utterance they describe.
+    @Published private(set) var partialStartedAt: Double?
     /// Live caption for the Remote stream. Stays empty for a single-stream
     /// session, so the view draws nothing extra.
     @Published var remoteCaption = RemoteCaption()
@@ -136,6 +141,36 @@ final class AudioRecorder: ObservableObject {
     /// since the ATND status chip was changed to show live beam data
     /// (StatusChipsView, 2026-07-17). Kept as the diarization result count.
     @Published var speakerCount: Int?
+    /// Set the office provisional caption and, with it, when this utterance began.
+    /// EVERY assignment goes through here — a bare `partialTranscript = …` would
+    /// leave a start time describing a different utterance, and the card would sort
+    /// against the far end using a stale number.
+    func setPartialTranscript(_ text: String) {
+        if text.isEmpty { partialStartedAt = nil }
+        else if partialTranscript.isEmpty { partialStartedAt = recordingElapsed }
+        partialTranscript = text
+    }
+
+    /// Which provisional card is drawn FIRST: whoever started speaking first, so
+    /// the two cards read down the page in the same time order the rows above them
+    /// do. Pure, so the rule is testable without a view or a session.
+    ///
+    /// It used to be "office always, remote below", justified as *the room is the
+    /// primary record*. That is a fine rule for a TIE and a wrong one for
+    /// everything else — the owner watched the far end speak into a card pinned
+    /// under a room caption the room had not produced.
+    ///
+    /// Absent start times sort LAST, which is the safe direction: a card with no
+    /// timing claim never displaces one that has one.
+    nonisolated static func remoteCaptionComesFirst(officeStartedAt: Double?,
+                                                    remoteStartedAt: Double?) -> Bool {
+        guard let remote = remoteStartedAt else { return false }
+        guard let office = officeStartedAt else { return true }
+        // Strictly earlier: an exact tie keeps Office first, which is the one case
+        // the original rule got right.
+        return remote < office
+    }
+
     @Published var diarizationError: String?
 
     /// A speaker count that looks like clustering fragmentation — see
@@ -734,7 +769,7 @@ final class AudioRecorder: ObservableObject {
         // The transcript itself.
         segments = []
         displayRows = []
-        partialTranscript = ""
+        setPartialTranscript("")
         partialSpeakerName = nil
         remoteCaption = RemoteCaption()
 
@@ -985,7 +1020,7 @@ final class AudioRecorder: ObservableObject {
                     // (fired by the flush in stop()) can't land after the last
                     // chunk's cleanup and survive as an orphan "SPEAKER UNKNOWN"
                     // row next to the confirmed, speaker-split transcript.
-                    guard !self.stopped else { self.partialTranscript = ""; self.partialSpeakerName = nil; return }
+                    guard !self.stopped else { self.setPartialTranscript(""); self.partialSpeakerName = nil; return }
                     let end = self.recordingElapsed
                     let start = min(self.lastRealtimeFinalElapsed, end)
                     // Advance the marker on every final (incl. empty ones), since
@@ -995,10 +1030,10 @@ final class AudioRecorder: ObservableObject {
                         self.segments.append(TranscriptSegment(text: text, confirmed: false, window: start...end))
                         self.rebuildDisplayRows()
                     }
-                    self.partialTranscript = ""
+                    self.setPartialTranscript("")
                     self.partialSpeakerName = nil
                 } else {
-                    self.partialTranscript = text
+                    self.setPartialTranscript(text)
                     // Trailing 1s window ≈ the beam active right now (after smoothing).
                     // Short so the live-partial label flips quickly on a talker switch.
                     // In `pyannote` source mode the position layer is not displayed
@@ -1040,7 +1075,7 @@ final class AudioRecorder: ObservableObject {
                 // remote chunk pass owns the remaining audio, exactly as the
                 // office branch above reasons about its own trailing final.
                 guard !self.stopped else { self.remoteCaption.commit(); return }
-                self.remoteCaption.update(to: text)
+                self.remoteCaption.update(to: text, at: self.recordingElapsed)
             }
         }
 

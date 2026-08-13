@@ -106,16 +106,31 @@ extension AudioRecorder {
         /// What the view draws; empty means no caption card at all.
         private(set) var text = ""
 
+        /// Recording time at which the CURRENT provisional utterance began —
+        /// the instant this caption went from empty to non-empty, not the last
+        /// keystroke of it. That is what decides whether this card is drawn above
+        /// or below the office one (owner, 2026-08-13: the two cards used to be
+        /// pinned office-then-remote, so the far end appeared under the room even
+        /// when the room had not spoken).
+        ///
+        /// Kept in RECORDING time rather than `Date`, so the rule is the same
+        /// clock as every row on screen and is testable without a wall clock.
+        private(set) var startedAt: Double?
+
         /// A realtime result arrived (partial or final — both are just "the best
         /// text so far" for audio no confirmed row covers yet).
-        mutating func update(to incoming: String) {
-            text = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        mutating func update(to incoming: String, at elapsed: Double) {
+            let trimmed = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { startedAt = nil }
+            else if text.isEmpty { startedAt = elapsed }
+            text = trimmed
         }
 
         /// This caption's audio is now represented (or deliberately not) by a
         /// confirmed remote row — drop it so nothing stale lingers underneath.
         mutating func commit() {
             text = ""
+            startedAt = nil
         }
     }
 
