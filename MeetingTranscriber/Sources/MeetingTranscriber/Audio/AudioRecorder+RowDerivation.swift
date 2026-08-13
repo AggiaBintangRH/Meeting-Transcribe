@@ -376,7 +376,13 @@ extension AudioRecorder {
         let totalChars = max(1, sentences.reduce(0) { $0 + $1.count })
         let span = max(0, window.upperBound - window.lowerBound)
 
-        struct Piece { var id: Int; var name: String; var start: Double; var end: Double; var text: String }
+        // `rStart`/`rEnd` are the bounds of the TURN this piece was attributed to.
+        // Carried because the row's final span is clamped to them — see the note
+        // where the rows are built.
+        struct Piece {
+            var id: Int; var name: String; var start: Double; var end: Double; var text: String
+            var rStart: Double; var rEnd: Double
+        }
         var pieces: [Piece] = []
         var charsSoFar = 0
         for sentence in sentences {
@@ -394,7 +400,8 @@ extension AudioRecorder {
                 let mid = (sStart + sEnd) / 2
                 chosen = ranges.min { abs(($0.start + $0.end) / 2 - mid) < abs(($1.start + $1.end) / 2 - mid) } ?? ranges[0]
             }
-            pieces.append(Piece(id: chosen.id, name: chosen.name, start: sStart, end: sEnd, text: sentence))
+            pieces.append(Piece(id: chosen.id, name: chosen.name, start: sStart, end: sEnd,
+                                text: sentence, rStart: chosen.start, rEnd: chosen.end))
         }
 
         var merged: [Piece] = []
@@ -402,6 +409,11 @@ extension AudioRecorder {
             if var last = merged.last, last.id == p.id {
                 last.end = p.end
                 last.text += " " + p.text
+                // A merged run can span more than one turn of the same speaker
+                // (`speakerRanges` keeps them separate when the gap is >= 1 s), so
+                // the clamp has to widen to cover every turn it actually holds.
+                last.rStart = Swift.min(last.rStart, p.rStart)
+                last.rEnd = Swift.max(last.rEnd, p.rEnd)
                 merged[merged.count - 1] = last
             } else {
                 merged.append(p)
@@ -409,14 +421,37 @@ extension AudioRecorder {
         }
 
         return merged.enumerated().map { i, p in
+            // CLAMP THE ROW TO THE TURN IT WAS ATTRIBUTED TO (2026-08-13).
+            //
+            // `p.start`/`p.end` are character-proportional: the sentence's share of
+            // the text, mapped linearly onto the chunk window. That orders sentences
+            // WITHIN a chunk and says nothing about when anyone spoke — it assumes
+            // speech fills the window uniformly, which it never does.
+            //
+            // Harmless while there was one stream: the estimate is monotonic, so
+            // rows stayed in text order whatever the numbers were. **Dual-stream
+            // made it decide something.** `mergeRowsByStartTime` interleaves the two
+            // streams by exactly these numbers, and with one 63 s window per stream
+            // both streams' text spread evenly across the SAME 0–63 s — so the room
+            // and the far end were ordered by how much text each produced. The owner
+            // spoke office → remote → office → remote and got both office rows, then
+            // both remote rows.
+            //
+            // The turn is the real information and it is already chosen above, so the
+            // row is bounded by it. Intersection where there is one; the turn's own
+            // span where the estimate has drifted clear of it entirely — never the
+            // estimate alone, which is the case that produced the bug.
+            let s = Swift.max(p.start, p.rStart)
+            let e = Swift.min(p.end, p.rEnd)
+            let (rowStart, rowEnd) = s < e ? (s, e) : (p.rStart, p.rEnd)
             // Flag only if this row's time genuinely sits over a simultaneous-
             // speech region (two different speakers active at once).
-            let overlapped = regions.contains { max($0.start, p.start) < min($0.end, p.end) }
+            let overlapped = regions.contains { max($0.start, rowStart) < min($0.end, rowEnd) }
             // Every row a chunk splits into carries that CHUNK's confidence: the
             // model scored the chunk as a whole and reports nothing finer, so
             // splitting the text does not split the evidence.
             return SpeakerUtterance(id: "\(segID)-\(i)", speaker: p.name, speakerID: p.id,
-                                    start: p.start, end: p.end, text: p.text,
+                                    start: rowStart, end: rowEnd, text: p.text,
                                     confirmed: confirmed, overlapped: overlapped,
                                     asrConf: asrConf)
         }
