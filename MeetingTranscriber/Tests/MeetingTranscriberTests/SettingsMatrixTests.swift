@@ -187,6 +187,46 @@ final class SettingsMatrixTests: XCTestCase {
         }
     }
 
+    /// A SEVENTH engine must break something.
+    ///
+    /// The MOSS notice's engine list went stale twice — it missed DiariZen until
+    /// 2026-08-10 and CAM++ until the 2026-08-13 audit — each time telling the
+    /// user they had fewer choices than they did, while the card list beside it
+    /// read the catalog and was right both times. The list is derived now, and
+    /// this is what stops the derivation quietly losing an engine instead:
+    /// `diarizationEngineShortName` returns nil for anything it does not know,
+    /// so a new engine drops out of the sentence silently unless something
+    /// asserts otherwise. This does.
+    func testEveryDiarizationEngineHasAShortName() {
+        for engine in ModelCatalog.diarizationEngines {
+            let value = ModelCatalog.diarizationEngineValue(engine)
+            XCTAssertNotNil(ModelCatalog.diarizationEngineShortName(value),
+                            "\(engine.name) has no short name, so it would vanish "
+                            + "from every sentence that lists the engines — the "
+                            + "exact defect this replaced")
+        }
+    }
+
+    /// …and the sentence really names them all, in the form a reader expects.
+    func testTheMossNoticeListsEveryNonMossEngine() {
+        let sentence = ModelCatalog.diarizationEnginesWithoutMoss
+        let expected = ModelCatalog.diarizationEngines
+            .map { ModelCatalog.diarizationEngineValue($0) }
+            .filter { $0 != ModelLoader.mossEngineID }
+
+        XCTAssertEqual(expected.count, 5, "five non-MOSS engines today — if this "
+                       + "changes, the count below is what proves the sentence kept up")
+        for value in expected {
+            let name = ModelCatalog.diarizationEngineShortName(value) ?? "?"
+            XCTAssertTrue(sentence.contains(name),
+                          "the MOSS notice omits \(name): \"\(sentence)\"")
+        }
+        XCTAssertFalse(sentence.contains("MOSS"),
+                       "…and must not offer MOSS as the way out of MOSS")
+        XCTAssertTrue(sentence.contains(" or "),
+                      "read as prose, not as a comma-separated dump")
+    }
+
     /// The built-in card must NOT claim word timestamps, because MOSS does not
     /// produce them: it returns `{start, end, speaker, text}` per SEGMENT and its
     /// own sidecar docstring says "No `conf` and no `words`, ever".

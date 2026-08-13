@@ -1015,6 +1015,37 @@ else
   rm -rf "$RES/models/speaker-profiles"
 fi
 
+# ---------------------------------------------------------------------------
+# B4 — MODEL-LICENSES.txt
+#
+# The app REDISTRIBUTES fourteen third-party checkpoints, and every licence they
+# carry — Apache 2.0, MIT, CC BY 4.0, OpenMDW-1.1 — obliges the distributor to
+# pass the licence and its attribution along. Found by the 2026-08-13 audit: the
+# vendored SOURCE trees each ship their LICENSE (campplus, spectral, diarizen),
+# and not one checkpoint did.
+#
+# DERIVED FROM THE CARDS ON DISK, never from a list kept here. A hand-written
+# table is a copy of the truth, and this file has already watched one drift twice
+# (the diarization-engine sentence, stale for DiariZen and then CAM++). The
+# authority is each snapshot's own README front-matter — the same rule the
+# Granite language-count and DiariZen NC findings established: the card of the
+# checkpoint ON DISK beats the family's card and beats anyone's memory.
+#
+# The gate below FAILS THE BUILD on a checkpoint whose licence cannot be
+# established, because shipping weights whose terms nobody can name is the
+# failure this exists to prevent — and it is silent, which is worse.
+# ---------------------------------------------------------------------------
+if [[ "${MT_SKIP_MODELS:-0}" != "1" ]]; then
+  echo ""
+  echo "==> [B4] Writing MODEL-LICENSES.txt..."
+  "$ROOT/.venv/bin/python3" "$ROOT/scripts/tools/model-licenses.py" \
+      --models "$RES/models" --out "$RES/MODEL-LICENSES.txt" || {
+    echo "ERROR: could not establish a licence for every bundled checkpoint." >&2
+    echo "       Weights whose terms nobody can name must not ship." >&2
+    exit 1
+  }
+fi
+
 # ===========================================================================
 # B5 — re-sign (B1 signature is now stale after adding python/scripts/models)
 # ===========================================================================

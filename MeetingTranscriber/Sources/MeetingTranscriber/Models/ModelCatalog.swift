@@ -228,6 +228,56 @@ enum ModelCatalog {
                                                   nemoDiarization, diarizenDiarization,
                                                   camPlusDiarization, mossDiarization]
 
+    /// The short name an engine goes by in prose — "NeMo", not "NVIDIA NeMo
+    /// clustering diarization". Card names are too long for a sentence.
+    ///
+    /// Returns nil for an unknown value ON PURPOSE, so
+    /// `testEveryDiarizationEngineHasAShortName` fails the moment a seventh
+    /// engine joins `diarizationEngines`. A `default:` here would hand the new
+    /// engine somebody else's name — the fall-through this file already warns
+    /// about for `scriptName` and that the rail hit for real with DiariZen.
+    static func diarizationEngineShortName(_ engineValue: String) -> String? {
+        switch engineValue {
+        case ModelLoader.pyannoteEngineID: return "pyannote"
+        case ModelLoader.spectralEngineID: return "spectral"
+        case ModelLoader.nemoEngineID:     return "NeMo"
+        case ModelLoader.diarizenEngineID: return "DiariZen"
+        case ModelLoader.camPlusEngineID:  return "CAM++"
+        case ModelLoader.mossEngineID:     return "MOSS"
+        default:                           return nil
+        }
+    }
+
+    /// The engines this chunked model offers, written out for a sentence:
+    /// "pyannote, spectral, NeMo, DiariZen or CAM++".
+    ///
+    /// WHY THIS IS DERIVED AND NOT TYPED OUT. The sentence it feeds has now gone
+    /// stale TWICE — it missed DiariZen until 2026-08-10 and then missed CAM++
+    /// until the 2026-08-13 audit — each time telling the user they had fewer
+    /// options than they did. Both times the list beside it, which reads this
+    /// same filter, was already correct. A hand-written list next to a derived
+    /// one is a copy that only ever drifts one way.
+    /// The engines available once the chunked model is NOT MOSS — the list the
+    /// MOSS notice offers as the way out.
+    ///
+    /// A named entry point rather than the caller passing some arbitrary
+    /// non-MOSS id: `diarizationEngineIsSelectable` branches only on "is this
+    /// MOSS", so any other id answers the same, and a literal like `"qwen3"` at
+    /// the call site would read as though that particular model mattered.
+    static var diarizationEnginesWithoutMoss: String {
+        diarizationEngineNames(forChunkedModel: "")
+    }
+
+    static func diarizationEngineNames(forChunkedModel chunkedID: String) -> String {
+        let names = diarizationEngines
+            .map { diarizationEngineValue($0) }
+            .filter { ModelLoader.diarizationEngineIsSelectable($0, chunkedID: chunkedID) }
+            .compactMap { diarizationEngineShortName($0) }
+        guard let last = names.last else { return "" }
+        guard names.count > 1 else { return last }
+        return names.dropLast().joined(separator: ", ") + " or " + last
+    }
+
     /// The `diarization.engine` VALUE a given engine card selects.
     ///
     /// The catalog id and the setting value are deliberately different strings

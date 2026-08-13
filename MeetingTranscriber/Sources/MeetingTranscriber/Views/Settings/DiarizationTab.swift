@@ -238,10 +238,14 @@ struct DiarizationTab: View {
             // above, and it is the half of the MOSS⟺MOSS rule the user can see.
             // Without it the engine silently changes under them.
             if mossEngineDropped {
+                // The engine list is DERIVED, never typed out — it had gone stale
+                // twice (missing DiariZen, then CAM++), each time telling the user
+                // they had fewer options than they did, while the card list two
+                // blocks below read the same filter and was right both times.
                 Text(chunkedModel == "moss"
                      ? "MOSS transcribes and labels in one pass, so with MOSS as the chunked "
                        + "model it is also the diarizer. Pick a different chunked model to use "
-                       + "pyannote, spectral, NeMo or DiariZen."
+                       + ModelCatalog.diarizationEnginesWithoutMoss + "."
                      : "MOSS diarization is offered only when MOSS is also the chunked model. "
                        + "The engine was set back to pyannote.")
                     .font(.system(size: 11))
