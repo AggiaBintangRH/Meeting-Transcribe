@@ -198,6 +198,42 @@ final class FailurePanelTests: XCTestCase {
         XCTAssertTrue(r.remoteFinalDiarDone)
     }
 
+    // MARK: - Nothing may be written inside the .app
+
+    /// Every sidecar must be told to keep its caches OUT of the bundle.
+    ///
+    /// Found by the 2026-08-13 audit: `PYTHONDONTWRITEBYTECODE` governs `.pyc`
+    /// and nothing else, so numba — which compiles librosa, imported by three
+    /// shipped sidecars — wrote ~40 `.nbc`/`.nbi` files into the signed
+    /// `.venv-nemo` during one NeMo pass and `codesign --verify --deep --strict`
+    /// then failed, with ZERO new `.pyc` files to show for it.
+    ///
+    /// Asserted on the ENVIRONMENT rather than on any one service, because the
+    /// bug's whole shape was a writer nobody had thought of: a new sidecar gets
+    /// this for free, which a per-service check would not give it.
+    func testSidecarsAreToldToCacheOutsideTheBundle() {
+        let env = PythonRuntime.sidecarEnvironment()
+
+        guard let cache = env["NUMBA_CACHE_DIR"] else {
+            return XCTFail("NUMBA_CACHE_DIR is unset — numba defaults to writing "
+                           + "beside the module it compiled, which inside a signed "
+                           + ".app breaks the seal")
+        }
+        XCTAssertFalse(cache.contains(".app/"),
+                       "the numba cache must not point inside a bundle — that is "
+                       + "the hole this exists to close (got \(cache))")
+        XCTAssertTrue(cache.hasPrefix(PythonRuntime.dataDir.path),
+                      "and it belongs under Application Support with every other "
+                      + "mutable thing (got \(cache))")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cache),
+                      "created up front — numba failing to make it would silently "
+                      + "fall back to caching beside the module")
+
+        // The byte-code flag stays, and is NOT the guard: keeping both asserted
+        // here is what stops someone concluding one made the other redundant.
+        XCTAssertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
+    }
+
     // MARK: - The recording-error popup
 
     /// Start / during-recording errors reach a popup, and Close leaves the

@@ -285,6 +285,33 @@ final class ModelLoader: ObservableObject {
         alignEnabled && chunkedEnabled && chunkedID != "moss"
     }
 
+    /// The aligner does not load AND its job is being done anyway.
+    ///
+    /// `wantsAligner` returning false has TWO causes and the rail must not treat
+    /// them alike (owner, 2026-08-12 — *"ini masih gak di atas aligner tabnya"*):
+    ///
+    ///   * **the chunked pass is off** — no text, no segments, no attribution.
+    ///     Nothing happens, so the tab is genuinely NOT USED;
+    ///   * **the model is MOSS** — the work HAPPENS, MOSS just does it itself, by
+    ///     emitting a separate timed segment per speaker instead of handing the
+    ///     app words to sort by time. Filing that under "NOT USED BY YOUR MODELS"
+    ///     tells the user the job is not being done, when it is.
+    ///
+    /// This is the Detect-overlap lesson applied a second time: DiariZen's own
+    /// detection was filed under NOT USED on 2026-08-10 and reverted the same
+    /// day, because a heading that says "nothing here applies" is wrong about a
+    /// feature that is working. The rail shows `built in` instead, exactly as it
+    /// does for diarization under MOSS (`included`) and for pyannote's own
+    /// overlap marking.
+    ///
+    /// ONE function, read by the rail's grouping, the rail's status and the tab —
+    /// three readers, so this is precisely where two half-rules living apart
+    /// would come to disagree.
+    nonisolated static func alignmentIsBuiltIn(chunkedID: String,
+                                               chunkedEnabled: Bool) -> Bool {
+        chunkedEnabled && chunkedID == "moss"
+    }
+
     /// Whether this session loads the CHUNKED ASR sidecar at all.
     ///
     /// THE MASTER SWITCH, owner-requested 2026-08-06, and it is not the same thing

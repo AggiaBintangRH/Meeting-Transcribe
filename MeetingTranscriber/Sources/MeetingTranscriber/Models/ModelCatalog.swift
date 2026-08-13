@@ -301,6 +301,40 @@ enum ModelCatalog {
     /// word instead of by estimated character position. Its OWN sidecar since
     /// 2026-07-29 (`AlignerService`), asked AFTER the chunk's text is already on
     /// screen — so alignment refines rows and never delays them.
+    /// MOSS needs no aligner, and the tab says so instead of showing a 1.2 GB
+    /// model it will not load (`ModelLoader.wantsAligner` has excluded MOSS since
+    /// the aligner became its own sidecar; only the UI never mentioned it).
+    ///
+    /// ⚠ **NOT a claim of word timestamps, and the wording is careful for a
+    /// reason.** MOSS returns `{start, end, speaker, text}` per SEGMENT and its
+    /// own sidecar docstring says *"No `conf` and no `words`, ever"*. What makes
+    /// the aligner redundant is not that MOSS times each word — it does not — but
+    /// that the aligner's PURPOSE is already served: word times exist to split one
+    /// chunk's text between speakers at the exact word, and MOSS emits a separate
+    /// timed segment per speaker in the first place, so there is nothing left to
+    /// split. Claiming word-level timing here would be the fabrication direction
+    /// this project ranks worst.
+    static let wordAlignerMoss = ModelInfo(
+        id: "aligner-moss",
+        name: "MOSS (built in)",
+        detail: "MOSS times and labels its own segments · nothing left for a word aligner to split",
+        badges: ["PyTorch MPS", "no extra cost", "part of transcription"],
+        hfRepo: "OpenMOSS-Team/MOSS-Transcribe-Diarize"
+    )
+
+    /// The aligner OFFERED for a given chunked model, and this is a BICONDITIONAL
+    /// like `overlapDetectors(forDiarEngine:)` and the MOSS⟺MOSS rule — one
+    /// function, because two half-rules living apart is how they come to disagree.
+    ///
+    /// It mirrors `ModelLoader.wantsAligner`'s `chunkedID != "moss"` term rather
+    /// than restating it: that function decides whether the 1.2 GB process LOADS,
+    /// this one decides what the tab SHOWS, and the tab claiming a model the
+    /// loader refuses to start is exactly the UI-lies-about-the-app defect the
+    /// 2026-08-10 pass was about.
+    static func wordAligners(forChunkedModel id: String) -> [ModelInfo] {
+        id == "moss" ? [wordAlignerMoss] : [wordAligner]
+    }
+
     static let wordAligner = ModelInfo(
         id: "aligner",
         name: "Qwen3-ForcedAligner 0.6B (bf16)",

@@ -108,6 +108,32 @@ enum PythonRuntime {
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["HF_HUB_OFFLINE"] = "1"
+        // 🔴 numba writes its JIT cache NEXT TO THE MODULE IT COMPILED, and
+        // `PYTHONDONTWRITEBYTECODE` does not stop it — that flag governs `.pyc`
+        // and numba has a cache of its own. librosa is compiled with numba and is
+        // imported by three shipped sidecars (nemo, dicow, mossformer2), so one
+        // NeMo pass wrote ~40 `.nbc`/`.nbi` files into
+        // `Contents/Resources/.venv-nemo/…/librosa/__pycache__/` — INSIDE the
+        // signed bundle. Measured on 2026-08-13:
+        //
+        //     codesign --verify --deep --strict
+        //       -> a sealed resource is missing or invalid
+        //
+        // …with ZERO new `.pyc` files, which is what proves the byte-code flag is
+        // not the guard here. The line above this block already promised that
+        // mutable data goes to Application Support "so nothing is written next to
+        // the read-only .app"; numba was simply never told.
+        //
+        // Set UNCONDITIONALLY, not only when bundled. Dev and the bundle diverging
+        // is the failure mode this project keeps paying for (the ffmpeg trap, five
+        // times), and a cache that lands in two different places depending on how
+        // the app was started is the same shape. It is also assigned rather than
+        // `setdefault`-style: an inherited `NUMBA_CACHE_DIR` pointing anywhere
+        // else would reopen exactly this hole.
+        let numbaCache = dataDir.appendingPathComponent("numba-cache")
+        try? FileManager.default.createDirectory(at: numbaCache,
+                                                 withIntermediateDirectories: true)
+        env["NUMBA_CACHE_DIR"] = numbaCache.path
         if isBundled {
             let hfHome = dataDir.appendingPathComponent("hf-home")
             env["HF_HOME"] = hfHome.path

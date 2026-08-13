@@ -155,7 +155,17 @@ struct SettingsView: View {
             case .mossSecondProcess: return ("MOSS", false)
             case .none:              return ("off", false)
             }
-        case .aligner:  return (alignEnabled ? "on" : "off", false)
+        case .aligner:
+            // MOSS attributes its own text, so the job is done and the rail says
+            // so — the `built in` the Detect overlap row uses for pyannote, and
+            // the twin of diarization's `included` two cases above. Reporting
+            // "on" here would promise a 1.2 GB model that never loads; "off"
+            // would deny work that is happening.
+            if ModelLoader.alignmentIsBuiltIn(chunkedID: chunkedModel,
+                                              chunkedEnabled: chunkedEnabled) {
+                return ("built in", true)
+            }
+            return (alignEnabled ? "on" : "off", false)
         case .overlap:  return (repairEnabled ? "on" : "off", false)
         case .overlapDetect:
             // pyannote marks overlap itself, so the detector is redundant there —
@@ -283,8 +293,16 @@ struct SettingsView: View {
         // are no segments to split into words, whatever the aligner's own toggle
         // says. That is an inapplicability, not a preference, so it belongs here
         // rather than in `switchedOffModelTabs`.
+        //
+        // …but NOT when MOSS is doing the same job itself. `wantsAligner` is
+        // false for both reasons and they are not alike: with no chunked pass
+        // nothing happens, while under MOSS the attribution HAPPENS — MOSS emits
+        // a timed segment per speaker rather than words for the app to sort. The
+        // DiariZen precedent below is the same call, made the same way.
         if !ModelLoader.wantsAligner(alignEnabled: true, chunkedID: chunkedModel,
-                                     chunkedEnabled: chunkedEnabled) {
+                                     chunkedEnabled: chunkedEnabled),
+           !ModelLoader.alignmentIsBuiltIn(chunkedID: chunkedModel,
+                                           chunkedEnabled: chunkedEnabled) {
             out.insert(.aligner)
         }
         // Asked with repair switched ON, so the question is "could this ever
@@ -518,7 +536,23 @@ struct SettingsView: View {
     /// Sections with sub-tabs show the active sub-tab's subtitle.
     private var headerSubtitle: String {
         switch section {
-        case .models: return modelTab.subtitle
+        case .models:
+            // The Aligner's own subtitle promises WORD-exact attribution, which
+            // is what the Qwen3 aligner delivers and what MOSS does not: MOSS
+            // reports `{start, end, speaker, text}` per SEGMENT and no word times
+            // at all. Left alone, the header contradicted the card two lines
+            // below it, which says there is nothing for a word aligner to split.
+            //
+            // Overridden HERE rather than by making `subtitle` take arguments:
+            // it is a plain property on the enum, read by three sections, and
+            // this is the one case in the app where the header depends on
+            // another tab's model.
+            if modelTab == .aligner,
+               ModelLoader.alignmentIsBuiltIn(chunkedID: chunkedModel,
+                                              chunkedEnabled: chunkedEnabled) {
+                return "Speaker attribution — done by the transcription model itself"
+            }
+            return modelTab.subtitle
         case .atnd:   return atndTab.subtitle
         default:      return section.subtitle
         }

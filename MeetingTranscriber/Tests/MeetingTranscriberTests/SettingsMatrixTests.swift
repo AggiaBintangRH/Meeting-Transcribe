@@ -105,6 +105,119 @@ final class SettingsMatrixTests: XCTestCase {
         }
     }
 
+    /// The Aligner TAB must name the model the loader will actually run.
+    ///
+    /// This is the load-bearing half of the 2026-08-12 change: the tab showed a
+    /// 1.2 GB Qwen3 card under MOSS, for a process `wantsAligner` has refused to
+    /// start since the aligner became its own sidecar. Nothing failed, nothing
+    /// was empty — the UI simply described a session that was not happening.
+    ///
+    /// Swept rather than spot-checked, so the two rules cannot drift apart for
+    /// some future chunked model: wherever the loader refuses the aligner BECAUSE
+    /// OF THE MODEL, the tab must offer the built-in card, and wherever it agrees
+    /// to load it the tab must offer Qwen3.
+    func testTheAlignerTabNamesWhicheverModelTheLoaderWillRun() {
+        for chunkedID in chunkedIDs {
+            let offered = ModelCatalog.wordAligners(forChunkedModel: chunkedID)
+            XCTAssertEqual(offered.count, 1, "one aligner per model — \(chunkedID)")
+            // Asked with everything else ON, so the only reason left to refuse is
+            // the chunked model itself — the same question the tab asks.
+            let loaderWillRun = ModelLoader.wantsAligner(alignEnabled: true,
+                                                         chunkedID: chunkedID,
+                                                         chunkedEnabled: true)
+            XCTAssertEqual(offered[0].id,
+                           loaderWillRun ? ModelCatalog.wordAligner.id
+                                         : ModelCatalog.wordAlignerMoss.id,
+                           "the tab and the loader disagree about \(chunkedID) — a card "
+                           + "for a model that never loads is the UI describing a "
+                           + "session that is not happening")
+        }
+    }
+
+    /// "The aligner does not load" has TWO causes and the rail must not treat
+    /// them alike (owner, 2026-08-12: *"ini masih gak di atas aligner tabnya"*).
+    ///
+    /// Under MOSS the attribution HAPPENS — MOSS emits a timed segment per
+    /// speaker — so filing the tab under "NOT USED BY YOUR MODELS" tells the user
+    /// the job is not being done when it is. With the chunked pass off, nothing
+    /// happens at all and the heading is correct. This is the same call the
+    /// DiariZen detector got on 2026-08-10, after the opposite was tried and
+    /// reverted the same day.
+    func testMossIsBuiltInWhileNoChunkedPassIsGenuinelyNotUsed() {
+        // MOSS: the loader still refuses the aligner…
+        XCTAssertFalse(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: "moss",
+                                                chunkedEnabled: true))
+        // …but the work is happening, so the rail must NOT dim the tab.
+        XCTAssertTrue(ModelLoader.alignmentIsBuiltIn(chunkedID: "moss",
+                                                     chunkedEnabled: true))
+
+        // No chunked pass: nothing happens, whatever the model is. BOTH cases,
+        // because a rule reading only the model id would call this one built-in
+        // and promise attribution that never runs.
+        for id in chunkedIDs {
+            XCTAssertFalse(ModelLoader.alignmentIsBuiltIn(chunkedID: id,
+                                                          chunkedEnabled: false),
+                           "with no chunked pass nothing is attributed — \(id)")
+        }
+
+        // And every OTHER model is neither: the aligner really loads there, so a
+        // "built in" badge would deny a 1.2 GB model that is running.
+        for id in chunkedIDs where id != "moss" {
+            XCTAssertFalse(ModelLoader.alignmentIsBuiltIn(chunkedID: id,
+                                                          chunkedEnabled: true), id)
+            XCTAssertTrue(ModelLoader.wantsAligner(alignEnabled: true, chunkedID: id,
+                                                   chunkedEnabled: true), id)
+        }
+    }
+
+    /// The two rules must PARTITION the reasons, with no configuration falling in
+    /// both. A tab cannot be simultaneously "not used" and "built in", and this is
+    /// the sweep that would catch a future model landing in both.
+    func testNoConfigurationIsBothBuiltInAndUnwanted() {
+        for id in chunkedIDs {
+            for chunkedOn in [true, false] {
+                let wanted = ModelLoader.wantsAligner(alignEnabled: true, chunkedID: id,
+                                                      chunkedEnabled: chunkedOn)
+                let builtIn = ModelLoader.alignmentIsBuiltIn(chunkedID: id,
+                                                             chunkedEnabled: chunkedOn)
+                XCTAssertFalse(wanted && builtIn,
+                               "\(id)/chunked=\(chunkedOn): the aligner cannot both "
+                               + "load and be redundant")
+            }
+        }
+    }
+
+    /// The built-in card must NOT claim word timestamps, because MOSS does not
+    /// produce them: it returns `{start, end, speaker, text}` per SEGMENT and its
+    /// own sidecar docstring says "No `conf` and no `words`, ever".
+    ///
+    /// What makes the aligner redundant is that its PURPOSE is already served —
+    /// word times exist to split one chunk between speakers at the exact word,
+    /// and MOSS emits a separate timed segment per speaker to begin with. Both
+    /// directions asserted: the Qwen3 card must still make the claim, or this
+    /// test would pass on a catalog that had stopped describing either.
+    func testTheBuiltInAlignerCardDoesNotClaimWordTimestamps() {
+        XCTAssertFalse(ModelCatalog.wordAlignerMoss.badges.contains("word timestamps"),
+                       "MOSS reports no word times — claiming them here would be the "
+                       + "fabrication direction this project ranks worst")
+        XCTAssertTrue(ModelCatalog.wordAligner.badges.contains("word timestamps"),
+                      "and the real aligner must still claim them, or this test is "
+                      + "asserting nothing")
+    }
+
+    /// A built-in card still has to point at something real: the built-in aligner
+    /// and the MOSS chunked entry are the same weights, so they must agree about
+    /// whether they are installed. A card reporting "not installed" beside a
+    /// chunked model reporting "installed" would send the user to download a
+    /// model they already have.
+    func testTheBuiltInAlignerSharesMossInstallState() {
+        let moss = ModelCatalog.chunked.first { $0.id == "moss" }
+        XCTAssertNotNil(moss)
+        XCTAssertEqual(ModelCatalog.wordAlignerMoss.hfRepo, moss?.hfRepo)
+        XCTAssertEqual(ModelCatalog.isInstalled(ModelCatalog.wordAlignerMoss),
+                       ModelCatalog.isInstalled(moss!))
+    }
+
     /// Repair needs somewhere to run, and the engines split TWO ways — not into
     /// "pyannote" and "the rest", which is how this read until 2026-08-10.
     ///
