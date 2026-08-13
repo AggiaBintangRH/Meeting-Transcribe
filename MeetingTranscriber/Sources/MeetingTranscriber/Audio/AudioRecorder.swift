@@ -266,6 +266,27 @@ final class AudioRecorder: ObservableObject {
     /// When the far end has finished an utterance — see `RemoteUtteranceGate`.
     var remoteUtteranceGate = RemoteUtteranceGate()
 
+    /// Hands out the arrival order of LIVE rows, across both streams.
+    ///
+    /// **A row's place is decided when it first appears, and then it stays there**
+    /// (owner, 2026-08-13: *"remote speaker ini udah row nya, itu gak pindah
+    /// pindah kemana mana pas realtime … office itu row ke dua, gak bisa jadi row
+    /// pertama"*).
+    ///
+    /// Everything before this ordered live rows by TIME, and the times during
+    /// recording are estimates that keep being corrected — a whole-chunk span, then
+    /// a character-position guess, then late word times. Every correction re-sorted
+    /// the list under the reader. Three separate fixes made those numbers better
+    /// and none of them made the list stop moving, because the list should not have
+    /// depended on the numbers at all.
+    ///
+    /// Arrival order is right HERE and only here: a realtime final fires when that
+    /// stream's speaker stops, so for live rows arrival IS speaking order. It is
+    /// NOT true of the confirmed chunk replies — both streams go through one queue
+    /// with office always enqueued first — which is why confirmed rows keep their
+    /// time ordering, and why the two are ordered separately.
+    var nextLiveSeq = 0
+
     // Live chunked diarization — runs on its OWN interval, independent of ASR
     var chunkAudio: [Float] = []                       // 16k samples pending diarization
     /// Recording time at which the FIRST sample now in `chunkAudio` was captured.
@@ -1044,7 +1065,10 @@ final class AudioRecorder: ObservableObject {
                     // the sidecar's buffer resets on each flush.
                     self.lastRealtimeFinalElapsed = end
                     if !text.isEmpty {
-                        self.segments.append(TranscriptSegment(text: text, confirmed: false, window: start...end))
+                        self.nextLiveSeq += 1
+                        self.segments.append(TranscriptSegment(text: text, confirmed: false,
+                                                               window: start...end,
+                                                               seq: self.nextLiveSeq))
                         self.rebuildDisplayRows()
                     }
                     self.setPartialTranscript("")
@@ -1108,8 +1132,10 @@ final class AudioRecorder: ObservableObject {
                 // whether or not this one had words.
                 self.lastRemoteRealtimeFinalElapsed = end
                 if !text.isEmpty {
+                    self.nextLiveSeq += 1
                     self.remoteSegments.append(RemoteSegment(text: text,
                                                              window: start...max(end, start),
+                                                             seq: self.nextLiveSeq,
                                                              confirmed: false))
                     self.rebuildDisplayRows()
                 }
@@ -1133,6 +1159,7 @@ final class AudioRecorder: ObservableObject {
         lastRealtimeFinalElapsed = 0
         lastRemoteRealtimeFinalElapsed = 0
         remoteUtteranceGate.reset()
+        nextLiveSeq = 0
         diarizing = false
         // Fresh overlap-repair state for this session. `overlapRepairProgress` and
         // `overlapRepairError` are display fields and went to the shared helper;

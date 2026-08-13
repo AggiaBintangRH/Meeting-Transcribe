@@ -26,16 +26,27 @@ extension AudioRecorder {
         // pyannote's intersecting turns and feeding them detector output would
         // change what they operate on without a single measurement behind it.
         let regions = overlapRegions() + detectedOverlapRegions
+        // LIVE rows are collected with their arrival number so they can be ordered
+        // by it below; confirmed rows carry none and are ordered by time.
+        var liveRows: [(seq: Int, row: SpeakerUtterance)] = []
         for seg in segments {
-            rows.append(contentsOf: derivedRows(for: seg, regions: regions))
+            let derived = derivedRows(for: seg, regions: regions)
+            if seg.confirmed { rows.append(contentsOf: derived) }
+            else { liveRows.append(contentsOf: derived.map { (seg.seq, $0) }) }
         }
         // Office and Remote are two independent label spaces sharing one clock;
         // they only ever meet here, at the final sort. With no remote segments
         // the merge returns `rows` untouched — the single-stream path is exactly
         // what it was.
+        let remoteLive = remoteSegments.filter { !$0.confirmed }
+        for seg in remoteLive {
+            liveRows.append(contentsOf: Self.remoteRows([seg], turns: remoteLiveTurns)
+                                            .map { (seg.seq, $0) })
+        }
         let merged = Self.mergeRowsByStartTime(
             office: rows,
-            remote: Self.remoteRows(remoteSegments, turns: remoteLiveTurns,
+            remote: Self.remoteRows(remoteSegments.filter(\.confirmed),
+                                    turns: remoteLiveTurns,
                                     // The remote twin of the office union one
                                     // screen above: the engine's own intersecting
                                     // turns PLUS whatever the standalone detector
@@ -53,8 +64,21 @@ extension AudioRecorder {
         // Relabel sub-second speaker "islands" first (an ATND beam flicker that
         // caught one word), THEN coalesce — because relabeling restores the
         // adjacency that lets the surrounding rows merge.
+        // LIVE ROWS GO LAST, IN THE ORDER THEY APPEARED, AND ARE NEVER RE-SORTED.
+        //
+        // Two orderings, because the two halves answer different questions.
+        // Confirmed rows are the finished transcript and belong in time order —
+        // they arrive together from one chunk and their times are real. Live rows
+        // are what the user is watching being written, and their times are
+        // estimates that keep being corrected; sorting by those made the list
+        // re-flow under the reader every time a correction landed.
+        //
+        // Appending them after the confirmed ones is not a compromise: the chunked
+        // pass replaces every live row it covers, so anything still live is by
+        // definition newer than everything confirmed.
         let settled = Self.coalesceAdjacentSameSpeaker(
             Self.absorbShortSpeakerIslands(merged, mossSession: mossDiarizationActive))
+            + liveRows.sorted { $0.seq < $1.seq }.map(\.row)
         // Speaker confidence is annotated LAST, once the spans are final: the
         // number is a minimum over the turns a row spans, and coalescing changes
         // exactly that span. Computing it earlier would describe a row that no

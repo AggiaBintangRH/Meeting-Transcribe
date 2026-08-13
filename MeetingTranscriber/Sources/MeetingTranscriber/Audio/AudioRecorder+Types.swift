@@ -12,6 +12,10 @@ extension AudioRecorder {
         var text: String
         let confirmed: Bool               // true = chunked ASR (accurate), false = realtime
         var window: ClosedRange<Double>? = nil  // recording-time span (confirmed only)
+        /// Order in which this segment FIRST APPEARED, across both streams. Live
+        /// rows are ordered by this and never re-sorted — see
+        /// `AudioRecorder.nextLiveSeq`. Only meaningful while `confirmed` is false.
+        var seq: Int = 0
         // Set only by overlap repair: this segment's text belongs entirely to one
         // separated speaker, so display rows use it directly (skip re-attribution).
         // Two fields (not a tuple) to keep Equatable synthesis working.
@@ -56,6 +60,12 @@ extension AudioRecorder {
         var text: String
         var window: ClosedRange<Double>   // recording-time span (shared clock)
         var conf: Double? = nil           // chunked-ASR confidence (Whisper only)
+
+        /// Order in which this segment FIRST APPEARED, across both streams.
+        ///
+        /// Live rows are ordered by this and never re-sorted — see
+        /// `AudioRecorder.nextLiveSeq`. Only meaningful while `confirmed` is false.
+        var seq: Int = 0
 
         /// False while this is REALTIME text waiting to be replaced by the chunked
         /// pass — the office twin of `TranscriptSegment.confirmed`.

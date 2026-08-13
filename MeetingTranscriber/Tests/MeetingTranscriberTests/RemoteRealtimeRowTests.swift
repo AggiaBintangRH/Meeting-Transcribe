@@ -40,17 +40,17 @@ final class RemoteRealtimeRowTests: XCTestCase {
         XCTAssertEqual(rows[0].end, 14.0)
     }
 
-    /// THE REPORTED CASE: office, remote, office live rows interleave by time
-    /// instead of the remote text sitting under all of them.
-    func testLiveRowsFromBothStreamsInterleaveByTime() {
+    /// THE REPORTED CASE: room, call, room — in the order they were spoken, which
+    /// for LIVE rows is the order they arrived.
+    func testLiveRowsFromBothStreamsInterleaveInArrivalOrder() {
         let r = AudioRecorder()
         r.segments = [
             AudioRecorder.TranscriptSegment(text: "the room first.", confirmed: false,
-                                            window: 0.0...5.0),
+                                            window: 0.0...5.0, seq: 1),
             AudioRecorder.TranscriptSegment(text: "the room again.", confirmed: false,
-                                            window: 20.0...25.0)]
+                                            window: 20.0...25.0, seq: 3)]
         r.remoteSegments = [AudioRecorder.RemoteSegment(text: "the call in between.",
-                                                        window: 10.0...15.0,
+                                                        window: 10.0...15.0, seq: 2,
                                                         confirmed: false)]
         r.rebuildDisplayRows()
 
@@ -65,11 +65,11 @@ final class RemoteRealtimeRowTests: XCTestCase {
         let r = AudioRecorder()
         r.remoteSegments = [
             AudioRecorder.RemoteSegment(text: "first thing.", window: 2.0...6.0,
-                                        confirmed: false),
+                                        seq: 1, confirmed: false),
             AudioRecorder.RemoteSegment(text: "second thing.", window: 30.0...34.0,
-                                        confirmed: false)]
+                                        seq: 3, confirmed: false)]
         r.segments = [AudioRecorder.TranscriptSegment(text: "the room.", confirmed: false,
-                                                      window: 15.0...18.0)]
+                                                      window: 15.0...18.0, seq: 2)]
         r.rebuildDisplayRows()
 
         XCTAssertEqual(r.displayRows.map(\.isRemote), [true, false, true])
