@@ -132,16 +132,39 @@ extension AudioRecorder {
         }
         let windowSec = Double(d.object(forKey: "overlap.mossformer.windowSec") as? Int ?? 10)
         let windows = repairWindows(windowSec: windowSec)
-        guard !windows.isEmpty else {
+
+        // REMOTE, added 2026-08-13 on measurement. Office was the only stream
+        // repaired because separation rescued 0 of 16 real office windows — and
+        // that number describes ACOUSTIC mixing in a room, not the remote case.
+        // Re-measured on the owner's own remote recordings: 3 of 3 windows
+        // separated cleanly (each track matching one real voice at 0.55–0.74 and
+        // the other at ≈0), because remote overlap is two independent streams
+        // mixed DIGITALLY — no shared room, no reverb, no crosstalk, which is the
+        // condition separation models are actually good at.
+        //
+        // Guarded on the remote RECORDING rather than on `remoteStreamActive`:
+        // the file is what the separator is given, and a session can have had a
+        // remote channel without a usable file behind it.
+        var remoteWindows: [RepairWindow] = []
+        let remoteFile = remoteStreamActive ? remoteRecordingURL : nil
+        if remoteFile != nil {
+            remoteWindows = repairWindows(windowSec: windowSec, remote: true)
+        }
+
+        guard !windows.isEmpty || !remoteWindows.isEmpty else {
             overlapLog("no 2-speaker overlap windows to repair")
             finishRepairStep(.done); return
         }
         overlapRepairing = true
         overlapRepairError = nil
         setStopStep("repair", .loading)
-        overlapLog("starting overlap repair: \(windows.count) window(s), windowSec=\(Int(windowSec))")
+        overlapLog("starting overlap repair: \(windows.count) office + "
+                   + "\(remoteWindows.count) remote window(s), windowSec=\(Int(windowSec))")
+        var jobs: [(windows: [RepairWindow], recording: URL, remote: Bool)] =
+            [(windows, recording, false)]
+        if let remoteFile { jobs.append((remoteWindows, remoteFile, true)) }
         repairTask = Task { @MainActor [weak self] in
-            await self?.runOverlapRepair(windows: windows, service: service, recording: recording)
+            await self?.runOverlapRepairJobs(jobs, service: service)
         }
     }
 
@@ -157,28 +180,38 @@ extension AudioRecorder {
     /// `maxDurationSec` (DiCoW only; nil = no limit, i.e. MossFormer2's original
     /// behaviour) drops merged windows longer than the engine can accept.
     private func repairWindows(windowSec: Double,
-                               maxDurationSec: Double? = nil) -> [RepairWindow] {
+                               maxDurationSec: Double? = nil,
+                               remote: Bool = false) -> [RepairWindow] {
         // Overlap repair rewrites transcript text under a speaker id — the last
-        // place a stray remote id should ever reach. MOSS keeps its turns in their
-        // own collection and never in `liveTurns`, so the office-only assert is
-        // asked of the collection that actually holds this session's office turns.
-        let turns = mossDiarizationActive
-            ? mossTurns
-            : Self.officeTurnsOnly(liveTurns, "repairWindows")
+        // place an id from the WRONG SPACE should ever reach. So each stream is
+        // asked of the collection that actually holds its turns, and the assert
+        // names the space it expects: office ids are < 10 000, remote ids are
+        // >= 10 000, and a mix-up would splice one stream's words under the other
+        // stream's speaker. MOSS keeps its turns in their own collection and never
+        // in `liveTurns`, and has no remote path at all.
+        let turns: [SpeakerTurn]
+        if remote {
+            turns = Self.remoteTurnsOnly(remoteLiveTurns, "repairWindows(remote)")
+        } else {
+            turns = mossDiarizationActive
+                ? mossTurns
+                : Self.officeTurnsOnly(liveTurns, "repairWindows")
+        }
         guard turns.count > 1 else { return [] }
 
-        // Where the overlap SPANS come from. Under pyannote: pairs of turns that
-        // intersect. Under MOSS and spectral, whose turns never intersect: the
-        // standalone detector, which read the audio itself. `maybeStartOverlapRepair`
-        // has already proved the detector ran, so an empty list here means it found
-        // no overlap — not that it is missing.
+        // Where the overlap SPANS come from. Under pyannote and DiariZen: pairs of
+        // turns that intersect. Under the engines that assign one label per instant:
+        // the standalone detector, which read the audio itself and is run PER STREAM.
+        // `maybeStartOverlapRepair` has already proved the detector ran, so an empty
+        // list here means it found no overlap — not that it is missing.
         var spans: [(start: Double, end: Double)] = []
         if usesDetectedRegionsForRepair {
             // The 0.4 s genuine-overlap bar is applied to both sources, so the two
             // paths admit the same thing. The detector's own floor is 0.20 s.
-            spans = detectedOverlapRegions.filter { $0.end - $0.start >= 0.4 }
-            overlapLog("regions from the overlap DETECTOR: "
-                       + "\(spans.count) of \(detectedOverlapRegions.count) are >= 0.4s")
+            let detected = remote ? remoteDetectedOverlapRegions : detectedOverlapRegions
+            spans = detected.filter { $0.end - $0.start >= 0.4 }
+            overlapLog("\(remote ? "REMOTE " : "")regions from the overlap DETECTOR: "
+                       + "\(spans.count) of \(detected.count) are >= 0.4s")
         } else {
             for i in 0..<turns.count {
                 for j in (i + 1)..<turns.count where turns[i].id != turns[j].id {
@@ -246,7 +279,8 @@ extension AudioRecorder {
     /// before the next begins. A per-window failure logs and continues.
     private func runOverlapRepair(windows: [RepairWindow],
                                   service: OverlapRepairService,
-                                  recording: URL) async {
+                                  recording: URL,
+                                  remote: Bool = false) async {
         let n = windows.count
         for (i, w) in windows.enumerated() {
             if Task.isCancelled { break }   // a new session owns the transcript now
@@ -271,11 +305,30 @@ extension AudioRecorder {
                 // would attach a number to the wrong thing.
                 let text1 = (try? await chunked.transcribeFile(path: tracks[0].path).text) ?? ""
                 let text2 = (try? await chunked.transcribeFile(path: tracks[1].path).text) ?? ""
-                processRepair(window: w, tracks: tracks, text1: text1, text2: text2)
+                processRepair(window: w, tracks: tracks, text1: text1, text2: text2,
+                              remote: remote)
             } catch {
                 overlapLog("SKIP [\(fmt(w.start))-\(fmt(w.end))] separation failed: \(error.localizedDescription)")
             }
             cleanup(tmpDir)
+        }
+    }
+
+    /// Run every stream's windows, then settle the overlay's repair row ONCE.
+    ///
+    /// The finishing used to live at the end of `runOverlapRepair`, which was
+    /// correct while there was exactly one stream. With two it would settle the
+    /// gate after Office and leave Remote's edits landing on a transcript the user
+    /// had already been handed — so the loop and the settling are now separate
+    /// jobs, and only this function may settle.
+    private func runOverlapRepairJobs(_ jobs: [(windows: [RepairWindow], recording: URL,
+                                                remote: Bool)],
+                                      service: OverlapRepairService) async {
+        for job in jobs where !job.windows.isEmpty {
+            if Task.isCancelled { break }
+            overlapLog("\(job.remote ? "REMOTE" : "OFFICE"): \(job.windows.count) window(s)")
+            await runOverlapRepair(windows: job.windows, service: service,
+                                   recording: job.recording, remote: job.remote)
         }
         overlapRepairing = false
         overlapRepairProgress = nil
@@ -292,7 +345,8 @@ extension AudioRecorder {
     /// the speaker-row edit entirely. Every decision is logged.
     private func processRepair(window w: RepairWindow,
                                tracks: [OverlapRepairService.SeparatedTrack],
-                               text1: String, text2: String) {
+                               text1: String, text2: String,
+                               remote: Bool = false) {
         let ws = w.start, we = w.end
         let idA = w.speakerIDs[0], idB = w.speakerIDs[1]
         let anchorA = anchorText(for: idA, ws: ws, we: we)
@@ -339,24 +393,107 @@ extension AudioRecorder {
                         + "\n    before: \(anchor)\n    track: \(trackText)\n    after: \(r.text)")
                 }
             }
-            if !decisions.isEmpty { applyRepair(ws: ws, we: we, decisions: decisions) }
+            if !decisions.isEmpty {
+                if remote { applyRemoteRepair(ws: ws, we: we, decisions: decisions) }
+                else      { applyRepair(ws: ws, we: we, decisions: decisions) }
+            }
         }
 
         // Debug rows: raw MossFormer2 separated-track ASR, verbatim, kept at the end
-        // of `segments` so they render after the real transcript. Toggled by the
+        // of the transcript so they render after it. Toggled by the
         // "Show MossFormer2 Index 1/2 rows" setting (Settings → Models → Overlap).
         let showDebug = UserDefaults.standard.object(forKey: "overlap.mossformer.showDebugRows") as? Bool ?? true
         if showDebug {
             let t1 = text1.isEmpty ? "(empty)" : text1
             let t2 = text2.isEmpty ? "(empty)" : text2
-            segments.append(TranscriptSegment(text: t1, confirmed: true, window: ws...we,
-                                              pinnedSpeakerName: "MossFormer2 Index1",
-                                              isSeparationDebug: true))
-            segments.append(TranscriptSegment(text: t2, confirmed: true, window: ws...we,
-                                              pinnedSpeakerName: "MossFormer2 Index2",
-                                              isSeparationDebug: true))
+            // The label names the STREAM as well as the track. With both streams
+            // repairing, four such rows can share one window, and "Index1" twice
+            // over would make them impossible to tell apart in the one place they
+            // exist to be read.
+            let tag = remote ? "MossFormer2 Remote Index" : "MossFormer2 Index"
+            if remote {
+                remoteSegments.append(RemoteSegment(text: t1, window: ws...we,
+                                                    pinnedSpeakerName: "\(tag)1",
+                                                    isSeparationDebug: true))
+                remoteSegments.append(RemoteSegment(text: t2, window: ws...we,
+                                                    pinnedSpeakerName: "\(tag)2",
+                                                    isSeparationDebug: true))
+            } else {
+                segments.append(TranscriptSegment(text: t1, confirmed: true, window: ws...we,
+                                                  pinnedSpeakerName: "\(tag)1",
+                                                  isSeparationDebug: true))
+                segments.append(TranscriptSegment(text: t2, confirmed: true, window: ws...we,
+                                                  pinnedSpeakerName: "\(tag)2",
+                                                  isSeparationDebug: true))
+            }
         }
         rebuildDisplayRows()
+    }
+
+    /// The Remote twin of `applyRepair`, over `remoteSegments`.
+    ///
+    /// SIMPLER than the office one, and the reason is structural rather than a
+    /// shortcut: a remote row is one chunk's text split by turns at display time
+    /// and nothing else writes into `remoteSegments`, so there are no ATND
+    /// position fills, no MOSS pinned rows and no realtime segments to preserve.
+    /// What both versions guarantee is the same invariant — **each affected row's
+    /// text survives exactly once**, either folded into a repaired speaker's text
+    /// or preserved verbatim.
+    /// Internal rather than private ON PURPOSE: this is the function that rewrites
+    /// remote transcript text, and its "each row's text survives exactly once"
+    /// invariant is the one worth a test rather than a comment.
+    func applyRemoteRepair(ws: Double, we: Double, decisions: [Int: String]) {
+        let regions = remoteOverlapRegions() + remoteDetectedOverlapRegions
+        let affected = remoteSegments.indices.filter { i in
+            let s = remoteSegments[i]
+            guard !s.isSeparationDebug else { return false }
+            return min(s.window.upperBound, we) - max(s.window.lowerBound, ws) > 0
+        }
+
+        var preserved: [RemoteSegment] = []
+        var consumedSpan: [Int: (lo: Double, hi: Double)] = [:]
+
+        for i in affected {
+            for row in Self.remoteRows([remoteSegments[i]], turns: remoteLiveTurns,
+                                       regions: regions) {
+                let rs = row.start ?? remoteSegments[i].window.lowerBound
+                let re = row.end ?? remoteSegments[i].window.upperBound
+                let inWindow = min(re, we) - max(rs, ws) > 0
+                if inWindow, let sid = row.speakerID, decisions[sid] != nil {
+                    let cur = consumedSpan[sid]
+                    consumedSpan[sid] = (min(cur?.lo ?? rs, rs), max(cur?.hi ?? re, re))
+                } else {
+                    // PRESERVE verbatim. The name is stored WITHOUT the
+                    // "Remote Speaker - " prefix `remoteRows` adds at render time,
+                    // or the next render would prefix it twice.
+                    preserved.append(RemoteSegment(text: row.text,
+                                                   window: rs...max(re, rs),
+                                                   pinnedSpeakerID: row.speakerID,
+                                                   pinnedSpeakerName:
+                                                    row.speaker.map(Self.remoteBaseName)))
+                }
+            }
+        }
+
+        for i in affected.sorted(by: >) { remoteSegments.remove(at: i) }
+
+        let repaired: [RemoteSegment] = decisions.map { id, text in
+            let span = consumedSpan[id] ?? (ws, we)
+            return RemoteSegment(text: text, window: span.lo...max(span.hi, span.lo),
+                                 pinnedSpeakerID: id,
+                                 pinnedSpeakerName: remoteSpeakerName(for: id))
+        }
+        remoteSegments.append(contentsOf: preserved + repaired)
+        // `remoteRows` sorts by window, so no explicit re-sort is needed here —
+        // unlike `insertPinnedSorted`, which orders `segments` itself.
+    }
+
+    /// Display name for a REMOTE speaker id, from this session's remote turns.
+    /// Its own function rather than a parameter on `speakerName(for:)`: the two
+    /// read different collections, and one function reading either would be one
+    /// wrong argument away from naming a room speaker on a remote row.
+    private func remoteSpeakerName(for id: Int) -> String? {
+        remoteLiveTurns.first(where: { $0.id == id })?.name
     }
 
     // MARK: - Overlap repair — DiCoW (attempt #4)

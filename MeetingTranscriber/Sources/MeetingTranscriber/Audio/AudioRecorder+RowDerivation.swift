@@ -572,20 +572,50 @@ extension AudioRecorder {
     /// carried the mark since dual-stream shipped, so a user reading one
     /// transcript got a caution on half of it and silence on the other half.
     ///
-    /// ⚠ **Marking ONLY — repair is deliberately not extended to Remote.** The
-    /// same day, separation was measured on 16 real office overlap windows and
-    /// rescued **0**: it lifts one voice and leaves artefacts, never two voices.
-    /// A remote repair path would be a pipeline built to reject. The mark costs
-    /// nothing and is the honest half.
+    /// ⚠ **Repair WAS extended to Remote on 2026-08-13, reversing the note this
+    /// paragraph used to carry.** It said repair was office-only because
+    /// separation rescued **0 of 16** real office windows. That measurement stands
+    /// and still governs Office — but it was made on ACOUSTIC mixing in a
+    /// reverberant room, and it does not describe the remote case. Re-measured on
+    /// the owner's own remote recordings: **3 of 3** windows separated cleanly,
+    /// each track matching one real voice at 0.55–0.74 and the other at ≈0.
+    /// See the remote-repair section in CLAUDE.md for why the two differ.
     nonisolated static func remoteRows(_ segments: [RemoteSegment],
                                        turns: [SpeakerTurn] = [],
                                        regions: [(start: Double, end: Double)] = [],
                                        log: (String) -> Void = { _ in })
         -> [SpeakerUtterance] {
-        segments.sorted { $0.window.lowerBound < $1.window.lowerBound }
+        // Debug rows last, then by time — the `insertPinnedSorted` convention on
+        // the office side, applied at render time here because `remoteSegments`
+        // has no separate pinning step.
+        segments.sorted {
+            $0.isSeparationDebug == $1.isSeparationDebug
+                ? $0.window.lowerBound < $1.window.lowerBound
+                : !$0.isSeparationDebug
+        }
             .flatMap { seg -> [SpeakerUtterance] in
                 let text = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return [] }
+                // PINNED: repair already decided whose words these are, from a
+                // separated track. The turns describe the MIXED audio and no longer
+                // describe this text, so re-splitting by them would hand one
+                // speaker's recovered words to the other.
+                if let name = seg.pinnedSpeakerName {
+                    // A debug row already carries its own literal label
+                    // ("MossFormer2 Remote Index1") and is not a speaker, so it is
+                    // neither renamed nor marked as overlapped.
+                    let hit = !seg.isSeparationDebug && regions.contains {
+                        max($0.start, seg.window.lowerBound) < min($0.end, seg.window.upperBound)
+                    }
+                    return [SpeakerUtterance(id: seg.id.uuidString,
+                                             speaker: seg.isSeparationDebug
+                                                 ? name : remoteDisplayName(name),
+                                             speakerID: seg.pinnedSpeakerID,
+                                             start: seg.window.lowerBound,
+                                             end: seg.window.upperBound,
+                                             text: text, confirmed: true, overlapped: hit,
+                                             isRemote: true, asrConf: seg.conf)]
+                }
                 let ranges = speakerRanges(in: seg.window, turns: turns)
                 guard !ranges.isEmpty else {
                     // No turns for this window: the row spans the whole window, so

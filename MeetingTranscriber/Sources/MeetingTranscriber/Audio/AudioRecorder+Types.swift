@@ -72,6 +72,21 @@ extension AudioRecorder {
         /// The aligner's view of how long the audio it was given was — checked
         /// against `window`'s span before any word time is trusted.
         var alignedChunkDuration: Double? = nil
+
+        /// Set by overlap repair: this segment's text belongs to exactly ONE
+        /// remote speaker and must NOT be re-split by the turns at display time.
+        ///
+        /// The office twins on `TranscriptSegment` exist for the same reason. A
+        /// repaired segment's text came from a SEPARATED track, so the diarization
+        /// turns that describe the MIXED audio no longer describe it — running it
+        /// back through `speakerRanges` would hand one speaker's recovered words
+        /// to the other, which is the failure repair exists to fix.
+        var pinnedSpeakerID: Int? = nil
+        var pinnedSpeakerName: String? = nil
+
+        /// A raw separated-track row, kept for inspection and rendered after the
+        /// real transcript. Never folded into anything and never repaired again.
+        var isSeparationDebug = false
     }
 
     /// The live Remote caption — what the Remote realtime engine has produced
