@@ -30,11 +30,16 @@ final class ChunkTieOrderTests: XCTestCase {
 
     /// One 30 s chunk. The far end speaks at 2–8 s, the room at 15–22 s.
     /// No turns at all — the batch-engine live case.
+    ///
+    /// The two words are 0.5 s apart ON PURPOSE: under `utterancePauseSec` they
+    /// stay ONE utterance, so this test keeps asking only about ORDER. Splitting
+    /// is `UtteranceSplitTests`' subject, and a fixture that did both at once
+    /// would fail for either reason without saying which.
     func testInsideOneChunkTheEarlierSpeakerIsDrawnFirst() {
         let window = 0.0...30.0
         let remote = AudioRecorder.remoteRows(
             [AudioRecorder.RemoteSegment(text: "the far end speaks first.", window: window,
-                                         words: [word(2, 4, 0), word(6, 8, 1)],
+                                         words: [word(2, 4, 0), word(4.5, 8, 1)],
                                          alignedChunkDuration: 30.0)])
         let office = [AudioRecorder.SpeakerUtterance(
             id: "o", speaker: nil, speakerID: nil,

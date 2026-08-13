@@ -330,15 +330,24 @@ extension AudioRecorder {
             let nearest = displayTurns.min { a, b in
                 Self.timeDistance(from: a, to: window) < Self.timeDistance(from: b, to: window)
             }
-            // Real speech times when the aligner ran, so this row can be ordered
-            // against the other stream's rows instead of tying on the chunk start
-            // — see `spokenSpan`. Falls back to the whole window unchanged.
-            let span = Self.spokenSpan(words: seg.words,
-                                       chunkDuration: seg.alignedChunkDuration,
-                                       window: window) ?? window
+            // ONE ROW PER UTTERANCE, not one per chunk. When the aligner ran, the
+            // chunk's text is cut at real silences (`splitAtPauses`) so each thing
+            // this stream said carries its own span and can interleave with the
+            // other stream. Without word times there is nothing to cut on, and the
+            // whole window stands exactly as before.
+            if let parts = Self.splitAtPauses(text: seg.text, words: seg.words,
+                                              chunkDuration: seg.alignedChunkDuration,
+                                              window: window) {
+                return parts.enumerated().map { i, part in
+                    SpeakerUtterance(id: "\(seg.id.uuidString)-u\(i)", speaker: nearest?.name,
+                                     speakerID: nearest?.id, start: part.span.lowerBound,
+                                     end: part.span.upperBound, text: part.text,
+                                     confirmed: true, asrConf: seg.asrConf)
+                }
+            }
             return [SpeakerUtterance(id: seg.id.uuidString, speaker: nearest?.name,
-                                     speakerID: nearest?.id, start: span.lowerBound,
-                                     end: span.upperBound, text: seg.text,
+                                     speakerID: nearest?.id, start: window.lowerBound,
+                                     end: window.upperBound, text: seg.text,
                                      confirmed: true, asrConf: seg.asrConf)]
         }
         // Word-exact path: when the aligner ran, each word goes to the turn that
@@ -609,6 +618,93 @@ extension AudioRecorder {
         return start...end
     }
 
+    /// Longest silence that still counts as ONE utterance. A gap at least this
+    /// long starts a new row.
+    ///
+    /// **1.0 s, and it is borrowed rather than invented.** `speakerRanges` already
+    /// treats a gap of 1.0 s or more as separating two turns by the same speaker,
+    /// so a new constant here would be a second opinion about the same question.
+    /// It is also clear of the evidence: this project's word-timing measurement
+    /// found inter-word gaps INSIDE continuous speech at a median of 0.160 s and a
+    /// **maximum of 0.480 s**, so 1.0 s is twice the largest pause ever observed
+    /// within one person talking.
+    nonisolated static let utterancePauseSec = 1.0
+
+    /// Split one chunk's text into separate utterances at real silences, using the
+    /// aligner's word times. Returns nil when there is nothing trustworthy to split
+    /// on — never a guess.
+    ///
+    /// **Why this exists (owner, 2026-08-13).** A chunk produces exactly ONE
+    /// segment per stream, and with a batch diarization engine there are no live
+    /// turns to split it. At the owner's 120 s chunk interval that means two
+    /// minutes of a stream's speech — however many separate things were said —
+    /// collapse into a single row: *"si remote jadi disatuin gak bikin row"*. The
+    /// far end speaking three times produced one row, so it could not interleave
+    /// with the room however well the rows were ordered.
+    ///
+    /// Ordering fixes could never reach this. There was only ever one row to order.
+    ///
+    /// Each returned group carries its own span, so the merge places each utterance
+    /// where it actually happened. Unaligned tokens (punctuation, and any tail the
+    /// sidecar dropped) stay with the group they follow — the text is emitted
+    /// verbatim in source order, so nothing is lost or duplicated.
+    nonisolated static func splitAtPauses(text: String,
+                                          words: [ChunkedASRService.AlignedWord]?,
+                                          chunkDuration: Double?,
+                                          window: ClosedRange<Double>,
+                                          minPauseSec: Double = utterancePauseSec)
+        -> [(span: ClosedRange<Double>, text: String)]? {
+        // Same gates as `spokenSpan`, asked once rather than restated.
+        guard let words, spokenSpan(words: words, chunkDuration: chunkDuration,
+                                    window: window) != nil else { return nil }
+        let sourceWords = text.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard !sourceWords.isEmpty else { return nil }
+
+        // Absolute span of each source word, first aligner item wins — the same
+        // shape `WordAttribution` builds, so a normalization-split word cannot
+        // fabricate a gap between its own halves.
+        var bounds = [(start: Double, end: Double)?](repeating: nil, count: sourceWords.count)
+        for w in words where w.src >= 0 && w.src < sourceWords.count {
+            let s = window.lowerBound + w.start, e = window.lowerBound + w.end
+            if let existing = bounds[w.src] {
+                bounds[w.src] = (Swift.min(existing.start, s), Swift.max(existing.end, e))
+            } else {
+                bounds[w.src] = (s, e)
+            }
+        }
+        guard bounds.contains(where: { $0 != nil }) else { return nil }
+
+        var groups: [(span: ClosedRange<Double>, text: String)] = []
+        var current: [String] = []
+        var groupStart: Double?, groupEnd: Double?
+        var previousEnd: Double?
+
+        func flush() {
+            guard !current.isEmpty, let s = groupStart, let e = groupEnd else { return }
+            groups.append((s...Swift.max(e, s), current.joined(separator: " ")))
+            current = []; groupStart = nil; groupEnd = nil
+        }
+
+        for i in sourceWords.indices {
+            if let b = bounds[i] {
+                if let prev = previousEnd, b.start - prev >= minPauseSec { flush() }
+                groupStart = groupStart ?? b.start
+                groupEnd = Swift.max(groupEnd ?? b.end, b.end)
+                previousEnd = Swift.max(previousEnd ?? b.end, b.end)
+            }
+            current.append(sourceWords[i])
+        }
+        flush()
+        // A trailing run with no aligned word at all has no span to stand on;
+        // give it to the previous group rather than dropping the text.
+        if !current.isEmpty, !groups.isEmpty {
+            let last = groups[groups.count - 1]
+            groups[groups.count - 1] = (last.span,
+                                        last.text + " " + current.joined(separator: " "))
+        }
+        return groups.isEmpty ? nil : groups
+    }
+
     nonisolated static func speakerRanges(in window: ClosedRange<Double>,
                                           turns: [SpeakerTurn])
         -> [(start: Double, end: Double, id: Int, name: String)] {
@@ -702,22 +798,35 @@ extension AudioRecorder {
                 }
                 let ranges = speakerRanges(in: seg.window, turns: turns)
                 guard !ranges.isEmpty else {
-                    // No turns for this window. The row's span is the real speech
-                    // when the aligner ran (`spokenSpan`) — which is what lets it be
-                    // ordered against the office rows instead of tying on the chunk
-                    // start and losing the tie by rule — and the whole window
-                    // otherwise, exactly as before.
-                    let span = spokenSpan(words: seg.words,
-                                          chunkDuration: seg.alignedChunkDuration,
-                                          window: seg.window) ?? seg.window
-                    let hit = regions.contains {
-                        max($0.start, span.lowerBound) < min($0.end, span.upperBound)
+                    // No turns for this window — the batch-engine live case. One row
+                    // per UTTERANCE when the aligner ran, so the far end speaking
+                    // three times inside one 120 s chunk produces three rows that
+                    // can interleave with the room, instead of one row that cannot.
+                    // Without word times, the whole window, exactly as before.
+                    func overlapped(_ span: ClosedRange<Double>) -> Bool {
+                        regions.contains {
+                            max($0.start, span.lowerBound) < min($0.end, span.upperBound)
+                        }
+                    }
+                    if let parts = splitAtPauses(text: text, words: seg.words,
+                                                 chunkDuration: seg.alignedChunkDuration,
+                                                 window: seg.window) {
+                        return parts.enumerated().map { i, part in
+                            SpeakerUtterance(id: "\(seg.id.uuidString)-u\(i)",
+                                             speaker: remoteSpeakerLabel, speakerID: nil,
+                                             start: part.span.lowerBound,
+                                             end: part.span.upperBound,
+                                             text: part.text, confirmed: true,
+                                             overlapped: overlapped(part.span),
+                                             isRemote: true, asrConf: seg.conf)
+                        }
                     }
                     return [SpeakerUtterance(id: seg.id.uuidString,
                                              speaker: remoteSpeakerLabel, speakerID: nil,
-                                             start: span.lowerBound,
-                                             end: span.upperBound,
-                                             text: text, confirmed: true, overlapped: hit,
+                                             start: seg.window.lowerBound,
+                                             end: seg.window.upperBound,
+                                             text: text, confirmed: true,
+                                             overlapped: overlapped(seg.window),
                                              isRemote: true, asrConf: seg.conf)]
                 }
                 // Word-exact path, the same one `derivedRows` takes and reached the
