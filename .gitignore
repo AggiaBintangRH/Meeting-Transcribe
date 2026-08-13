@@ -117,3 +117,10 @@ logs/
 # but the README is the repo's front page, so it ships.
 *.md
 !README.md
+
+# numba JIT cache. `PythonRuntime.sidecarEnvironment` points NUMBA_CACHE_DIR here
+# (dataDir = the project root in dev mode, Application Support when bundled), so
+# it appears the moment any librosa-importing sidecar runs. Ignored for the same
+# reason /.venv-nemo is: it was untracked-but-not-ignored, and one `git add -A`
+# committed 46 files of it on 2026-08-13 (7806f274d).
+/numba-cache
