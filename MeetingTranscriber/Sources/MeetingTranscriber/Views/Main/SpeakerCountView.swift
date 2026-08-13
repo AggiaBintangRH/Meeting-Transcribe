@@ -31,10 +31,21 @@ struct SpeakerCountView: View {
     @AppStorage("diarization.enabled")        private var diarOn = true
     @AppStorage("diarization.finalPass")      private var finalPass = true
     @AppStorage("diarization.continueOnStop") private var continueOnStop = false
-    /// -1 or absent = single stream. The remote row is not merely disabled then,
-    /// it is ABSENT: there is no second recording for it to describe, so a
-    /// greyed-out picker would invent a stream the session does not have.
+    /// -1 or absent = no Remote channel selected.
+    ///
+    /// ⚠ **The row STAYS VISIBLE then, dimmed, with the reason** — it was hidden
+    /// outright for about an hour on 2026-08-13 and the owner's first words on
+    /// seeing it were *"kok cuma ada office"*, which is precisely the outcome this
+    /// project's own rule predicts: **a control that disappears reads as a bug, a
+    /// dimmed one with a reason reads as an answer** (the language-picker
+    /// reversal, 2026-07-31, and the SPK chip after it). Hiding it was argued as
+    /// "a greyed picker would invent a stream the session does not have"; that is
+    /// answered by SAYING there is no stream, which the note below does, and which
+    /// also tells the user where to go and turn one on.
     @AppStorage("mic.remoteChannel")          private var remoteChannel = -1
+
+    /// Is a Remote (conferencing) channel configured at all?
+    private var hasRemote: Bool { remoteChannel >= 0 }
 
     /// Whether the number reaches the engine in THIS session — the loader's own
     /// rule, never restated here. A second copy is how a control comes to promise
@@ -59,26 +70,34 @@ struct SpeakerCountView: View {
                 .foregroundColor(Theme.textFaint)
 
             row(label: "Office", value: $office, tint: Theme.teal)
+            row(label: "Remote", value: $remote, tint: Theme.remoteRole,
+                available: hasRemote)
 
-            if remoteChannel >= 0 {
-                row(label: "Remote", value: $remote, tint: Theme.remoteRole)
-                Text("Auto is safest for the far end — you can see the room, not "
-                     + "the call.")
-                    .font(.system(size: 10))
-                    .foregroundColor(Theme.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // Two different sentences, because they need two different actions.
+            // "No Remote channel" is fixed in Settings and the note says where;
+            // the Auto advice only makes sense once there IS a far end.
+            Text(hasRemote
+                 ? "Auto is safest for the far end — you can see the room, not the call."
+                 : "No Remote channel — the far end is not being recorded. "
+                   + "Pick one in Settings → Microphone.")
+                .font(.system(size: 10))
+                .foregroundColor(Theme.textFaint)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .help(help)
     }
 
-    private func row(label: String, value: Binding<Int>, tint: Color) -> some View {
+    /// `available` = there is a stream for this row to describe. False only for
+    /// Remote with no channel selected: the row still shows, dimmed and inert,
+    /// with the reason underneath.
+    private func row(label: String, value: Binding<Int>, tint: Color,
+                     available: Bool = true) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "person.2")
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(tint)
+                .foregroundColor(available ? tint : Theme.textDim)
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(Theme.textDim)
@@ -102,7 +121,8 @@ struct SpeakerCountView: View {
                 HStack(spacing: 3) {
                     Text(text(value.wrappedValue))
                         .font(.system(size: 11, weight: .semibold).monospaced())
-                        .foregroundColor(honoured ? Theme.textBody : Theme.textDim)
+                        .foregroundColor(honoured && available
+                                         ? Theme.textBody : Theme.textDim)
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 7, weight: .bold))
                         .foregroundColor(Theme.textDim)
@@ -111,11 +131,11 @@ struct SpeakerCountView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .disabled(locked)
+            .disabled(locked || !available)
 
             Spacer(minLength: 0)
         }
-        .opacity(locked ? 0.5 : 1)
+        .opacity(locked || !available ? 0.5 : 1)
     }
 
     /// Padded on BOTH sides to the width of the longest entry so a row never
