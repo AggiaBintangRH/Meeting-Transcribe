@@ -28,7 +28,16 @@ extension AudioRecorder {
         // what it was.
         let merged = Self.mergeRowsByStartTime(
             office: rows,
-            remote: Self.remoteRows(remoteSegments, turns: remoteLiveTurns))
+            remote: Self.remoteRows(remoteSegments, turns: remoteLiveTurns,
+                                    // The remote twin of the office union one
+                                    // screen above: the engine's own intersecting
+                                    // turns PLUS whatever the standalone detector
+                                    // found on the Remote WAV. Under the four
+                                    // engines that cannot mark their own overlap,
+                                    // the detector is the only source — which is
+                                    // exactly why it is run per stream.
+                                    regions: remoteOverlapRegions()
+                                             + remoteDetectedOverlapRegions))
         // Relabel sub-second speaker "islands" first (an ATND beam flicker that
         // caught one word), THEN coalesce — because relabeling restores the
         // adjacency that lets the surrounding rows merge.
@@ -423,6 +432,33 @@ extension AudioRecorder {
     func overlapRegions() -> [(start: Double, end: Double)] {
         if diarizenDiarizationActive && !diarizenOverlapMarking { return [] }
         let turns = Self.officeTurnsOnly(liveTurns, "overlapRegions")
+        return Self.intersectingRegions(turns)
+    }
+
+    /// The remote twin: where two REMOTE participants spoke at once.
+    ///
+    /// Reads `remoteLiveTurns` through `remoteTurnsOnly`, so an office id can no
+    /// more reach this than a remote id can reach `overlapRegions()`. The two
+    /// streams are separate identity spaces and their overlap is a separate
+    /// question — an office speaker and a remote speaker talking together is not
+    /// overlap at all, it is two independent recordings, which is the one case
+    /// this app genuinely solves.
+    ///
+    /// Same `diarizenOverlapMarking` switch as office, and deliberately so: the
+    /// control is "mark overlap", not "mark office overlap".
+    func remoteOverlapRegions() -> [(start: Double, end: Double)] {
+        if diarizenDiarizationActive && !diarizenOverlapMarking { return [] }
+        let turns = Self.remoteTurnsOnly(remoteLiveTurns, "remoteOverlapRegions")
+        return Self.intersectingRegions(turns)
+    }
+
+    /// Every pair of turns that overlaps by at least the genuine-overlap bar.
+    ///
+    /// Lifted out of `overlapRegions()` when Remote gained its own: two copies of
+    /// this loop would be two places for the 0.4 s bar to drift, and that bar is
+    /// shared with the detector path and with `repairWindows`.
+    nonisolated static func intersectingRegions(_ turns: [SpeakerTurn])
+        -> [(start: Double, end: Double)] {
         guard turns.count > 1 else { return [] }
         var regions: [(start: Double, end: Double)] = []
         for i in 0..<turns.count {
@@ -523,8 +559,22 @@ extension AudioRecorder {
     /// Sorted by start time here rather than relying on append order: segments
     /// are appended when their transcription lands, which is chronological today
     /// (one sidecar, one queue) but is not something the merge should depend on.
+    /// `regions` MARKS remote rows where two remote participants spoke at once.
+    ///
+    /// It was hardcoded `[]` until 2026-08-13 — remote rows could never be
+    /// overlapped, whatever the audio held (owner: *"saya ingin agar ini juga
+    /// mendeteksi overlap untuk remote, jadi remote-remote"*). Office rows had
+    /// carried the mark since dual-stream shipped, so a user reading one
+    /// transcript got a caution on half of it and silence on the other half.
+    ///
+    /// ⚠ **Marking ONLY — repair is deliberately not extended to Remote.** The
+    /// same day, separation was measured on 16 real office overlap windows and
+    /// rescued **0**: it lifts one voice and leaves artefacts, never two voices.
+    /// A remote repair path would be a pipeline built to reject. The mark costs
+    /// nothing and is the honest half.
     nonisolated static func remoteRows(_ segments: [RemoteSegment],
-                                       turns: [SpeakerTurn] = [])
+                                       turns: [SpeakerTurn] = [],
+                                       regions: [(start: Double, end: Double)] = [])
         -> [SpeakerUtterance] {
         segments.sorted { $0.window.lowerBound < $1.window.lowerBound }
             .flatMap { seg -> [SpeakerUtterance] in
@@ -532,15 +582,21 @@ extension AudioRecorder {
                 guard !text.isEmpty else { return [] }
                 let ranges = speakerRanges(in: seg.window, turns: turns)
                 guard !ranges.isEmpty else {
+                    // No turns for this window: the row spans the whole window, so
+                    // it is overlapped if ANY region touches that window — the same
+                    // test the office no-turns path makes.
+                    let hit = regions.contains {
+                        max($0.start, seg.window.lowerBound) < min($0.end, seg.window.upperBound)
+                    }
                     return [SpeakerUtterance(id: seg.id.uuidString,
                                              speaker: remoteSpeakerLabel, speakerID: nil,
                                              start: seg.window.lowerBound,
                                              end: seg.window.upperBound,
-                                             text: text, confirmed: true, overlapped: false,
+                                             text: text, confirmed: true, overlapped: hit,
                                              isRemote: true, asrConf: seg.conf)]
                 }
                 return assignSentences(text, window: seg.window, ranges: ranges,
-                                       segID: seg.id.uuidString, regions: [],
+                                       segID: seg.id.uuidString, regions: regions,
                                        asrConf: seg.conf)
                     .map { row in
                         var row = row

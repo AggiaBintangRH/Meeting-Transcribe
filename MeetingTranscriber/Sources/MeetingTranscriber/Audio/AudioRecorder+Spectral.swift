@@ -266,19 +266,24 @@ extension AudioRecorder {
     /// a missing hint, never wrong text.
     func configureOverlapDetect() {
         guard let service = modelLoader.overlapDetect else { return }
-        service.onResult = { [weak self] regions, _ in
+        service.onResult = { [weak self] regions, audio in
             Task { @MainActor in
                 guard let self else { return }
-                self.detectedOverlapRegions = regions
+                // ROUTED BY THE ECHOED PATH, which is why the sidecar echoes it —
+                // the same design pyannote uses to say which file a reply is
+                // about. No protocol change was needed to add the second stream.
+                let isRemote = self.isRemoteRecordingPath(audio)
+                if isRemote { self.remoteDetectedOverlapRegions = regions }
+                else        { self.detectedOverlapRegions = regions }
                 let total = regions.reduce(0.0) { $0 + ($1.end - $1.start) }
-                self.overlapDetectLog("DETECT done — \(regions.count) region(s), "
+                self.overlapDetectLog("DETECT done (\(isRemote ? "remote" : "office")) "
+                                      + "— \(regions.count) region(s), "
                                       + "\(String(format: "%.1f", total))s marked")
                 self.rebuildDisplayRows()
                 // Repair waits for this under MOSS and spectral, where these
                 // regions are its ONLY input. Released after the rows are rebuilt
                 // so the mark is on screen either way, even if repair then skips.
-                self.overlapDetectDone = true
-                self.maybeStartOverlapRepair()
+                self.finishOverlapDetectJob()
             }
         }
         service.onError = { [weak self] message in
@@ -288,10 +293,32 @@ extension AudioRecorder {
                 // A failed detection must RELEASE repair, not hold it: repair will
                 // find no regions and settle its own leg, which is the difference
                 // between a missing mark and a stop overlay stuck for ten minutes.
-                self.overlapDetectDone = true
-                self.maybeStartOverlapRepair()
+                //
+                // The error carries no stream, so it cannot be attributed — which
+                // does not matter, because the counter only needs to know that ONE
+                // job ended. Guessing a stream here would be the thing that breaks
+                // it: guess wrong twice and the count never reaches zero.
+                self.finishOverlapDetectJob()
             }
         }
+    }
+
+    /// One detection job ended — result or error, office or remote. Releases
+    /// repair only when the last one has landed. Idempotent below zero.
+    func finishOverlapDetectJob() {
+        overlapDetectPending = max(0, overlapDetectPending - 1)
+        guard overlapDetectPending == 0 else { return }
+        overlapDetectDone = true
+        maybeStartOverlapRepair()
+    }
+
+    /// Is this reply about the Remote WAV? Compared against the recorder's own
+    /// remote URL rather than by looking for "-remote" in the string: the suffix
+    /// is `AudioRecorder.remoteURL(for:)`'s business, and a path test that
+    /// re-derives a naming rule is a second place for it to change.
+    func isRemoteRecordingPath(_ path: String) -> Bool {
+        guard !path.isEmpty, let office = lastRecordingURL else { return false }
+        return path == Self.remoteURL(forOffice: office).path
     }
 
     /// At Stop: one pass over the whole recording. ~160x realtime, so a 43-minute
@@ -301,9 +328,26 @@ extension AudioRecorder {
         // never waits for a pass that will not happen.
         guard let service = modelLoader.overlapDetect else { return }
         detectedOverlapRegions = []
+        remoteDetectedOverlapRegions = []
         overlapDetectDone = false
-        overlapDetectLog("DETECT start — \(fmt(recordingElapsed))s of audio")
+
+        // The REMOTE WAV gets its own pass (owner, 2026-08-13). Two remote
+        // participants talking over each other is real overlap and went unmarked
+        // entirely until now; the detector reads audio and needs no turns, so it
+        // is the only source that works under all six engines.
+        //
+        // COUNTED BEFORE ANYTHING IS DISPATCHED. Incrementing as each job is sent
+        // would let the first reply arrive while the count stood at 1, release the
+        // gate, and leave the second stream's regions landing after repair had
+        // already decided there was nothing to do.
+        let remote = remoteStreamActive ? Self.remoteURL(forOffice: recording) : nil
+        let hasRemote = remote.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        overlapDetectPending = hasRemote ? 2 : 1
+
+        overlapDetectLog("DETECT start — \(fmt(recordingElapsed))s of audio"
+                         + (hasRemote ? " (office + remote)" : ""))
         service.detect(audio: recording)
+        if hasRemote, let remote { service.detect(audio: remote) }
     }
 
     /// `logs/overlap-detect-decisions.log` — SWIFT-owned, one writer, and named

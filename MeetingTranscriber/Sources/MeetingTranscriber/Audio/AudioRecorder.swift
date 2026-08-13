@@ -240,6 +240,27 @@ final class AudioRecorder: ObservableObject {
     /// speaker per instant and can never produce an intersecting turn of their own.
     var detectedOverlapRegions: [(start: Double, end: Double)] = []
 
+    /// The same, for the REMOTE stream (owner, 2026-08-13).
+    ///
+    /// Its own collection rather than a shared one, for the reason every other
+    /// remote/office pair here is split: the two streams share one clock, so a
+    /// region from the far end would land on office rows at the same timestamp
+    /// and mark a room conversation as overlapping when nobody in the room spoke
+    /// twice. Kept apart, that is not a rule anyone has to remember.
+    ///
+    /// DISPLAY ONLY. Overlap repair never reads this — see `remoteRows`.
+    var remoteDetectedOverlapRegions: [(start: Double, end: Double)] = []
+
+    /// Detection jobs still in flight, office and remote counted together.
+    ///
+    /// ⚠ **A COUNTER, not two flags.** `overlapDetectDone` releases overlap
+    /// repair, and repair holds the blocking stop overlay; releasing it while the
+    /// second stream is still running would let repair read half the regions, and
+    /// NEVER releasing it hangs the overlay until the 600 s watchdog. Every exit
+    /// — result AND error, on either stream — decrements exactly once, and the
+    /// flag is raised only at zero.
+    var overlapDetectPending = 0
+
     /// Whether the detector has finished (or will never run) this session.
     ///
     /// Overlap REPAIR reads `detectedOverlapRegions` under MOSS and spectral, so
