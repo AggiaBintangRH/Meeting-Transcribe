@@ -16,8 +16,12 @@ import SwiftUI
 /// ⚠ **The far end is not visible from your chair.** That was the argument for
 /// not offering this at all, and it is still the risk: a pinned count is an EXACT
 /// constraint on pyannote, spectral and NeMo, so a guess here does not degrade
-/// gently — it merges people who spoke or invents people who did not. Both rows
-/// therefore default to Auto and the remote row says so.
+/// gently — it merges people who spoke or invents people who did not.
+///
+/// Both rows therefore default to Auto. The line that SAID so under the Remote
+/// row was removed on the owner's instruction (2026-08-13); the caution now lives
+/// in the tooltip and here, not on screen. Recorded rather than quietly dropped,
+/// because the risk did not go away with the sentence.
 struct SpeakerCountView: View {
     @ObservedObject var recorder: AudioRecorder
 
@@ -64,28 +68,51 @@ struct SpeakerCountView: View {
     private var locked: Bool { recorder.state != .idle }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        // CENTRED under the record button, which is itself centred (owner,
+        // 2026-08-13). The BLOCK centres; the rows inside stay a fixed width and
+        // left-align within it, so both pickers sit on one vertical line. Centring
+        // each row independently would let "Office" and "Remote" — different
+        // string widths — push their pickers to different places, which reads as
+        // sloppier than not centring at all.
+        VStack(alignment: .leading, spacing: 12) {
             Text("SPEAKERS")
-                .font(.system(size: 9, weight: .bold)).kerning(0.6)
+                .font(.system(size: 13, weight: .bold)).kerning(1.0)
                 .foregroundColor(Theme.textFaint)
+                .frame(maxWidth: .infinity, alignment: .center)
 
             row(label: "Office", value: $office, tint: Theme.teal)
             row(label: "Remote", value: $remote, tint: Theme.remoteRole,
                 available: hasRemote)
 
-            // Two different sentences, because they need two different actions.
-            // "No Remote channel" is fixed in Settings and the note says where;
-            // the Auto advice only makes sense once there IS a far end.
-            Text(hasRemote
-                 ? "Auto is safest for the far end — you can see the room, not the call."
-                 : "No Remote channel — the far end is not being recorded. "
-                   + "Pick one in Settings → Microphone.")
-                .font(.system(size: 10))
-                .foregroundColor(Theme.textFaint)
-                .fixedSize(horizontal: false, vertical: true)
+            // The "Auto is safest for the far end" line was removed on the
+            // owner's instruction. What is left is not advice but a STATE — there
+            // is no second recording — and it names the one place that changes it,
+            // so it stays.
+            if !hasRemote {
+                Text("No Remote channel — pick one in Settings → Microphone.")
+                    .font(.system(size: 12))
+                    .foregroundColor(Theme.textFaint)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
         }
+        // A CARD, like the record card above it (owner, 2026-08-13). Same fill and
+        // corner radius, plus a hairline border — the record card has no stroke
+        // because its own size carries it; this block is short enough that without
+        // one it read as text floating on the sidebar rather than as a control.
+        .padding(.vertical, 16)
+        .padding(.horizontal, 18)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Theme.card)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Theme.overlayBorder, lineWidth: 1)
+                )
+        )
         .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, alignment: .leading)
         .help(help)
     }
 
@@ -94,14 +121,16 @@ struct SpeakerCountView: View {
     /// with the reason underneath.
     private func row(label: String, value: Binding<Int>, tint: Color,
                      available: Bool = true) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 12) {
             Image(systemName: "person.2")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: 15, weight: .bold))
                 .foregroundColor(available ? tint : Theme.textDim)
             Text(label)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Theme.textDim)
-                .frame(width: 52, alignment: .leading)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(Theme.textBody)
+                // Wide enough for "Office" and "Remote" at 15pt, so the two
+                // pickers line up under each other.
+                .frame(width: 72, alignment: .leading)
 
             // A `Menu`, NOT a `Picker(.menu)` — the reason is carried over from
             // the chip this replaced: on macOS the picker draws its own bevelled
@@ -118,13 +147,13 @@ struct SpeakerCountView: View {
                     Button("\(n)") { value.wrappedValue = n }
                 }
             } label: {
-                HStack(spacing: 3) {
+                HStack(spacing: 5) {
                     Text(text(value.wrappedValue))
-                        .font(.system(size: 11, weight: .semibold).monospaced())
+                        .font(.system(size: 15, weight: .bold).monospaced())
                         .foregroundColor(honoured && available
-                                         ? Theme.textBody : Theme.textDim)
+                                         ? Theme.textBright : Theme.textDim)
                     Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 7, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(Theme.textDim)
                 }
             }
