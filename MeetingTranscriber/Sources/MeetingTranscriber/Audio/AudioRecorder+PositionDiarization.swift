@@ -26,8 +26,35 @@ extension AudioRecorder {
         // Reset to `both` first so a session that bails out below (feature off /
         // ATND down) is on the default policy, matching its nil diarizer.
         positionSource = .both
-        guard d.bool(forKey: "atnd.position.enabled"),
-              ATNDBeamService.shared.state == .listening else { return }
+        // SAY WHY, rather than returning in silence.
+        //
+        // Both conditions were a bare `guard … else { return }`, and a nil
+        // diarizer makes `positionGapFill` return [] before it logs anything — so
+        // a session where the beam layer never started produced NO line in any
+        // file, and every row that had no diarization turn yet rendered as
+        // SPEAKER UNKNOWN with nothing anywhere to explain it. Owner, 2026-08-13:
+        // *"i enable the ATND but the speaker is unknown"*.
+        //
+        // The two conditions are named separately because the fix differs: the
+        // first is a SECOND switch most people miss (connecting to the array in
+        // ATND → Connection does not turn this on), the second is the array not
+        // actually streaming.
+        guard d.bool(forKey: "atnd.position.enabled") else {
+            positionLog("POSITION LAYER OFF — `atnd.position.enabled` is false. "
+                        + "Connecting to the array (ATND → Connection) does not "
+                        + "enable this; the beam-direction speaker labels are a "
+                        + "separate switch in ATND → Position. Until it is on, "
+                        + "rows with no diarization turn stay SPEAKER UNKNOWN.")
+            return
+        }
+        guard ATNDBeamService.shared.state == .listening else {
+            positionLog("POSITION LAYER OFF — the feature is enabled but the beam "
+                        + "service is \(ATNDBeamService.shared.state), not "
+                        + "listening. Check the Device IP and the multicast "
+                        + "Interface address in ATND → Connection; the Interface "
+                        + "is THIS Mac's address, never the array's.")
+            return
+        }
 
         let tauDeg = d.object(forKey: "atnd.position.tauDeg") as? Double ?? 15
         let smoothingMs = d.object(forKey: "atnd.position.smoothingMs") as? Double ?? 400
