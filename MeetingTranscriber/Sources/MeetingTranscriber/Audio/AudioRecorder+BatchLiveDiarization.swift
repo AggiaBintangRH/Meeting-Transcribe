@@ -151,19 +151,12 @@ extension AudioRecorder {
         return true
     }
 
-    /// The warning the tab shows when this mode is on with the count on Auto.
-    /// Nil when there is nothing to warn about, so the caller renders nothing.
-    nonisolated static func liveCountWarning(isBatchEngine: Bool, finalPass: Bool,
-                                             numSpeakers: Int) -> String? {
-        guard runsBatchLiveDiarization(isBatchEngine: isBatchEngine,
-                                       finalPass: finalPass), numSpeakers == 0 else {
-            return nil
-        }
-        return "Live labelling runs on windows this short, and on 25–30 s clips of "
-             + "two people the automatic speaker count of these engines was measured "
-             + "wrong — 9 to 15 speakers. Set the speaker count beside the record "
-             + "button; pinned to the real number, every engine answered correctly."
-    }
+    // `liveCountWarning` LIVED HERE and was removed on 2026-08-13, the same day it
+    // was added: the owner saw the tab print it and asked for it gone. Removed
+    // rather than left unread, so it cannot become a rule nothing keeps in step.
+    // The measurement it carried is not lost — it is in this file's header, which
+    // is where a future edit to `dispatchBatchLiveWindow`'s count argument will be
+    // read anyway.
 
     /// One line per decision, its own file, one writer — the house rule.
     func batchLiveLog(_ message: String) {

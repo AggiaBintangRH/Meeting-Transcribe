@@ -25,9 +25,6 @@ struct DiarizationTab: View {
     @AppStorage("diarization.finalPass")   private var finalPass = true
     @AppStorage("diarization.continueOnStop") private var continueOnStop = false
     @AppStorage("diarization.intervalSec") private var intervalSec = 30
-    /// Read only to warn when live labelling runs on Auto — the picker
-    /// itself lives beside the record button, not here.
-    @AppStorage("diarization.numSpeakers") private var numSpeakers = 0
     // REMOVED 2026-08-06 (owner), controls and reads both: `diarization.live`
     // (always on), `.detectOverlap` (the Detect overlap tab owns this now),
     // `.resetOnStart` (always fresh) and `.numSpeakers` (always auto). Each is
@@ -102,20 +99,12 @@ struct DiarizationTab: View {
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
-                // THE MEASURED COST OF LEAVING THE COUNT ON AUTO, shown only when
-                // it applies. A live window is a 25–30 s clip, and on clips that
-                // short three of these four engines counted 9 to 15 speakers for
-                // two people. Stated rather than refused: the mode works, and the
-                // SPK picker is what makes it trustworthy.
-                if let warning = AudioRecorder.liveCountWarning(
-                    isBatchEngine: isBatchEngine,
-                    finalPass: stopPassBinding.wrappedValue,
-                    numSpeakers: numSpeakers) {
-                    Text(warning)
-                        .font(.system(size: 11))
-                        .foregroundColor(Theme.amber)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                // NO AUTO-COUNT WARNING HERE (owner, 2026-08-13). One was added
+                // with this block and removed on sight. The measurement behind it
+                // stands and is kept where it belongs — in
+                // `AudioRecorder+BatchLiveDiarization`, which explains why the SPK
+                // picker matters for this mode — but the owner has seen those
+                // numbers twice and does not want the tab repeating them.
             }
 
             // VISIBILITY IS THE OWNER'S RULE, chosen with the consequence stated:

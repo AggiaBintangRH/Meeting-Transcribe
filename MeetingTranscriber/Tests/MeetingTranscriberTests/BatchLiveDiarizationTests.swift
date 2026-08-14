@@ -86,33 +86,4 @@ final class BatchLiveDiarizationTests: XCTestCase {
                                                              finalPass: finalPass))
         }
     }
-
-    // MARK: - The warning
-
-    /// It appears only where it is true: this mode, on Auto.
-    func testTheAutoCountWarningAppearsOnlyWhereItApplies() {
-        XCTAssertNotNil(AudioRecorder.liveCountWarning(isBatchEngine: true,
-                                                       finalPass: false, numSpeakers: 0))
-        XCTAssertNil(AudioRecorder.liveCountWarning(isBatchEngine: true,
-                                                    finalPass: false, numSpeakers: 2),
-                     "a pinned count is what makes the mode trustworthy")
-        XCTAssertNil(AudioRecorder.liveCountWarning(isBatchEngine: true,
-                                                    finalPass: true, numSpeakers: 0),
-                     "the stop pass reads the whole file — short-window counting "
-                     + "is not in play")
-        XCTAssertNil(AudioRecorder.liveCountWarning(isBatchEngine: false,
-                                                    finalPass: false, numSpeakers: 0),
-                     "pyannote's per-window clustering is measured good on its own")
-    }
-
-    /// It has to be actionable, and it has to name the evidence — the numbers are
-    /// what turn it from nagging into a reason.
-    func testTheWarningNamesTheEvidenceAndTheFix() {
-        let text = AudioRecorder.liveCountWarning(isBatchEngine: true, finalPass: false,
-                                                  numSpeakers: 0)
-        XCTAssertNotNil(text)
-        XCTAssertTrue(text!.contains("9 to 15"), "the measured wrong counts")
-        XCTAssertTrue(text!.lowercased().contains("speaker count"),
-                      "and where to set the right one")
-    }
 }
