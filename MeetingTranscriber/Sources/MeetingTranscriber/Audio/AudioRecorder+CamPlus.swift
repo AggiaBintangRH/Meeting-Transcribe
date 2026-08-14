@@ -54,8 +54,19 @@ extension AudioRecorder {
         // `configureDiarizen()` logging `engine=nemo` into the DiariZen log — and
         // the log is the evidence, so a log that names the wrong engine is worse
         // than no log.
-        camPlusLog("engine=campplus — no live labels this session; "
-                   + "one whole-file pass per stream at Stop")
+        // WHICH MODE THIS SESSION IS IN, not a fixed sentence. It read "no live
+        // labels this session; one whole-file pass per stream at Stop"
+        // unconditionally, which stopped being true on 2026-08-13 when these four
+        // engines gained a live path — and a log that describes the opposite of
+        // what the session does is worse than no log, because the log is the
+        // evidence a later audit reads. Also releases any window left over from a
+        // previous session, which nothing did until the 2026-08-14 audit.
+        releaseBatchLiveWindows()
+        camPlusLog(batchLiveDiarizationActive
+                   ? "engine=campplus — LIVE labels, one window per interval; "
+                     + "no pass at Stop"
+                   : "engine=campplus — no live labels this session; "
+                     + "one whole-file pass per stream at Stop")
 
         // The SAME two handlers pyannote's final replies use, because the wire
         // shape is the same and the identity stage is shared. `identifyFinalTurns`
@@ -83,6 +94,15 @@ extension AudioRecorder {
         }
         service.onError = { [weak self] message, stream in
             Task { @MainActor in
+                // A LIVE WINDOW'S failure is not the stop pass's. Routed first, and
+                // `handleBatchLiveFailure` explains why the mode flag is a
+                // sufficient test — no stop pass runs at all in that mode, so
+                // `handleDiarizationFailure` (which paints the transcript red and
+                // settles the stop gate) can never be the right destination.
+                if self?.handleBatchLiveFailure(message, stream: stream,
+                                                noSpeech: false,
+                                                liveMode: self?.batchLiveDiarizationActive == true)
+                    == true { return }
                 self?.camPlusLog("FAILED (\(stream == .office ? "office" : "remote")): \(message)")
                 self?.handleDiarizationFailure(message, stream: stream)
             }

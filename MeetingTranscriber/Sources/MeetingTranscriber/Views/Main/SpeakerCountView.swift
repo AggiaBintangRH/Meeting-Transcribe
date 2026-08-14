@@ -57,8 +57,7 @@ struct SpeakerCountView: View {
     private var honoured: Bool {
         ModelLoader.speakerCountReachesEngine(diarEngine: engine,
                                               diarizationEnabled: diarOn,
-                                              finalPass: finalPass,
-                                              continueOnStop: continueOnStop)
+                                              finalPass: finalPass)
     }
 
     /// Locked for the whole session, like every control behind the gear
@@ -83,6 +82,33 @@ struct SpeakerCountView: View {
             row(label: "Office", value: $office, tint: Theme.teal)
             row(label: "Remote", value: $remote, tint: Theme.remoteRole,
                 available: hasRemote)
+
+            // THE NUMBER WILL NOT REACH THE ENGINE — say so on screen, not only in
+            // a tooltip (owner, 2026-08-14). Both pickers stay usable and the
+            // stored value survives, which is the 2026-07-31 language-picker rule:
+            // a control that vanishes reads as a bug, one that says why it is inert
+            // reads as an answer. `inertReason` is the ONE source; the tooltip
+            // prints the same string.
+            //
+            // NOT AMBER. The owner removed an amber block from the Diarization tab
+            // on sight the day before, and it was a different thing wearing the
+            // same colour — a measurement they had already been shown twice. This
+            // is a STATE the user asked to be told about, so it is drawn like the
+            // "No Remote channel" line beside it: the same faint text, in the same
+            // place, saying the same kind of thing.
+            //
+            // Deliberately NOT hidden while `locked`: a running meeting shows the
+            // lock tooltip, but hiding the reason mid-session would make the
+            // control's inertness look like the lock, which is a different and
+            // temporary cause.
+            if let reason = inertReason {
+                Text(reason)
+                    .font(.system(size: 13))
+                    .foregroundColor(Theme.textFaint)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
 
             // The "Auto is safest for the far end" line was removed on the
             // owner's instruction. What is left is not advice but a STATE — there
@@ -184,11 +210,59 @@ struct SpeakerCountView: View {
         if locked {
             return "Fixed while a meeting is running — the stop passes read these."
         }
-        if !honoured {
-            return "This engine counts speakers on its own and ignores a set number."
+        if let reason = inertReason { return reason }
+        // NAMES THE MEASUREMENT, NOT ONE ENGINE. It said "worth setting a number
+        // for the spectral engine, which has been measured counting 13 speakers on
+        // a 3-person recording" — true, and by 2026-08-14 measurably incomplete:
+        // on a 30 s window of Meeting5People.wav (5 real people) CAM++ returned 11
+        // speakers and spectral 12, and NeMo has been measured at 12 on a 2-person
+        // clip. Naming one engine reads as "the others are fine".
+        return "How many people to find. Auto lets each engine decide, and on short "
+             + "windows three of them have been measured inventing speakers — set a "
+             + "number whenever you know it."
+    }
+
+    /// WHY the number will not reach the engine, or nil when it will.
+    ///
+    /// ONE SOURCE for the tooltip AND the on-screen warning (owner, 2026-08-14:
+    /// *"buat peringatan kalau model itu tidak bisa set speaker"*). Writing the
+    /// warning as its own string was the obvious move and is the mistake this
+    /// project keeps paying for — two expressions of one fact drift, and the
+    /// drift is always toward under-reporting (the three hand-written engine
+    /// lists, all three stale, found in one sweep on 2026-08-13).
+    ///
+    /// THREE REASONS, and until 2026-08-14 all three printed the first one. Under
+    /// pyannote with the tail on, "this engine counts on its own" is simply FALSE
+    /// — pyannote reads the number perfectly well, on a full stop pass — and it is
+    /// also unactionable, which is worse: the owner hit exactly this and had no way
+    /// to learn that one toggle two screens away was the cause. The rule is
+    /// `ModelLoader.speakerCountReachesEngine`, so the split here stays keyed on
+    /// the same facts it is, never re-derived.
+    private var inertReason: String? {
+        guard !honoured else { return nil }
+        guard diarOn else {
+            return "Speaker diarization is off, so nobody is being counted. "
+                 + "Settings → Diarization."
         }
-        return "How many people to find. Auto lets the engine decide — worth "
-             + "setting a number for the spectral engine, which has been measured "
-             + "counting 13 speakers on a 3-person recording."
+        // The engine CAN read the number; this session's own pass throws it away.
+        // Both legs name the control, because a reason the user cannot act on is
+        // the failure this whole split exists to fix.
+        if ModelLoader.honoursSpeakerCount(diarEngine: engine) {
+            // ONE leg now, not two. The tail case disappeared on 2026-08-14 when a
+            // stop pass became unconditionally a full pass; keeping a branch for a
+            // state that can no longer occur is how a stale reason survives.
+            return "Not sent while the stop pass is off — live windows and the "
+                 + "tail need not contain everyone. "
+                 + "Settings → Diarization → Run a diarization pass at stop."
+        }
+        // MOSS, and only MOSS. Deliberately says what it CANNOT do rather than
+        // naming a setting: there is no control anywhere that would change this,
+        // so pointing at one would be worse than pointing at nothing. See
+        // `ModelLoader.honoursSpeakerCount` for why it is permanent — the labels
+        // come out of a language model as text tags, with no clustering stage to
+        // bound and no count parameter in the checkpoint.
+        let name = ModelCatalog.diarizationEngineShortName(engine) ?? "This engine"
+        return "\(name) writes speaker labels as it transcribes and has no speaker "
+             + "count to set. Pick another engine if you need to fix the number."
     }
 }

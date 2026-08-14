@@ -91,8 +91,20 @@ extension AudioRecorder {
                                            hasRemoteRecording: Bool,
                                            tailSamples: Int,
                                            supportsTail: Bool = true) -> RemoteStopMode {
-        guard finalPass, remoteStreamActive, hasDiarizationService else { return .none }
-        if continueOnStop, supportsTail {
+        guard remoteStreamActive, hasDiarizationService else { return .none }
+        // ⚠ THE TWO SETTINGS NO LONGER OVERLAP (owner, 2026-08-14): *"Tail hanya
+        // muncul dan dipakai pas Run At Stop = OFF … pas On mah diulang diarize
+        // dari awal sampai akhir."* `finalPass` ON is now ALWAYS a full pass, and
+        // `continueOnStop` is read only in the branch where its toggle is visible.
+        //
+        // Before this, the toggle was shown while the stop pass was off and read
+        // only while it was on — so a value set where it did nothing decided
+        // behaviour where it could not be changed. That cost the owner a real
+        // session: a stale `true` made the office pass a tail, a tail is a `chunk`
+        // job carrying no `num_speakers`, and the SPK picker went inert with no
+        // control anywhere able to explain it.
+        if !finalPass {
+            guard continueOnStop, supportsTail else { return .none }
             // < 1 s of tail is not worth a job — the same early-out (and the same
             // 16 000-sample threshold) as `diarizeTailChunk`. Returning `.none`
             // rather than dispatching keeps the stop gate untaken, so there is

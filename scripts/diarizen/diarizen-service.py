@@ -110,11 +110,16 @@ MODEL_ID = "BUT-FIT/diarizen-meeting-base"
 # direction everywhere else (the ASR hallucination gates), and it applies here.
 # If a future measurement is ambiguous between two values, take the HIGHER one.
 #
-# Everything else is left at the checkpoint's defaults, including `min_speakers`
-# and `max_speakers`: both were measured INERT on every file here (removing the
-# 2..8 bounds entirely changed no answer), so overriding them would be a change
-# with no evidence behind it. THE COUNT ITSELF IS ALWAYS AUTOMATIC — there is no
-# setting for it and none is sent (owner, 2026-08-10).
+# Everything else is left at the checkpoint's defaults, including the RESTING
+# `min_speakers` / `max_speakers`: WIDENING them was measured inert on every file
+# here (removing the 2..8 bounds entirely changed no answer), so the defaults are
+# kept as the automatic case.
+#
+# ⚠ "THE COUNT ITSELF IS ALWAYS AUTOMATIC" (owner, 2026-08-10) WAS REVERSED on
+# 2026-08-14: the owner asked for the SPK picker to work on every engine. NARROWING
+# those two bounds is NOT inert — it is the one direction that acts — so a pinned
+# count is applied per job at the `pipeline(audio)` call, which is also where the
+# measurement and the office/remote restore are written down.
 MIN_CLUSTER_SIZE = 15
 
 # The vendored source. `pip install`ed into `.venv-diarizen` non-editable, from
@@ -262,6 +267,38 @@ def main() -> None:
                   **echo})
             continue
 
+        # A PINNED SPEAKER COUNT (owner, 2026-08-14). This engine used to ignore
+        # the field — "THE COUNT ITSELF IS ALWAYS AUTOMATIC" (owner, 2026-08-10) —
+        # and the owner has now asked for the picker to work on every engine.
+        #
+        # ⚠ IT IS NOT A `num_speakers=` KWARG HERE. DiariZen OVERRIDES pyannote's
+        # `__call__` (`inference.py:121`, `(self, in_wav, sess_name=None)`), so the
+        # kwarg every other engine takes would raise `TypeError`. The count is read
+        # off the INSTANCE at `inference.py:156`, as `min_clusters`/`max_clusters`,
+        # which is why it is set here and restored below.
+        #
+        # ⚠ AND IT IS ONE-DIRECTIONAL, measured 2026-08-10 on `Meeting5People.wav`
+        # (truth 5): pinned 3 → 3, 5 → 5, 7 → **5**, 12 → **5**. It obeys a SMALLER
+        # count and refuses a LARGER one, because clustering cannot invent a
+        # speaker the embeddings do not support — the real ceiling is
+        # `MIN_CLUSTER_SIZE`. So the only thing a wrong number can do here is MERGE
+        # people who spoke; it can never fabricate one. That is the safer of the
+        # two directions and the opposite of spectral, whose auto count is the
+        # broken stage.
+        #
+        # RESTORED IN A `finally`, not after the call: office and remote are
+        # separate identity spaces holding different people and share this one
+        # process, so a pinned office pass leaking into an auto remote pass would
+        # be the 2026-08-11 defect (the room's headcount forced onto the far end)
+        # rebuilt inside the sidecar, below every Swift guard that watches for it.
+        num_speakers = int(job.get("num_speakers", 0) or 0)
+        auto_min, auto_max = pipeline.min_speakers, pipeline.max_speakers
+        if num_speakers > 0:
+            pipeline.min_speakers = pipeline.max_speakers = num_speakers
+            log(f"pinned to {num_speakers} speaker(s)"
+                f"{' [remote]' if is_remote else ''} — a larger number than the "
+                f"embeddings support is ignored, a smaller one is obeyed")
+
         started = time.time()
         try:
             result = pipeline(audio)
@@ -278,6 +315,8 @@ def main() -> None:
             # remote failure must never abort the office transcript.
             emit({"type": "error",
                   "text": f"Diarization failed: {brief_traceback()}", **echo})
+        finally:
+            pipeline.min_speakers, pipeline.max_speakers = auto_min, auto_max
 
 
 if __name__ == "__main__":

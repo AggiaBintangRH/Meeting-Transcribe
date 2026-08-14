@@ -18,10 +18,29 @@ final class MossStopSettingsTests: XCTestCase {
 
     // MARK: - Defaults
 
-    /// Both keys absent ⇒ `?? true` / `?? true` ⇒ tail, which is what `stop()`
-    /// has always done. This is the whole safety argument for the change.
-    func testAbsentKeysGiveTodaysTailFlush() {
-        XCTAssertEqual(mode(), .tail)
+    /// ⚠ RE-AIMED 2026-08-14, and this one is a real BEHAVIOUR change to MOSS's
+    /// shipped default, recorded rather than smoothed over. It used to assert that
+    /// both keys absent (`?? true` / `?? true`) gave a TAIL — "what `stop()` has
+    /// always done", and the whole safety argument for that change.
+    ///
+    /// The owner's new rule is that `continueOnStop` belongs to the stop-pass-OFF
+    /// branch only (*"pas On mah diulang diarize dari awal sampai akhir"*), and
+    /// one control governs both pairs — a MOSS exception would make the same
+    /// toggle mean two things. So a default MOSS session now ends in a FULL
+    /// re-diarization.
+    func testAbsentKeysNowGiveTheFullPass() {
+        XCTAssertEqual(mode(), .full)
+        let plan = AudioRecorder.mossStopPlan(.full)
+        XCTAssertTrue(plan.runsFullPass)
+        XCTAssertFalse(plan.flushesTail, "the full pass covers the tail itself")
+        XCTAssertFalse(plan.settlesImmediately,
+                       "the pass settles the leg asynchronously, as the tail did")
+    }
+
+    /// The tail is still reachable — it moved, it was not removed. With the stop
+    /// pass off it is what finishes a live-labelled MOSS meeting.
+    func testTheTailIsNowTheStopPassOffMode() {
+        XCTAssertEqual(mode(finalPass: false, tail: true), .tail)
         let plan = AudioRecorder.mossStopPlan(.tail)
         XCTAssertTrue(plan.flushesTail)
         XCTAssertFalse(plan.runsFullPass)
@@ -50,8 +69,9 @@ final class MossStopSettingsTests: XCTestCase {
         XCTAssertFalse(plan.settlesImmediately, "the pass settles the leg when it finishes")
     }
 
+    /// With the stop pass off AND no tail asked for, nothing runs — the `.none`
+    /// leg still exists, it just needs both halves now that the tail lives here.
     func testFinalPassOffRunsNothingAndSettlesHere() {
-        XCTAssertEqual(mode(finalPass: false), .none)
         XCTAssertEqual(mode(finalPass: false, tail: false), .none)
         let plan = AudioRecorder.mossStopPlan(.none)
         XCTAssertFalse(plan.flushesTail)

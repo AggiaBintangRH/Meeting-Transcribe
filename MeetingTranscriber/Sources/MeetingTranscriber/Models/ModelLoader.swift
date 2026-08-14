@@ -630,9 +630,31 @@ final class ModelLoader: ObservableObject {
         diarEngine == pyannoteEngineID || diarEngine == diarizenEngineID
     }
 
+    /// Does this engine's SIDECAR read `num_speakers` at all?
+    ///
+    /// FIVE OF SIX, since DiariZen joined on 2026-08-14 (owner: the picker must
+    /// work on every engine). Its sidecar had ignored the field by an earlier
+    /// decision of the owner's own — *"saya ingin speakernya itu auto"* — and now
+    /// applies it as instance bounds; see `diarizen-service.py`.
+    ///
+    /// ⚠ **MOSS IS THE ONE THAT CANNOT, and it is not an omission to be closed
+    /// later.** It is speaker-attributed ASR: the labels come out of a 0.9B
+    /// language model as `[Sxx]` tags in generated text. There is no clustering
+    /// stage to bound and no count parameter anywhere in the checkpoint — the only
+    /// lever is the prompt, and steering it was MEASURED inert on 2026-07-31
+    /// (default vs "output in Indonesian" vs "output in Chinese" all returned
+    /// identical English output). Wiring a control to it would be the Granite /
+    /// Voxtral language-picker defect rebuilt knowingly.
+    ///
+    /// Stated as a LIST rather than `!= mossEngineID` on purpose: a seventh engine
+    /// must be examined and added, not admitted by default. That is the
+    /// `default:`-fall-through trap this project has already paid for twice
+    /// (`ChunkedASRModel.scriptName`, and the rail printing `pyannote` for a
+    /// DiariZen session).
     nonisolated static func honoursSpeakerCount(diarEngine: String) -> Bool {
         diarEngine == pyannoteEngineID || diarEngine == spectralEngineID
             || diarEngine == nemoEngineID || diarEngine == camPlusEngineID
+            || diarEngine == diarizenEngineID
     }
 
     /// Whether a pinned speaker count REACHES the engine in THIS session.
@@ -643,36 +665,36 @@ final class ModelLoader: ObservableObject {
     /// exists because the audit of 2026-08-10 found the SPK chip lit for a session
     /// that silently discards the number.
     ///
-    /// **pyannote sends `num_speakers` only on its FULL stop pass.** Its live
-    /// windows and its TAIL pass are `chunk` jobs, and `diarizeChunk` carries no
-    /// count — deliberately, and correctly: a 30 s window or a few seconds of tail
-    /// need not contain every speaker in the meeting, so forcing the meeting's
-    /// count onto one would make it invent people. So the number applies only when
-    /// a full pass actually runs:
+    /// **pyannote sends `num_speakers` only on a FULL stop pass.** Its live windows
+    /// and its tail are `chunk` jobs, and `diarizeChunk` carries no count —
+    /// deliberately, and correctly: a 30 s window or a few seconds of tail need not
+    /// contain every speaker in the meeting, so forcing the meeting's count onto
+    /// one would make it invent people.
     ///
-    /// | `finalPass` | `continueOnStop` | pass at stop | count sent |
-    /// |---|---|---|---|
-    /// | false | — | none | **no** |
-    /// | true | true | tail (`chunk`) | **no** |
-    /// | true | false | full (`final`) | yes |
+    /// | `finalPass` | pass at stop | count sent |
+    /// |---|---|---|
+    /// | false | none, or a tail (`chunk`) | **no** |
+    /// | true | full (`final`) | yes |
     ///
-    /// The dangerous leg is the middle one: `continueOnStop`'s toggle is visible
-    /// only while the stop pass is OFF (an owner decision, recorded), so a `true`
-    /// can outlive the control that set it and quietly disable this number in
-    /// every later session — the same value-outliving-its-control shape as the
-    /// remote-label loss found the same day.
+    /// ⚠ **`continueOnStop` USED TO BE A THIRD ROW HERE and is no longer a
+    /// parameter** (owner, 2026-08-14: *"pas On mah diulang diarize dari awal
+    /// sampai akhir"*). A stop pass is now unconditionally a full pass, so
+    /// `true`/`true` — which sent no count while the toggle that set it was
+    /// invisible — cannot be expressed any more. Removing the parameter rather
+    /// than passing a constant is the `spectralRefusalMessage` precedent: a
+    /// configuration that can no longer occur should not still be testable, or the
+    /// dead leg outlives the reason anyone remembers for it.
     ///
-    /// The BATCH engines ignore both keys by design (their stop pass IS the
+    /// The BATCH engines never read `finalPass` for this (their stop pass IS the
     /// labels), so they pass straight through on `honoursSpeakerCount`.
     nonisolated static func speakerCountReachesEngine(diarEngine: String,
                                                       diarizationEnabled: Bool,
-                                                      finalPass: Bool,
-                                                      continueOnStop: Bool) -> Bool {
+                                                      finalPass: Bool) -> Bool {
         guard diarizationEnabled, honoursSpeakerCount(diarEngine: diarEngine) else {
             return false
         }
         guard diarEngine == pyannoteEngineID else { return true }
-        return finalPass && !continueOnStop
+        return finalPass
     }
 
     nonisolated static func needsSecondMossProcess(chunkedID: String,

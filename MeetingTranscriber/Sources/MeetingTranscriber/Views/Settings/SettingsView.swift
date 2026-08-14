@@ -377,11 +377,21 @@ struct SettingsView: View {
                      + "active: that detector reads the audio directly and hands its "
                      + "regions to the engine you pick here."
             }
-            // Named per engine rather than defaulted to "the spectral engine": a
-            // banner that names the wrong engine is worse than none, and with four
-            // engines the `default` arm is no longer a safe place to hide one.
-            let engineName = diarEngine == ModelLoader.nemoEngineID
-                ? "The NeMo engine" : "The spectral engine"
+            // ⚠ THIS COMMENT USED TO CLAIM THE PROBLEM WAS FIXED, AND IT WAS NOT.
+            // It read "Named per engine rather than defaulted to 'the spectral
+            // engine' … the `default` arm is no longer a safe place to hide one",
+            // over a two-way ternary — NeMo, else "The spectral engine" — which IS
+            // a default arm wearing different syntax. Three engines reach here
+            // (spectral, NeMo, CAM++; MOSS is caught by its own `if` above), so a
+            // CAM++ user was told about **the spectral engine**: the DiariZen-rail
+            // defect exactly, in the block that claimed to have removed it.
+            //
+            // DERIVED now. `diarizationEngineShortName` was built on 2026-08-13
+            // for precisely this, and it returns nil for an unknown engine rather
+            // than somebody else's name — so a seventh engine gets a plain
+            // sentence, never a wrong one.
+            let engineName = ModelCatalog.diarizationEngineShortName(diarEngine)
+                .map { "The \($0) engine" } ?? "This engine"
             return "\(engineName) assigns exactly one speaker per instant, so its "
                  + "turns never intersect and it cannot tell repair where to work. Switch "
                  + "on Models → Detect overlap and this page becomes active: that detector "

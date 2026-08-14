@@ -130,6 +130,10 @@ SPECTRAL_SERVICE = "spectral/spectral-service.py"
 # THE SIXTH DIARIZATION ENGINE (2026-08-11). Speaks the SAME wire as pyannote and
 # spectral, so one Swift caller drives any of them; see `campplus/*`.
 CAMPPLUS_SERVICE = "campplus/campplus-service.py"
+# THE FIFTH DIARIZATION ENGINE (2026-08-10). Runs in `.venv-diarizen`, its own
+# Python 3.11 interpreter, so every check below must be PURE — this suite runs
+# under the main `.venv`, where `import diarizen` does not exist.
+DIARIZEN_SERVICE = "diarizen/diarizen-service.py"
 SPECTRAL_VENDOR = SCRIPTS / "spectral" / "vendor"
 # The FOURTH diarizer (2026-08-07): NVIDIA NeMo's ClusteringDiarizer (MarbleNet
 # VAD -> multi-scale TitaNet-Large -> NME-SC spectral clustering). Like spectral
@@ -4734,6 +4738,9 @@ LAYOUT_CHECKS = [
     "layout/error-popup-marker-is-cleared-with-the-message",
     "layout/no-speech-is-routed-by-kind-not-prose",
     "layout/hub-downloads-fetch-their-model-card",
+    "layout/inert-speaker-count-says-why-once",
+    "layout/live-window-failures-leave-the-stop-gate-alone",
+    "layout/no-banner-hard-codes-an-engine-name",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5375,6 +5382,226 @@ def run_layout(rep: Report, ctx):
                    "with it, so an identical second failure is still shown",
                    "; ".join(problems))
 
+    cid = "layout/no-banner-hard-codes-an-engine-name"
+    if ctx.wants(cid):
+        # THE CLASS THAT WILL NOT DIE. Four separate instances now, all the same
+        # shape — a hand-written engine name in user-facing text, going stale the
+        # moment an engine is added:
+        #
+        #   2026-08-10  the settings rail printed "pyannote" for a DiariZen
+        #               session, via a `default:` arm;
+        #   2026-08-13  three engine LISTS in Views/, every one stale, found in
+        #               one sweep;
+        #   2026-08-14  the Overlap tab's banner said "The spectral engine" to a
+        #               CAM++ user — a two-way ternary acting as a `default:`, in
+        #               a block whose own comment claimed that had been fixed.
+        #
+        # The last one is why this check exists rather than another comment: the
+        # comment WAS there, it asserted the fix, and the code under it was the
+        # bug. `ModelCatalog.diarizationEngineShortName` returns nil for an unknown
+        # engine instead of somebody else's name, so deriving is the only form that
+        # a seventh engine cannot make wrong.
+        #
+        # Scoped to the DISPLAY NAMES, not to the ids: `ModelLoader.spectralEngineID`
+        # and friends are comparisons, which is how a legitimately engine-specific
+        # branch is written. It is the rendered noun that must never be typed.
+        NAMES = ["The spectral engine", "The NeMo engine", "The CAM++ engine",
+                 "The DiariZen engine", "The pyannote engine"]
+        views = SWIFT_SOURCES / "MeetingTranscriber" / "Views"
+        problems = []
+        if not views.is_dir():
+            problems.append("Views/ is gone")
+        else:
+            hits = 0
+            for path in sorted(views.rglob("*.swift")):
+                # Comments stripped — this check's own explanation names every one
+                # of these strings, and so do the fixed sites' comments. A textual
+                # search would match its own documentation, the lesson every
+                # sibling check here learned by failing on itself.
+                code = "\n".join(l for l in path.read_text().splitlines()
+                                 if not l.strip().startswith("//"))
+                for name in NAMES:
+                    if f'"{name}' not in code:
+                        continue
+                    hits += 1
+                    # ONE EXEMPTION, and it carries its reason: OverlapDetectTab's
+                    # banner is shown only under pyannote (`redundantHere` is
+                    # `diarOn && engine == pyannoteEngineID`), so naming pyannote
+                    # there is a statement about the engine the user selected, not
+                    # a fallback. Verified rather than assumed, below.
+                    if path.name == "OverlapDetectTab.swift" and name == "The pyannote engine":
+                        if "engine == ModelLoader.pyannoteEngineID" not in code:
+                            problems.append(
+                                "OverlapDetectTab names pyannote but no longer gates "
+                                "on it — the exemption's premise is gone")
+                        continue
+                    problems.append(
+                        f"{path.name} hard-codes {name!r} in user-facing text. Any "
+                        f"engine reaching that branch and not being that engine is "
+                        f"told about somebody else's — use "
+                        f"ModelCatalog.diarizationEngineShortName")
+            # The POSITIVE half: the derivation really is in use somewhere. Without
+            # it, a Views/ that had stopped naming engines at all — or been deleted
+            # — would pass while saying nothing.
+            settings = views / "Settings" / "SettingsView.swift"
+            if settings.exists():
+                scode = "\n".join(l for l in settings.read_text().splitlines()
+                                  if not l.strip().startswith("//"))
+                if "diarizationEngineShortName" not in scode:
+                    problems.append("SettingsView no longer derives an engine name — "
+                                    "this check has lost the half that lets it fail")
+        rep.expect(cid, not problems,
+                   "no banner types an engine's display name except the one shown "
+                   "only under that engine; the rest derive it",
+                   "; ".join(problems))
+
+    cid = "layout/live-window-failures-leave-the-stop-gate-alone"
+    if ctx.wants(cid):
+        # 🔴 THE 2026-08-14 DEFECT. All four whole-file engines routed EVERY
+        # sidecar error into `handleDiarizationFailure` — the STOP-GATE handler,
+        # which sets `diarizationError` (a red banner across the running
+        # transcript) and `finalDiarDone`. Once those engines gained a live path,
+        # that fired mid-recording for a single window, and NeMo returns an error
+        # for 30 s of silence — an ordinary quiet stretch of a meeting.
+        #
+        # PINNED HERE RATHER THAN IN A SWIFT TEST because it is a CALL-SITE fact,
+        # four times over. `handleBatchLiveFailure` is a pure-ish rule a unit test
+        # can exercise, and exercising it proves nothing about whether the four
+        # callbacks ask it first — the 2026-08-06 MOSS lesson exactly, which is
+        # also how the bug got in: the rule was written and three of the four
+        # call sites already existed.
+        #
+        # The 1 s floor is here for the same reason: it lives inside a `func` that
+        # writes a temp WAV and dispatches, so nothing pure can see it, and the
+        # negative control that removed it left the whole Swift suite green.
+        engines = ["CamPlus", "Nemo", "Diarizen", "Spectral"]
+        problems = []
+        for e in engines:
+            path = (SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+                    / f"AudioRecorder+{e}.swift")
+            if not path.exists():
+                problems.append(f"AudioRecorder+{e}.swift is gone")
+                continue
+            # Comments stripped — every one of these files explains this trap at
+            # length, so a textual search matches its own documentation. The
+            # lesson each sibling check here learned by failing on its own comment.
+            lines = [l for l in path.read_text().splitlines()
+                     if not l.strip().startswith("//")]
+            code = "\n".join(lines)
+            calls = [i for i, l in enumerate(lines)
+                     if "handleDiarizationFailure(" in l]
+            if not calls:
+                problems.append(f"{e} no longer calls handleDiarizationFailure — "
+                                f"this check has lost the half that lets it fail")
+                continue
+            for i in calls:
+                # Only the CALLBACK sites matter. The `guard let service` arm sets
+                # the error itself and never reaches this helper, so it is
+                # identified by the absence of a surrounding callback.
+                #
+                # ⚠ THE WINDOW IS BOUNDED AT THE NEAREST `Task { @MainActor in`,
+                # NOT AT A FIXED LINE COUNT. It was `lines[i-10:i]` for one
+                # revision, and the negative control caught it: `onError` and
+                # `onNoSpeech` sit a few lines apart in NeMo, so a fixed lookback
+                # spanned into the PREVIOUS callback and found ITS guard. Deleting
+                # the onNoSpeech guard — the exact path a silent 30 s window takes
+                # — left the check green. A callback's guard must be found inside
+                # that callback.
+                start = None
+                for k in range(i - 1, -1, -1):
+                    if "Task { @MainActor in" in lines[k]:
+                        start = k
+                        break
+                if start is None:
+                    continue
+                window = "\n".join(lines[start:i])
+                if "handleBatchLiveFailure(" not in window:
+                    problems.append(f"{e}: a sidecar-callback call to "
+                                    f"handleDiarizationFailure at line {i + 1} is "
+                                    f"not preceded by handleBatchLiveFailure — a "
+                                    f"live window's failure would paint the running "
+                                    f"transcript red and settle the stop gate")
+            if "handleBatchLiveFailure(" not in code:
+                problems.append(f"{e} never consults handleBatchLiveFailure")
+
+        bl = (SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+              / "AudioRecorder+BatchLiveDiarization.swift")
+        if not bl.exists():
+            problems.append("AudioRecorder+BatchLiveDiarization.swift is gone")
+        else:
+            blcode = "\n".join(l for l in bl.read_text().splitlines()
+                               if not l.strip().startswith("//"))
+            # The SAME 1 s floor `diarizeTailChunk` applies. A sub-second window is
+            # what makes the auto count fabricate and what NeMo raises on.
+            if "guard samples.count > 16_000" not in blcode:
+                problems.append("dispatchBatchLiveWindow lost its 1 s floor — a "
+                                "sub-second window is the worst input these "
+                                "engines take and NeMo raises on one")
+            # And the release really empties the map, not just deletes files.
+            if "liveDiarWindowByPath = [:]" not in blcode:
+                problems.append("releaseBatchLiveWindows no longer empties the map")
+        rep.expect(cid, not problems,
+                   "all four engines route a live window's failure away from the "
+                   "stop-gate handler, and the live dispatch keeps its 1 s floor",
+                   "; ".join(problems))
+
+    cid = "layout/inert-speaker-count-says-why-once"
+    if ctx.wants(cid):
+        # The SPK picker tells the user why a set number will not reach the
+        # engine, in TWO places — the tooltip and a line under the pickers
+        # (owner, 2026-08-14). Both must come from `inertReason`.
+        #
+        # Writing the on-screen warning as its own string is the obvious move and
+        # is the mistake this project keeps paying for: two expressions of one
+        # fact drift, and the drift is always toward under-reporting. On
+        # 2026-08-13 a single sweep found THREE hand-written engine lists in
+        # `Views/`, every one of them stale, each hiding a working feature from
+        # the user. This is that shape with two copies instead of six.
+        #
+        # The failure would be silent in the worst way: the tooltip and the
+        # warning would each be a plausible sentence, and only a user hovering
+        # one while reading the other would ever see them disagree.
+        path = SWIFT_SOURCES / "MeetingTranscriber" / "Views" / "Main" / "SpeakerCountView.swift"
+        problems = []
+        if not path.exists():
+            problems.append("SpeakerCountView.swift is gone")
+        else:
+            # Comments stripped first — this file explains the rule at length, so
+            # a textual search matches its own documentation. The lesson every
+            # sibling check here learned by failing on its own comment.
+            code = "\n".join(l for l in path.read_text().splitlines()
+                             if not l.strip().startswith("//"))
+            if "private var inertReason: String?" not in code:
+                problems.append("`inertReason` is gone — the one source both the "
+                                "tooltip and the on-screen warning must read")
+            # Two READ sites: `help` returns it, and the body renders it. Fewer
+            # than two means one of the surfaces has stopped using it, which is
+            # exactly when a second hand-written copy appears.
+            # The lookahead drops the DECLARATION (`inertReason: String?`), so this
+            # counts readers only — verified rather than assumed, since counting
+            # the declaration too would let a single reader satisfy a floor of 2.
+            reads = len(re.findall(r"(?<![A-Za-z])inertReason(?!\s*:)", code))
+            if reads < 2:
+                problems.append(f"`inertReason` is READ {reads} time(s); the "
+                                f"tooltip AND the on-screen warning must both read "
+                                f"it, or one surface has grown its own copy")
+            if "if let reason = inertReason" not in code:
+                problems.append("nothing renders `inertReason` on screen — the "
+                                "reason would be tooltip-only again, which is what "
+                                "the owner asked to change")
+            # The POSITIVE half: the rule really is the loader's, not restated
+            # here. Without this a file that had stopped consulting the engine at
+            # all would pass everything above while always claiming it works.
+            if "ModelLoader.honoursSpeakerCount" not in code:
+                problems.append("the reason no longer consults "
+                                "`ModelLoader.honoursSpeakerCount` — a second copy "
+                                "of which engines can be pinned is how this went "
+                                "stale three times in Views/ on 2026-08-13")
+        rep.expect(cid, not problems,
+                   "the tooltip and the on-screen warning both read one "
+                   "`inertReason`, which is keyed on the loader's own rule",
+                   "; ".join(problems))
+
     cid = "layout/no-speech-is-routed-by-kind-not-prose"
     if ctx.wants(cid):
         # "No speech in the recording" is a VERDICT, not a fault, and the app
@@ -5594,6 +5821,98 @@ def run_qwen3(rep: Report, ctx):
                        "; ".join(problems))
         except Exception as exc:  # noqa: BLE001
             rep.fail(cid, f"could not evaluate the coupling: {exc!r}")
+
+
+# ============================================================ diarizen group
+#
+# The FIFTH diarization engine's first sidecar check (2026-08-14). PURE — AST
+# only, no model load and no audio, because this engine's interpreter is not the
+# one running the suite.
+DIARIZEN_CHECKS = [
+    "diarizen/pinned-count-is-restored",
+]
+
+
+def run_diarizen(rep: Report, ctx):
+    import ast
+
+    # A PINNED SPEAKER COUNT MUST BE UNDONE BEFORE THE NEXT JOB, and it is pinned
+    # here rather than left to notice because the failure is SILENT and lands on
+    # the wrong stream.
+    #
+    # This engine takes no `num_speakers=` kwarg — it overrides pyannote's
+    # `__call__` — so the count is applied by MUTATING `pipeline.min_speakers` /
+    # `.max_speakers`, which outlive the job. Office and remote are separate
+    # identity spaces holding different people and share this ONE process, so a
+    # pinned office pass that never restored would silently force the room's
+    # headcount onto the far end: the 2026-08-11 defect rebuilt inside the
+    # sidecar, below every Swift guard that watches for it (`remoteNumSpeakers`,
+    # `layout/remote-passes-never-send-the-room-count`). Nothing would fail — the
+    # remote pass would simply return the wrong number of people.
+    #
+    # `finally` specifically, not a line after the call: `pipeline(audio)` is
+    # wrapped in try/except and a job that RAISES must still restore.
+    if ctx.wants("diarizen/pinned-count-is-restored"):
+        cid = "diarizen/pinned-count-is-restored"
+        try:
+            tree = ast.parse((SCRIPTS / DIARIZEN_SERVICE).read_text())
+            BOUNDS = {"min_speakers", "max_speakers"}
+
+            def bounds_assigned(nodes, *, from_source=None):
+                """Which of the two bounds are assigned on `pipeline` in here.
+
+                `from_source` narrows it to assignments whose VALUE mentions that
+                name. Without it the two halves of this check cannot tell each
+                other apart: the restore assigns both bounds too, so a whole-tree
+                walk is satisfied by the restore alone and the positive half
+                silently stops discriminating. That is exactly what the second
+                negative control caught on 2026-08-14 — it passed while the pin
+                had been deleted.
+                """
+                found = set()
+                for node in nodes:
+                    for sub in ast.walk(node):
+                        if not isinstance(sub, ast.Assign):
+                            continue
+                        if from_source and from_source not in ast.unparse(sub.value):
+                            continue
+                        for t in sub.targets:
+                            for el in (t.elts if isinstance(t, ast.Tuple) else [t]):
+                                if (isinstance(el, ast.Attribute)
+                                        and el.attr in BOUNDS
+                                        and ast.unparse(el.value) == "pipeline"):
+                                    found.add(el.attr)
+                return found
+
+            problems = []
+            restoring = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Try) and node.finalbody:
+                    restoring.append(bounds_assigned(node.finalbody))
+
+            # The POSITIVE half — the pin really is applied. Without it a sidecar
+            # that had simply stopped honouring the count would pass this check
+            # while the SPK picker stayed lit, which is the promise-with-nothing-
+            # behind-it that `honoursSpeakerCount` exists to prevent.
+            if bounds_assigned([tree], from_source="num_speakers") != BOUNDS:
+                problems.append("the sidecar no longer assigns BOTH "
+                                "pipeline.min_speakers and .max_speakers FROM "
+                                "num_speakers — `ModelLoader.honoursSpeakerCount` "
+                                "lists this engine, so the SPK picker would "
+                                "promise a pin nothing applies")
+            elif not any(b == BOUNDS for b in restoring):
+                problems.append("no `finally` restores both bounds — a pinned "
+                                "office pass would leak its count into the next "
+                                "job, and the next job may be the REMOTE stream, "
+                                "which is a different set of people")
+
+            rep.expect(cid, not problems,
+                       "a pinned speaker count is applied as instance bounds and "
+                       "restored in a `finally`, so it cannot outlive its job and "
+                       "reach the other stream",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not read the diarizen sidecar: {exc!r}")
 
 
 # ===================================================================== main
@@ -5840,6 +6159,7 @@ GROUPS = [
     ("pyannote", PYANNOTE_CHECKS, run_pyannote),
     ("spectral", SPECTRAL_CHECKS, run_spectral),
     ("campplus", CAMPPLUS_CHECKS, run_campplus),
+    ("diarizen", DIARIZEN_CHECKS, run_diarizen),
     ("nemo", NEMO_CHECKS, run_nemo),
     ("wespeaker", WESPEAKER_CHECKS, run_wespeaker),
 ]

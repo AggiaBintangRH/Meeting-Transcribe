@@ -373,20 +373,28 @@ final class SettingsMatrixTests: XCTestCase {
     /// were unchanged because both already counted correctly — all three honour
     /// the number, which is what puts them on this side.
     ///
-    /// DiariZen is the half that matters: `diarizen-service.py` never reads
-    /// `num_speakers`, so if it ever appeared here the chip would light up and
-    /// promise something no sidecar does.
+    /// ⚠ DiariZen MOVED SIDES on 2026-08-14 (owner: the picker must work on every
+    /// engine). Its sidecar now narrows `min_speakers`/`max_speakers` per job —
+    /// instance bounds, because that pipeline overrides `__call__` and takes no
+    /// `num_speakers=` kwarg. Measured one-directional: it obeys a SMALLER count
+    /// and ignores a larger one, so a wrong number there can only merge people,
+    /// never invent one.
+    ///
+    /// **MOSS is now the half that matters**, and it is a permanent `false` rather
+    /// than an unfinished one: speaker labels come out of a 0.9B LM as `[Sxx]`
+    /// tags, there is no clustering stage to bound, and steering it by prompt was
+    /// measured inert (2026-07-31). Five of six on this side; the sixth cannot
+    /// join without a mechanism that does not exist.
     func testOnlyTheEnginesThatReadTheCountAreSaidToHonourIt() {
         for engine in [ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID,
-                       ModelLoader.nemoEngineID] {
+                       ModelLoader.nemoEngineID, ModelLoader.camPlusEngineID,
+                       ModelLoader.diarizenEngineID] {
             XCTAssertTrue(ModelLoader.honoursSpeakerCount(diarEngine: engine),
                           "\(engine)'s sidecar reads num_speakers and must be honoured")
         }
-        for engine in [ModelLoader.diarizenEngineID, ModelLoader.mossEngineID] {
-            XCTAssertFalse(ModelLoader.honoursSpeakerCount(diarEngine: engine),
-                           "\(engine) does not read num_speakers — saying it does would "
-                           + "make the SPK control promise what no pass delivers")
-        }
+        XCTAssertFalse(ModelLoader.honoursSpeakerCount(diarEngine: ModelLoader.mossEngineID),
+                       "MOSS has no count mechanism at all — saying it does would "
+                       + "make the SPK control promise what no pass delivers")
     }
 
     /// PYANNOTE SENDS THE COUNT ONLY ON ITS FULL STOP PASS, and the SPK chip must
@@ -398,43 +406,47 @@ final class SettingsMatrixTests: XCTestCase {
     /// so forcing the meeting's count onto it would make it invent people — which
     /// is exactly why the honest fix is in the chip, not in the wire.
     ///
-    /// The dangerous leg is `finalPass = true, continueOnStop = true`: that toggle
-    /// is visible only while the stop pass is OFF, so a stored `true` can outlive
-    /// the control that set it — the value-outliving-its-control shape.
+    /// ⚠ RE-AIMED 2026-08-14. This used to assert a THIRD state — `finalPass` on
+    /// WITH the tail on, which sent no count — and called it "the dangerous leg",
+    /// because that toggle was visible only while the stop pass was OFF and a
+    /// stored `true` could outlive the control that set it. The owner hit exactly
+    /// that and settled it at the source: *"pas On mah diulang diarize dari awal
+    /// sampai akhir."* A stop pass is now unconditionally a FULL pass, so the
+    /// state no longer exists and `continueOnStop` is no longer a parameter.
+    ///
+    /// The rule that survives is the one that was always the real one: a count
+    /// reaches pyannote when a full pass runs, and never on a `chunk` job.
     func testPyannoteOnlyGetsTheCountOnAFullStopPass() {
-        func reaches(_ finalPass: Bool, _ continueOnStop: Bool) -> Bool {
+        func reaches(_ finalPass: Bool) -> Bool {
             ModelLoader.speakerCountReachesEngine(diarEngine: ModelLoader.pyannoteEngineID,
                                                   diarizationEnabled: true,
-                                                  finalPass: finalPass,
-                                                  continueOnStop: continueOnStop)
+                                                  finalPass: finalPass)
         }
-        XCTAssertTrue(reaches(true, false), "the full stop pass is the one that sends it")
-        XCTAssertFalse(reaches(true, true), "a TAIL pass is a chunk job and carries no count")
-        XCTAssertFalse(reaches(false, false), "no stop pass at all means no count")
-        XCTAssertFalse(reaches(false, true))
+        XCTAssertTrue(reaches(true), "the stop pass is a full pass and sends it")
+        XCTAssertFalse(reaches(false),
+                       "no stop pass means live windows and at most a tail, both "
+                       + "`chunk` jobs that carry no count")
 
-        // The BATCH engines ignore both keys by design — their stop pass IS the
-        // labels — so neither setting may take the count away from them. Without
-        // this half, folding the pyannote rule in could silently disable spectral,
-        // which is the ONE engine the count measurably helps.
-        for engine in [ModelLoader.spectralEngineID, ModelLoader.nemoEngineID] {
+        // The BATCH engines ignore `finalPass` for this — their pass IS the labels
+        // — so it may not take the count away from them. Without this half,
+        // folding the pyannote rule in could silently disable spectral, which is
+        // the ONE engine the count measurably helps.
+        for engine in [ModelLoader.spectralEngineID, ModelLoader.nemoEngineID,
+                       ModelLoader.camPlusEngineID, ModelLoader.diarizenEngineID] {
             for finalPass in [true, false] {
-                for tail in [true, false] {
-                    XCTAssertTrue(
-                        ModelLoader.speakerCountReachesEngine(diarEngine: engine,
-                                                              diarizationEnabled: true,
-                                                              finalPass: finalPass,
-                                                              continueOnStop: tail),
-                        "\(engine) must keep the count whatever finalPass=\(finalPass) "
-                        + "continueOnStop=\(tail) say — it reads neither")
-                }
+                XCTAssertTrue(
+                    ModelLoader.speakerCountReachesEngine(diarEngine: engine,
+                                                          diarizationEnabled: true,
+                                                          finalPass: finalPass),
+                    "\(engine) must keep the count whatever finalPass=\(finalPass) "
+                    + "says — it does not read it")
             }
         }
 
         // And diarization off means nothing is counted, for anyone.
         XCTAssertFalse(ModelLoader.speakerCountReachesEngine(
             diarEngine: ModelLoader.spectralEngineID, diarizationEnabled: false,
-            finalPass: true, continueOnStop: false))
+            finalPass: true))
     }
 
     /// THE REMOTE STREAM IS NEVER TOLD THE ROOM'S HEADCOUNT.

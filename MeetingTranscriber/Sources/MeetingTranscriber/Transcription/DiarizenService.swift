@@ -183,18 +183,21 @@ final class DiarizenService: @unchecked Sendable {
     // MARK: - Jobs
 
     /// The ONLY job this engine has: one whole-file pass. `numSpeakers` 0 = auto,
-    /// which is the ONLY mode the app ever asks for — there is no Settings control
-    /// for a speaker count under this engine and none is wanted (owner,
-    /// 2026-08-10: *"saya ingin speakernya itu auto / gak ditulis"*). The count
-    /// comes from the checkpoint's own `min_speakers` 2 / `max_speakers` 8 and its
-    /// `min_cluster_size`. The parameter stays because
-    /// `AudioRecorder.diarNumSpeakers` is the one place that decision lives,
-    /// shared by all five engines.
+    /// which is still the DEFAULT and the checkpoint's own `min_speakers` 2 /
+    /// `max_speakers` 8 with its `min_cluster_size`.
     ///
-    /// **`num_speakers` IS SENT AND THE SIDECAR IGNORES IT.** Left in so the job
-    /// line records what was asked for, and so this signature matches the other
-    /// engines' — the language-picker precedent (2026-07-31): a value that dies
-    /// where the truth is, rather than in two places.
+    /// ⚠ **THE SIDECAR NOW READS IT** (2026-08-14). It did not until then — the
+    /// owner's *"saya ingin speakernya itu auto / gak ditulis"* (2026-08-10) put
+    /// this engine outside `ModelLoader.honoursSpeakerCount`, and this doc said in
+    /// bold that the field was sent and ignored. The owner reversed that: the SPK
+    /// picker must work on every engine.
+    ///
+    /// Nothing on the wire changed — the field was already being sent, for exactly
+    /// the language-picker reason (2026-07-31: a value dies where the truth is,
+    /// not at the Swift boundary). What changed is that the truth moved: see
+    /// `diarizen-service.py` at the `pipeline(audio)` call for HOW it is applied
+    /// (instance bounds, not a kwarg — this pipeline overrides `__call__`) and for
+    /// the measurement that it obeys a smaller count and ignores a larger one.
     ///
     /// `exclusive` and `cluster_threshold` are pyannote's knobs and are not sent —
     /// this sidecar reads neither, so sending them would be inventing a knob.

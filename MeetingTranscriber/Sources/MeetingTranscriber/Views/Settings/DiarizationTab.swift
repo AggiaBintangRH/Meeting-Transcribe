@@ -25,6 +25,12 @@ struct DiarizationTab: View {
     @AppStorage("diarization.finalPass")   private var finalPass = true
     @AppStorage("diarization.continueOnStop") private var continueOnStop = false
     @AppStorage("diarization.intervalSec") private var intervalSec = 30
+    /// Read-only here, and it is the SAME key `SpeakerCountView` writes and
+    /// `AudioRecorder.diarNumSpeakers` reads — one value, not a third reader that
+    /// could disagree. Used only to say whether a count is pinned, because
+    /// "speaker count automatic" was hand-written into four engine notes and was
+    /// wrong in all four (2026-08-14 audit).
+    @AppStorage("diarization.numSpeakers") private var office = 0
     // REMOVED 2026-08-06 (owner), controls and reads both: `diarization.live`
     // (always on), `.detectOverlap` (the Detect overlap tab owns this now),
     // `.resetOnStart` (always fresh) and `.numSpeakers` (always auto). Each is
@@ -76,6 +82,57 @@ struct DiarizationTab: View {
     /// hiding something still in force; it is the UI agreeing with a rule that
     /// already ignores them.
     private var isBatchEngine: Bool { isSpectral || isNemo || isDiarizen || isCamPlus }
+
+    /// The first two lines of every whole-file engine's note, DERIVED from the
+    /// settings actually in force.
+    ///
+    /// ⚠ ALL FOUR WERE HAND-WRITTEN AND ALL FOUR WERE STALE — found by the
+    /// 2026-08-14 audit, and it is the third time this exact class has appeared
+    /// (three engine lists, all stale, in one sweep on 2026-08-13). Each said:
+    ///
+    ///   * "**No settings**" — while three controls sat directly above the text;
+    ///   * "the whole recording is diarized **once at Stop**" — false since
+    ///     2026-08-13, when switching the stop pass off gave these engines a live
+    ///     per-interval path instead;
+    ///   * "**speaker count automatic**" — flatly contradicting
+    ///     `ModelLoader.honoursSpeakerCount`, which is `true` for all four;
+    ///   * and spectral's added "This engine has **no live pass**".
+    ///
+    /// A sentence beside a control it contradicts is worse than no sentence, so
+    /// this one reads the same values the controls bind to, and `overlapLine`
+    /// reads the loader's rule. Nothing about these four notes is hand-written any
+    /// more — which is the only form of the fix that a seventh engine cannot make
+    /// stale again.
+    private var batchEngineNote: String {
+        let pass = stopPassBinding.wrappedValue
+            ? "The whole recording is diarized once at Stop."
+            : "Labels are made live, one window every \(intervalSec)s"
+              + (tailBinding.wrappedValue ? ", plus the tail at Stop." : ".")
+        // NOT "automatic" — these four read the number, which is exactly what the
+        // old text denied. Auto is only what happens when nobody sets one, and in
+        // the live mode above it is measured to be the failing case.
+        let count = office > 0
+            ? "Speaker count pinned to \(office)."
+            : "Speaker count automatic — set one beside the record button if the "
+              + "transcript shows people who were not there."
+        return pass + " " + count + "\nProfiles and renaming work. "
+             + "spk confidence usually will not appear."
+             + "\n" + overlapLine
+    }
+
+    /// The third line, DERIVED from `ModelLoader.marksItsOwnOverlap`.
+    ///
+    /// It was per-engine prose, and spectral's block simply did not have it — so
+    /// the one engine of the four whose note said nothing about overlap was one
+    /// that cannot mark it, i.e. the case where the sentence matters. Deriving it
+    /// gives spectral the line back and makes a seventh engine impossible to miss,
+    /// which is the same reason `diarizationEnginesWithoutOwnOverlap` exists.
+    private var overlapLine: String {
+        ModelLoader.marksItsOwnOverlap(diarEngine: engine)
+            ? "It marks overlapping speech itself, so Detect overlap is not used here."
+            : "It cannot mark two people at once, so overlap repair needs Detect "
+            + "overlap switched on."
+    }
     var body: some View {
         Group {
             
@@ -95,7 +152,7 @@ struct DiarizationTab: View {
             // `identify`. See `AudioRecorder+BatchLiveDiarization`.
             SettingBlock(title: "Run at stop") {
                 SettingToggle(label: "Run a diarization pass at stop", isOn: stopPassBinding)
-                Text("One more pass after you stop, to finalise speaker labels.")
+                Text("On: the whole recording is re-diarized from start to end after you stop — the best labels, and the only mode a set speaker count reaches. Off: labels come from the live passes instead.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -107,12 +164,27 @@ struct DiarizationTab: View {
                 // numbers twice and does not want the tab repeating them.
             }
 
-            // VISIBILITY IS THE OWNER'S RULE, chosen with the consequence stated:
-            // these appear while the stop pass is OFF. Note that `continueOnStop`
-            // is read ONLY inside `if willRunStopPass` (AudioRecorder.stop), so in
-            // this branch the tail toggle is stored but does nothing. Kept as
-            // asked — flipping the condition is the whole change if that is ever
-            // revisited.
+            // TWO CONTROLS AT THE TOP, FOR EVERY ENGINE, AND NOTHING ELSE UNTIL
+            // THE STOP PASS IS OFF (owner, 2026-08-14): *"pertama hanya ada Enable
+            // Diarization, Run Diarization at Stop … ketika false baru ada Interval
+            // Chunked, Continue Tail."*
+            //
+            // ⚠ THE BEHAVIOUR MOVED WITH THE LAYOUT, which is the whole point.
+            // Both settings below describe the LIVE path, and the live path is
+            // what runs in place of a stop pass. Until today `continueOnStop` was
+            // read only when the stop pass was ON — visible where inert, active
+            // where invisible — and the owner paid for that: a stale `true` turned
+            // the office pass into a tail, a tail is a `chunk` job carrying no
+            // `num_speakers`, and the SPK picker went dim with nothing in the UI
+            // able to explain or undo it. `runsTailPassAtStop`, `mossStopMode` and
+            // `remoteStopMode` now all read it in this branch only, so a stop pass
+            // is unconditionally a full re-diarization.
+            //
+            // NO `isBatchEngine` GUARD ON THE TAIL, deliberately. It was written
+            // that way for an hour and it was the stale-list mistake again: those
+            // four engines HAVE had a live path since 2026-08-13, so they have a
+            // leftover window at Stop exactly like pyannote does, and `stop()`
+            // flushes it under this same setting.
             if !stopPassBinding.wrappedValue {
                 if !isMoss {
                     SettingBlock(title: "Chunked interval") {
@@ -134,7 +206,7 @@ struct DiarizationTab: View {
 
                 SettingBlock(title: "Tail") {
                     SettingToggle(label: "Continue from live labels (tail only)", isOn: tailBinding)
-                    Text("On: only the audio after the last live chunk is diarized, so numbering stays stable. Off: the whole recording is re-diarized.")
+                    Text("On: at stop, the audio after the last live window is diarized too, so the final seconds are not left unlabelled. Off: whatever the live passes produced is the transcript.")
                         .font(.system(size: 11))
                         .foregroundColor(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
@@ -157,8 +229,7 @@ struct DiarizationTab: View {
                     pyannoteSettings
                 }
             } else if isSpectral {
-                Text("No settings. This engine has no live pass — it diarizes the whole "
-                     + "recording once, after you press Stop, every time.")
+                Text(batchEngineNote)
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -178,12 +249,7 @@ struct DiarizationTab: View {
                 // number. pyannote differs only because it identifies per 30 s
                 // chunk, and chunk 2 onward matches chunk 1's fresh profiles.
                 // A promise the architecture cannot keep is worse than a caveat.
-                Text("No settings — the whole recording is diarized once at Stop, "
-                     + "speaker count automatic.\n"
-                     + "Profiles and renaming work. spk confidence usually will not "
-                     + "appear.\n"
-                     + "It cannot mark two people at once, so overlap repair needs "
-                     + "Detect overlap switched on.")
+                Text(batchEngineNote)
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -206,12 +272,7 @@ struct DiarizationTab: View {
                 // survived prevents a wrong expectation; the REASONS moved into
                 // this comment, where the next maintainer needs them and the client
                 // does not. Do not grow it back.
-                Text("No settings — the whole recording is diarized once at Stop, "
-                     + "speaker count automatic.\n"
-                     + "Profiles and renaming work. spk confidence usually will not "
-                     + "appear.\n"
-                     + "It marks overlapping speech itself, so Detect overlap is not "
-                     + "used here.")
+                Text(batchEngineNote)
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
@@ -226,12 +287,7 @@ struct DiarizationTab: View {
                 // it cannot mark overlap — the same sentence NeMo's branch carries,
                 // and it is a property of the clustering, not a family resemblance.
                 // Same three-sentence limit the owner set on 2026-08-10.
-                Text("No settings — the whole recording is diarized once at Stop, "
-                     + "speaker count automatic.\n"
-                     + "Profiles and renaming work. spk confidence usually will not "
-                     + "appear.\n"
-                     + "It cannot mark two people at once, so overlap repair needs "
-                     + "Detect overlap switched on.")
+                Text(batchEngineNote)
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)

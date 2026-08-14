@@ -367,22 +367,35 @@ final class DiarizenEngineTests: XCTestCase {
         }
     }
 
-    /// `continueOnStop` cannot be honoured by an engine with no chunk job and no
-    /// live labels, so the remote pass is ALWAYS full — `supportsTail: false`, as
-    /// spectral and NeMo pass it. Both directions: the same inputs with the default
-    /// still give `.tail`, which is what proves the parameter changed the answer.
+    /// ⚠ RE-AIMED 2026-08-14 — `supportsTail` still matters, but in a different
+    /// branch. `continueOnStop` used to be read whenever the stop pass ran, so
+    /// this asserted that DiariZen fell through to `.full` while pyannote got
+    /// `.tail` from the same inputs. The owner then made a stop pass
+    /// unconditionally a full pass (*"pas On mah diulang diarize dari awal sampai
+    /// akhir"*), which is a stronger version of the same guarantee: with the stop
+    /// pass ON, DiariZen gets its full pass and `supportsTail` cannot affect it at
+    /// all.
+    ///
+    /// Both directions are still asserted, and the discriminating half moved to
+    /// the stop-pass-OFF branch — the only place a tail is now decided.
     func testRemoteTailIsUnavailableToDiarizenButUnchangedForPyannote() {
-        func mode(supportsTail: Bool) -> AudioRecorder.RemoteStopMode {
-            AudioRecorder.remoteStopMode(finalPass: true, continueOnStop: true,
+        func mode(supportsTail: Bool, finalPass: Bool) -> AudioRecorder.RemoteStopMode {
+            AudioRecorder.remoteStopMode(finalPass: finalPass, continueOnStop: true,
                                          remoteStreamActive: true, hasDiarizationService: true,
                                          hasRemoteRecording: true, tailSamples: 480_000,
                                          supportsTail: supportsTail)
         }
-        XCTAssertEqual(mode(supportsTail: false), .full,
-                       "with no tail available the pass must fall through to the full one, "
-                       + "not to .none — .none would leave the meeting unlabelled")
-        XCTAssertEqual(mode(supportsTail: true), .tail,
-                       "pyannote's behaviour must be byte-for-byte what it was")
+        for supportsTail in [true, false] {
+            XCTAssertEqual(mode(supportsTail: supportsTail, finalPass: true), .full,
+                           "a stop pass is a FULL pass for every engine — "
+                           + "supportsTail=\(supportsTail) must not change that")
+        }
+        XCTAssertEqual(mode(supportsTail: false, finalPass: false), .none,
+                       "with the stop pass off and no tail available there is "
+                       + "nothing this engine can run")
+        XCTAssertEqual(mode(supportsTail: true, finalPass: false), .tail,
+                       "pyannote CAN continue from its live labels, which is what "
+                       + "makes this parameter the thing that changed the answer")
     }
 
     /// DiariZen adds NO startup refusal, and that is a decision rather than an

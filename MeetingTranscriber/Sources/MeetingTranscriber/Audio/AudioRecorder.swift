@@ -272,6 +272,12 @@ final class AudioRecorder: ObservableObject {
     /// start. See `AudioRecorder+BatchLiveDiarization`.
     var liveDiarWindowByPath: [String: Double] = [:]
 
+    /// CONSECUTIVE live-window failures, so a dead sidecar becomes visible while a
+    /// single awkward window stays silent. See `handleBatchLiveFailure` for why
+    /// the run matters and why no-speech does not count toward it. Reset on any
+    /// window that lands, and with the meeting in `clearVisibleMeetingState`.
+    var batchLiveFailureRun = 0
+
     /// Hands out the arrival order of LIVE rows, across both streams.
     ///
     /// **A row's place is decided when it first appears, and then it stays there**
@@ -837,6 +843,15 @@ final class AudioRecorder: ObservableObject {
         overlapRepairError = nil
         overlapRepairProgress = nil
         stopSteps = []
+        // Any live diarization window still outstanding belongs to the meeting
+        // being cleared. Its reply can no longer be applied to anything, so both
+        // its temp WAV and its map entry go with it — the map had no lifecycle
+        // clear anywhere until the 2026-08-14 audit.
+        releaseBatchLiveWindows()
+        // Travels with the caution it can raise, for the same reason: a run
+        // carried into a fresh meeting would accuse an engine that has not been
+        // asked anything yet.
+        batchLiveFailureRun = 0
     }
 
     /// When this meeting happened — the date the exported PDF is stamped with.
@@ -1633,10 +1648,21 @@ final class AudioRecorder: ObservableObject {
         // before `lastChunkBoundary` moves, exactly as the remote tail above is.
         // There is no stop-time MOSS pass of any kind beyond this: the last
         // chunk's result IS the tail, because the engine labels as it transcribes.
-        // What the MOSS DIARIZATION engine does at stop. Both keys absent →
-        // `.tail`, the branch this line has always taken. Only ever `.full` when
-        // a SECOND MOSS process exists (another model does the ASR) — in
-        // MOSS+MOSS the tail is the chunked tail and `chunked.*` governs it.
+        // What the MOSS DIARIZATION engine does at stop.
+        //
+        // ⚠ BOTH KEYS ABSENT IS NOW `.full`, NOT `.tail` (2026-08-14). This
+        // comment said "`.tail`, the branch this line has always taken" and was
+        // describing the opposite of the code within a day of the change — the
+        // stale-comment class this project treats as a real finding, caught by the
+        // third audit pass. `moss.continueOnStop` defaults to TRUE, and the owner's
+        // rule made a stop pass unconditionally a full re-diarization, so the
+        // default MOSS session now ends in one. `.tail` moved to the stop-pass-OFF
+        // branch with every other engine's.
+        //
+        // Reachable only when a SECOND MOSS process exists — MOSS as the diarizer
+        // with the chunked pass switched off (`needsSecondMossProcess`). In
+        // MOSS+MOSS `hasDiarService` is nil, the guard returns `.none`, and the
+        // tail is the chunked tail governed by `chunked.*`.
         // See AudioRecorder+MossStop.swift.
         let mossPlan = Self.mossStopPlan(Self.mossStopMode(
             finalPass: UserDefaults.standard.object(forKey: "moss.finalPass") as? Bool ?? true,
@@ -1808,9 +1834,18 @@ final class AudioRecorder: ObservableObject {
             hasService: modelLoader.camPlus != nil,
             hasRecording: lastRecordingURL != nil,
             finalPass: finalOn)
+        // A TAIL-ONLY pass, which now belongs to the stop-pass-OFF branch — the
+        // owner's rule of 2026-08-14, stated once in `runsTailPassAtStop` so this
+        // and the Diarization tab cannot describe the same setting differently.
+        // pyannote only: `diarizeTailChunk` guards on its service, and the batch
+        // engines' leftover window is flushed further down without taking the gate.
+        let runsTailPass = Self.runsTailPassAtStop(finalPass: finalOn,
+                                                   continueOnStop: continueOnStop,
+                                                   hasLivePath: modelLoader.pyannote != nil)
         let willRunStopPass = runsSpectralPass || runsNemoPass || runsDiarizenPass
             || runsCamPlusPass
             || (finalOn && modelLoader.pyannote != nil)
+            || runsTailPass
         // The remote pass is dispatched HERE, before the overlay is built, so the
         // step list knows whether to show a remote-diarization row. Queued ahead
         // of the office stop pass on the same stdin; the sidecar drains it in
@@ -1899,7 +1934,12 @@ final class AudioRecorder: ObservableObject {
                 startDiarizenDiarization(recording)
             } else if runsCamPlusPass, let recording = lastRecordingURL {
                 startCamPlusDiarization(recording)
-            } else if continueOnStop {
+            } else if runsTailPass {
+                // ⚠ REACHED ONLY WITH `finalPass` OFF (see `runsTailPassAtStop`).
+                // With the stop pass ON this is now unconditionally the full pass
+                // below, whatever `continueOnStop` holds — the owner's rule of
+                // 2026-08-14, and what makes a set speaker count always reach
+                // pyannote when a stop pass runs at all.
                 diarizeTailChunk()
             } else if let recording = lastRecordingURL {
                 startDiarization(recording)
@@ -1909,7 +1949,18 @@ final class AudioRecorder: ObservableObject {
                 maybeStartOverlapRepair()
             }
         } else {
-            // No stop-time pass — overlap repair can proceed once the last chunk lands.
+            // No stop-time pass. The four whole-file engines have a LIVE path
+            // here, so the audio since their last window would otherwise reach
+            // Stop with no labels — `continueOnStop` is what finishes it. Sent as
+            // one more ordinary live window rather than through the stop gate,
+            // because that whole path is fire-and-forget by design and holding the
+            // blocking overlay for a few seconds of labels would cost the user
+            // their transcript's arrival.
+            if continueOnStop, batchLiveDiarizationActive, !chunkAudio.isEmpty {
+                dispatchBatchLiveWindow(windowStart: chunkAudioStart, samples: chunkAudio)
+                chunkAudio = []
+            }
+            // Overlap repair can proceed once the last chunk lands.
             finalDiarDone = true
             maybeStartOverlapRepair()
         }

@@ -45,7 +45,7 @@ extension AudioRecorder {
     /// What the MOSS diarization engine does at Stop.
     enum MossStopMode: Hashable {
         case none   // no MOSS pass at stop; the last live chunk ends the labels
-        case tail   // flush the sidecar's live buffer — today's behaviour
+        case tail   // flush the sidecar's live buffer (stop pass OFF)
         case full   // re-diarize the whole recording in 120 s windows
     }
 
@@ -60,8 +60,17 @@ extension AudioRecorder {
                                          hasDiarService: Bool,
                                          hasRecording: Bool) -> MossStopMode {
         guard hasDiarService else { return .none }
-        guard finalPass else { return .none }
-        if continueOnStop { return .tail }
+        // ⚠ THE TWO SETTINGS NO LONGER OVERLAP (owner, 2026-08-14) — see
+        // `remoteStopMode` for the failure that prompted it. `finalPass` ON is
+        // ALWAYS a full pass; `continueOnStop` is read only where its toggle is
+        // visible, i.e. with the stop pass OFF.
+        //
+        // ⚠ THIS CHANGES MOSS'S SHIPPED DEFAULT, and that is the point rather than
+        // a side effect: `moss.continueOnStop` defaults to TRUE, so a default MOSS
+        // session used to end in a tail and now ends in a full re-diarization. The
+        // owner's rule was stated for the control, and one control governs both
+        // pairs — a MOSS exception would be the same setting meaning two things.
+        if !finalPass { return continueOnStop ? .tail : .none }
         // No recording on disk ⇒ nothing to re-read. Degrade to the tail rather
         // than to nothing, so a missing file never costs the user the tail.
         return hasRecording ? .full : .tail
@@ -69,7 +78,8 @@ extension AudioRecorder {
 
     /// Exactly what `stop()` does for a given mode.
     struct MossStopPlan: Equatable {
-        /// Flush the live buffer for the tail window (today's behaviour).
+        /// Flush the live buffer for the tail window. NO LONGER THE DEFAULT —
+        /// both keys absent gives `.full` since 2026-08-14; see `mossStopMode`.
         var flushesTail = false
         /// Settle `mossLastChunkDone` right here, because nothing async will.
         var settlesImmediately = false

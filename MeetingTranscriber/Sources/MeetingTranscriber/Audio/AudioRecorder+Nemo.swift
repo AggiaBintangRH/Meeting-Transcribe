@@ -47,8 +47,19 @@ extension AudioRecorder {
         nemoDiarizationActive = diarOn && engine == ModelLoader.nemoEngineID
         guard nemoDiarizationActive, let service = modelLoader.nemo else { return }
 
-        nemoLog("engine=nemo — no live labels this session; "
-                + "one whole-file pass per stream at Stop")
+        // WHICH MODE THIS SESSION IS IN, not a fixed sentence. It read "no live
+        // labels this session; one whole-file pass per stream at Stop"
+        // unconditionally, which stopped being true on 2026-08-13 when these four
+        // engines gained a live path — and a log that describes the opposite of
+        // what the session does is worse than no log, because the log is the
+        // evidence a later audit reads. Also releases any window left over from a
+        // previous session, which nothing did until the 2026-08-14 audit.
+        releaseBatchLiveWindows()
+        nemoLog(batchLiveDiarizationActive
+                   ? "engine=nemo — LIVE labels, one window per interval; "
+                     + "no pass at Stop"
+                   : "engine=nemo — no live labels this session; "
+                     + "one whole-file pass per stream at Stop")
 
         // The SAME two handlers pyannote's and spectral's final replies use,
         // because the wire shape is the same and the identity stage is shared.
@@ -84,6 +95,15 @@ extension AudioRecorder {
         }
         service.onError = { [weak self] message, stream in
             Task { @MainActor in
+                // A LIVE WINDOW'S failure is not the stop pass's. Routed first, and
+                // `handleBatchLiveFailure` explains why the mode flag is a
+                // sufficient test — no stop pass runs at all in that mode, so
+                // `handleDiarizationFailure` (which paints the transcript red and
+                // settles the stop gate) can never be the right destination.
+                if self?.handleBatchLiveFailure(message, stream: stream,
+                                                noSpeech: false,
+                                                liveMode: self?.batchLiveDiarizationActive == true)
+                    == true { return }
                 self?.nemoLog("FAILED (\(stream == .office ? "office" : "remote")): \(message)")
                 self?.handleDiarizationFailure(message, stream: stream)
             }
@@ -95,6 +115,15 @@ extension AudioRecorder {
         // reads, and it called a correct result a failure until 2026-08-12.
         service.onNoSpeech = { [weak self] message, stream in
             Task { @MainActor in
+                // A LIVE WINDOW'S failure is not the stop pass's. Routed first, and
+                // `handleBatchLiveFailure` explains why the mode flag is a
+                // sufficient test — no stop pass runs at all in that mode, so
+                // `handleDiarizationFailure` (which paints the transcript red and
+                // settles the stop gate) can never be the right destination.
+                if self?.handleBatchLiveFailure(message, stream: stream,
+                                                noSpeech: true,
+                                                liveMode: self?.batchLiveDiarizationActive == true)
+                    == true { return }
                 self?.nemoLog("NO SPEECH (\(stream == .office ? "office" : "remote")): "
                               + "\(message)")
                 self?.handleDiarizationFailure(message, stream: stream, noSpeech: true)

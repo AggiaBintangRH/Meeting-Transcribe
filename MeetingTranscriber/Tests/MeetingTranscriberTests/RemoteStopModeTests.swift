@@ -50,55 +50,75 @@ final class RemoteStopModeTests: XCTestCase {
 
     // MARK: - 2. The branch itself
 
-    /// The default (continueOnStop on) is now the TAIL, not a full pass — this is
-    /// the actual behaviour change.
-    func testDefaultsToTailSoLiveLabelsSurviveStop() {
-        XCTAssertEqual(mode(), .tail)
+    /// ⚠ THE TWO SETTINGS STOPPED OVERLAPPING on 2026-08-14 (owner: *"Tail hanya
+    /// muncul dan dipakai pas Run At Stop = OFF … pas On mah diulang diarize dari
+    /// awal sampai akhir"*), and the tests below moved with the rule rather than
+    /// being deleted. Before it, `finalPass` ON + `continueOnStop` ON was a TAIL —
+    /// while the tail's own toggle was visible only with the stop pass OFF, so the
+    /// value decided behaviour where it could not be changed.
+    ///
+    /// A stop pass is therefore a FULL pass, whatever the tail setting holds.
+    func testAStopPassIsAlwaysAFullPass() {
+        for continueOnStop in [true, false] {
+            XCTAssertEqual(mode(finalPass: true, continueOnStop: continueOnStop), .full,
+                           "continueOnStop=\(continueOnStop) must not turn a stop "
+                           + "pass into a tail any more")
+        }
     }
 
-    /// continueOnStop off keeps phase 4's behaviour verbatim.
-    func testContinueOffStillRunsTheFullPass() {
-        XCTAssertEqual(mode(continueOnStop: false), .full)
+    /// And the tail is what a LIVE-labelled meeting ends with: the stop pass is
+    /// off, so the audio after the last live window would otherwise carry no
+    /// labels at all.
+    func testTheTailIsTheStopPassOffMode() {
+        XCTAssertEqual(mode(finalPass: false, continueOnStop: true), .tail)
+        XCTAssertEqual(mode(finalPass: false, continueOnStop: false), .none)
     }
 
     /// The full pass needs the Remote WAV; the tail does not (it diarizes the
     /// samples still in memory), so a missing file only blocks the full branch.
     func testFullNeedsTheRemoteWAVButTailDoesNot() {
-        XCTAssertEqual(mode(continueOnStop: false, hasRecording: false), .none)
-        XCTAssertEqual(mode(continueOnStop: true, hasRecording: false), .tail)
-    }
-
-    /// Final pass disabled → no stop pass at all, either mode.
-    func testFinalPassOffRunsNothing() {
-        XCTAssertEqual(mode(finalPass: false, continueOnStop: true), .none)
-        XCTAssertEqual(mode(finalPass: false, continueOnStop: false), .none)
+        XCTAssertEqual(mode(finalPass: true, hasRecording: false), .none)
+        XCTAssertEqual(mode(finalPass: false, continueOnStop: true,
+                            hasRecording: false), .tail)
     }
 
     /// No diarization model loaded → nothing to dispatch to.
     func testNoServiceRunsNothing() {
-        XCTAssertEqual(mode(continueOnStop: true, hasService: false), .none)
-        XCTAssertEqual(mode(continueOnStop: false, hasService: false), .none)
+        for finalPass in [true, false] {
+            for continueOnStop in [true, false] {
+                XCTAssertEqual(mode(finalPass: finalPass,
+                                    continueOnStop: continueOnStop,
+                                    hasService: false), .none)
+            }
+        }
     }
 
     /// The `< 1 s tail` early-out, mirroring `diarizeTailChunk`'s. Strictly
     /// greater than 16 000 samples, so exactly one second does NOT dispatch.
     func testShortTailIsSkippedRatherThanDispatched() {
-        XCTAssertEqual(mode(tailSamples: 0), .none)
-        XCTAssertEqual(mode(tailSamples: oneSecond), .none, "exactly 1s is still skipped")
-        XCTAssertEqual(mode(tailSamples: oneSecond + 1), .tail)
+        func tail(_ samples: Int) -> AudioRecorder.RemoteStopMode {
+            mode(finalPass: false, continueOnStop: true, tailSamples: samples)
+        }
+        XCTAssertEqual(tail(0), .none)
+        XCTAssertEqual(tail(oneSecond), .none, "exactly 1s is still skipped")
+        XCTAssertEqual(tail(oneSecond + 1), .tail)
     }
 
-    /// A tiny tail must not fall back to a full pass — that would reintroduce the
-    /// duplicate-profile failure this change exists to remove.
+    /// A tiny tail must not fall back to a full pass. The stop pass is OFF in this
+    /// branch, so a full re-diarization is precisely what the user did not ask for
+    /// — and it would also reintroduce the duplicate-profile failure tail mode
+    /// exists to avoid.
     func testShortTailDoesNotFallBackToFullPass() {
-        XCTAssertNotEqual(mode(tailSamples: 10), .full)
+        XCTAssertNotEqual(mode(finalPass: false, continueOnStop: true,
+                               tailSamples: 10), .full)
     }
 
     /// Tail-mode dispatch does not consult the WAV at all, so the full-pass
     /// inputs cannot change the tail decision.
     func testTailDecisionIgnoresFullPassInputs() {
         for hasRecording in [true, false] {
-            XCTAssertEqual(mode(continueOnStop: true, hasRecording: hasRecording), .tail)
+            XCTAssertEqual(mode(finalPass: false, continueOnStop: true,
+                                hasRecording: hasRecording), .tail)
         }
     }
 
@@ -141,8 +161,15 @@ final class RemoteStopModeTests: XCTestCase {
                                 if m == .full { XCTAssertTrue(hasRecording) }
                                 if m == .tail { XCTAssertGreaterThan(tail, oneSecond) }
                                 if m != .none {
-                                    XCTAssertTrue(finalPass && active && hasService)
+                                    XCTAssertTrue(active && hasService)
                                 }
+                                // THE TWO MODES ARE NOW DISJOINT ON `finalPass`,
+                                // and asserting it inside the sweep is what stops
+                                // the overlap creeping back: a full pass belongs to
+                                // the stop-pass-ON branch and a tail to the OFF
+                                // one, so no setting can produce both.
+                                if m == .full { XCTAssertTrue(finalPass) }
+                                if m == .tail { XCTAssertFalse(finalPass) }
                             }
                         }
                     }

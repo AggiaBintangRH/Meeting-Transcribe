@@ -111,15 +111,22 @@ final class CamPlusEngineTests: XCTestCase {
 
     /// It HONOURS a pinned speaker count — measured, not assumed: the sidecar
     /// reads `num_speakers` and clusters to exactly that many (pinning
-    /// `Overlap123.wav` to 2 returns 2). Asserted beside DiariZen's `false`,
-    /// because that one is the case a wrong `true` would break: its sidecar
-    /// never reads the field, so lighting the SPK chip there would promise
-    /// something nothing keeps.
-    func testItHonoursAPinnedSpeakerCountWhileDiarizenDoesNot() {
+    /// `Overlap123.wav` to 2 returns 2).
+    ///
+    /// ⚠ RE-AIMED 2026-08-14, not deleted. The second half used to assert
+    /// DiariZen's `false`, and that was a correct pin of the rule at the time —
+    /// its sidecar really did ignore the field. The owner then asked for the
+    /// picker to work on every engine and the sidecar was wired, so the half
+    /// that still carries the danger is **MOSS**: it has no clustering stage to
+    /// bound and no count parameter at all, so a `true` there would light the
+    /// picker for a promise nothing anywhere keeps.
+    func testItHonoursAPinnedSpeakerCountWhileMossCannot() {
         XCTAssertTrue(ModelLoader.honoursSpeakerCount(
             diarEngine: ModelLoader.camPlusEngineID))
-        XCTAssertFalse(ModelLoader.honoursSpeakerCount(
+        XCTAssertTrue(ModelLoader.honoursSpeakerCount(
             diarEngine: ModelLoader.diarizenEngineID))
+        XCTAssertFalse(ModelLoader.honoursSpeakerCount(
+            diarEngine: ModelLoader.mossEngineID))
     }
 
     /// It CANNOT mark overlap itself, so overlap repair under it needs the
