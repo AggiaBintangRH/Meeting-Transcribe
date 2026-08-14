@@ -295,6 +295,111 @@ echo "==> Project root: $ROOT"
 mkdir -p "$CACHE"
 
 # ===========================================================================
+# B0 — PREFLIGHT: everything that depends on THIS MACHINE, checked in seconds
+# ===========================================================================
+#
+# WHY THIS EXISTS, and it is not defensiveness — it is a measured failure. On
+# 2026-08-14 the owner ran this script on a second Mac and it died at [B4] with
+# "no licence could be established for Wespeaker/wespeaker-voxceleb-campplus-LM".
+# The cause was a MISSING 31-BYTE README.md. The cost was ~30 minutes: B1 builds
+# and signs, B2/B2b/B2c/B2d provision four portable interpreters, B3 copies 16 GB
+# of models — and only then does anything look at the thing that was wrong from
+# the first second.
+#
+# So every check below has two properties, and both are the point:
+#
+#   1. It is CHEAP — the whole block is well under a second, because it reads
+#      state rather than producing anything. Nothing here builds, downloads or
+#      copies.
+#   2. It does NOT stop at the first problem. A machine missing three things
+#      should learn all three now, not one per 30-minute round trip. That is the
+#      difference between one fix-up and three evenings.
+#
+# ⚠ EVERY CHECK IS A PRECONDITION THAT ALREADY EXISTED. This block adds no new
+# requirement — it moves the discovery of existing ones to the front. If a check
+# here ever disagrees with the real gate later in the file, the real gate wins
+# and THIS one is the bug: a preflight that refuses a build which would have
+# succeeded is worse than no preflight at all.
+echo ""
+echo "==> [B0] Preflight (machine state)..."
+PREFLIGHT_FAILED=0
+preflight_fail() {
+  PREFLIGHT_FAILED=1
+  echo "    ✗ $1" >&2
+  shift
+  for line in "$@"; do echo "      $line" >&2; done
+}
+
+# --- the four venvs. `download-best-models.sh` creates them; without one the
+#     build dies much later, inside a pip freeze whose error names a path rather
+#     than the thing to run.
+for v in .venv .venv-dicow .venv-nemo .venv-diarizen; do
+  if [[ ! -x "$ROOT/$v/bin/python3" && ! -x "$ROOT/$v/bin/python" ]]; then
+    preflight_fail "$v is missing (no interpreter in $v/bin)" \
+                   "Run ./RUN-SETUP.command — it creates all four."
+  fi
+done
+
+# --- models/. The licence gate at [B4] is the one that bit us, and it runs
+#     against the BUNDLE there. Run it here against the SOURCE tree instead: it
+#     is the same code, the same rules and the same 18 checkpoints, and it takes
+#     0.04 s measured. Reusing the tool rather than restating what it checks is
+#     what keeps this from becoming a second copy of the truth that drifts.
+if [[ ! -d "$ROOT/models" ]]; then
+  preflight_fail "models/ is missing." "Run ./RUN-SETUP.command to download them (~35 GB)."
+elif [[ -x "$ROOT/.venv/bin/python3" ]]; then
+  if ! "$ROOT/.venv/bin/python3" "$ROOT/scripts/tools/model-licenses.py" \
+        --models "$ROOT/models" --out /dev/null >/dev/null 2>"$CACHE/preflight-licences.txt"; then
+    preflight_fail "a shipped model has no readable licence — [B4] would fail after ~30 min:" \
+                   "$(head -6 "$CACHE/preflight-licences.txt" | sed 's/^/  /')" \
+                   "Usually a model card that was never downloaded: ./RUN-SETUP.command"
+  fi
+fi
+
+# --- a Swift toolchain. `xcode-select` pointing at the CommandLineTools alone is
+#     the classic second-machine state: `swift` exists, `xcodebuild` does not,
+#     and package-app.sh fails inside B1 with a message about a missing SDK.
+if ! command -v xcodebuild >/dev/null 2>&1; then
+  preflight_fail "xcodebuild not found." \
+                 "Install Xcode, then: sudo xcode-select -s /Applications/Xcode.app"
+elif ! xcodebuild -version >/dev/null 2>&1; then
+  preflight_fail "xcodebuild is present but not usable (xcode-select may point at CommandLineTools)." \
+                 "sudo xcode-select -s /Applications/Xcode.app"
+fi
+
+# --- disk. The app is ~40 GB and B3 copies models into it. APFS clones most of
+#     that, so the true requirement is far lower than 40 GB — but a machine with
+#     a few GB free will die halfway through a 16 GB copy, leaving a half-written
+#     bundle. 25 GB is a deliberately loose floor: enough to catch "this disk is
+#     nearly full", not so tight that it refuses a build APFS would have fitted.
+FREE_GB="$(df -g "$ROOT" | awk 'NR==2 {print $4}')"
+if [[ -n "$FREE_GB" && "$FREE_GB" -lt 25 ]]; then
+  preflight_fail "only ${FREE_GB} GB free on this volume; the bundle is ~40 GB (APFS clones most of it)." \
+                 "Free some space, or build on a larger volume."
+fi
+
+# --- network, but ONLY when it is actually needed. Both portable interpreters
+#     come from a cached tarball; with the cache warm this build is fully
+#     offline, which is why the check is conditional rather than a flat ping. A
+#     flat one would refuse a perfectly good air-gapped rebuild.
+if [[ ! -d "$PBS_DIR" || ! -d "$PBS_DIARIZEN_DIR" ]]; then
+  if ! curl -fsS --max-time 8 -o /dev/null https://api.github.com/rate_limit 2>/dev/null; then
+    preflight_fail "no portable-Python cache in $CACHE and GitHub is unreachable." \
+                   "This build needs the network ONCE to fetch a portable Python." \
+                   "After that the cache makes it offline."
+  fi
+fi
+
+if [[ "$PREFLIGHT_FAILED" == "1" ]]; then
+  echo "" >&2
+  echo "ERROR: preflight failed — nothing was built, so nothing is half-written." >&2
+  echo "       Every problem above is listed at once, deliberately: fix them all," >&2
+  echo "       then re-run ./build.sh." >&2
+  exit 1
+fi
+echo "    Preflight OK (venvs, models + licences, Xcode, disk, network)."
+
+# ===========================================================================
 # B1 — release build + copy-on-write clone into dist/
 # ===========================================================================
 echo ""
