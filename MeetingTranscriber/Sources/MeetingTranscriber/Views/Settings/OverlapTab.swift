@@ -29,26 +29,20 @@ struct OverlapTab: View {
         dicowSelected ? $dicowShowDebugRows : $mossShowDebugRows
     }
 
-    /// Engines that assign exactly one speaker per instant, and so depend on the
-    /// standalone detector to locate overlap. Mirrors
-    /// `ModelLoader.wantedOverlapEngine`'s own test — THREE engines since NeMo
-    /// (2026-08-07), and it must keep mirroring it: this copy decides only what the
-    /// tab SAYS, while the loader decides what runs, so a divergence would print a
-    /// reassurance about a session that behaves the other way.
-    private var needsDetector: Bool {
-        diarEngine == ModelLoader.mossEngineID || diarEngine == ModelLoader.spectralEngineID
-            || diarEngine == ModelLoader.nemoEngineID
-            || diarEngine == ModelLoader.camPlusEngineID
-    }
-
-    private var diarEngineName: String {
-        switch diarEngine {
-        case ModelLoader.mossEngineID:    return "MOSS"
-        case ModelLoader.nemoEngineID:    return "the NeMo engine"
-        case ModelLoader.camPlusEngineID: return "the CAM++ engine"
-        default:                          return "the spectral engine"
-        }
-    }
+    // REMOVED 2026-08-13: `needsDetector` and `diarEngineName`, both unread.
+    //
+    // `needsDetector` was a COPY of `ModelLoader.wantedOverlapEngine`'s rule, and
+    // its own comment said it "must keep mirroring it". Nothing read it any more,
+    // so there was nothing keeping the two in step — only a copy waiting to be
+    // picked up again and disagree, which is the divergence that comment existed
+    // to prevent. The live rule is `ModelLoader.marksItsOwnOverlap`, pinned
+    // against the recorder by `testTheOverlapRuleAgreesWithTheRecorder`.
+    //
+    // `diarEngineName` was the FOURTH hand-written engine list, and it had already
+    // gone stale — no DiariZen case, and a `default:` that would have handed a new
+    // engine another engine's name. That whole class was closed the same day by
+    // `ModelCatalog.diarizationEngineShortName`, which returns nil for an unknown
+    // engine instead of guessing.
 
     var body: some View {
         Group {

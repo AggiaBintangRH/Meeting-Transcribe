@@ -30,9 +30,6 @@ final class VoiceActivityDetector {
     private let config: Config
     private let silero: SileroVADService?
 
-    /// True when the neural VAD is active (vs heuristic fallback).
-    var usesSilero: Bool { silero != nil }
-
     // State machine
     private(set) var isSpeaking = false
     private var pendingSpeechMs: Double = 0
