@@ -306,8 +306,23 @@ extension AudioRecorder {
         // sidecar refuses any `cmd` but `final`. One condition, not a fourth
         // guard, so a future edit cannot fix one engine's buffer leak and miss
         // the others'.
+        // ⚠ THE PARAGRAPH ABOVE IS NOW HALF TRUE (owner, 2026-08-13). Those four
+        // engines still have no `cmd: "chunk"` and their sidecars still refuse
+        // anything but `final` — the two pinned checks that say so are untouched.
+        // What changed is that a WINDOW IS JUST A SHORT RECORDING, so when the
+        // stop pass is switched off they are now sent one `final` per interval on
+        // a temp WAV, and their run-local labels are stitched across windows by
+        // `identify` exactly as pyannote's are. See
+        // `AudioRecorder+BatchLiveDiarization` for why that carries continuity and
+        // for the measured cost of leaving the speaker count on Auto.
+        //
+        // With the stop pass ON these four behave exactly as before: the buffer is
+        // cleared here and the whole file is read at Stop.
         guard !spectralDiarizationActive, !nemoDiarizationActive,
               !diarizenDiarizationActive, !camPlusDiarizationActive else {
+            if batchLiveDiarizationActive {
+                dispatchBatchLiveWindow(windowStart: chunkAudioStart, samples: chunkAudio)
+            }
             chunkAudio = []; chunkAudioStart = lastDiarBoundary; return
         }
         let liveOn = diarLiveEnabled

@@ -64,6 +64,12 @@ extension AudioRecorder {
         service.onFinalResult = { [weak self] audioPath, localTurns, stream in
             Task { @MainActor in
                 guard let self else { return }
+                // LIVE WINDOW? Routed first, and by the temp-WAV PATH the reply
+                // echoes, so a window can never be mistaken for the stop pass or
+                // the other way round. Returns false for the stop pass, which is
+                // everything below — untouched.
+                if self.handleBatchLiveResult(audio: audioPath, localTurns: localTurns,
+                                              stream: stream) { return }
                 // The DONE line both batch engines gained in the 2026-08-10 audit:
                 // without it the log recorded only starts and failures, so a pass
                 // that SUCCEEDED ended mid-sentence and looked like a hang.
@@ -158,7 +164,14 @@ extension AudioRecorder {
         // signature because `remoteStopMode` is shared with pyannote, where the
         // toggle IS visible and must still be honoured.
         let continueOnStop = diarContinueOnStop
-        let mode = Self.remoteStopMode(finalPass: true,
+        // HONOURED NOW, not forced true. It was pinned because the toggle
+        // was hidden for this engine, so a value left by a pyannote session
+        // deleted every remote label with nothing able to undo it. The
+        // toggle is visible for every engine since 2026-08-13, and off means
+        // the live per-interval path carries the labels instead.
+        let mode = Self.remoteStopMode(
+            finalPass: UserDefaults.standard.object(forKey: "diarization.finalPass")
+                as? Bool ?? true,
                                        continueOnStop: continueOnStop,
                                        remoteStreamActive: remoteStreamActive,
                                        hasDiarizationService: modelLoader.camPlus != nil,

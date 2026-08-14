@@ -322,7 +322,7 @@ final class DiarizenEngineTests: XCTestCase {
     func testTheOfficePassNeedsTheEngineTheServiceAndTheRecording() {
         func runs(active: Bool = true, service: Bool = true, recording: Bool = true) -> Bool {
             AudioRecorder.runsBatchOfficePass(batchActive: active,
-                                              hasService: service, hasRecording: recording)
+                                              hasService: service, hasRecording: recording, finalPass: true)
         }
         XCTAssertTrue(runs())
         XCTAssertFalse(runs(active: false), "a pyannote session must not take this branch")
@@ -351,7 +351,7 @@ final class DiarizenEngineTests: XCTestCase {
             d.set(stored, forKey: "diarization.finalPass")
             XCTAssertTrue(AudioRecorder.runsBatchOfficePass(batchActive: true,
                                                             hasService: true,
-                                                            hasRecording: true),
+                                                            hasRecording: true, finalPass: true),
                           "a stored finalPass=\(stored) reached the DiariZen office pass")
             // The remote half is what actually lost data: the caller must STATE
             // its engine's truth rather than read the key.

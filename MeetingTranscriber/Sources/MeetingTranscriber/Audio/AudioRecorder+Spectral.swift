@@ -53,6 +53,12 @@ extension AudioRecorder {
         service.onFinalResult = { [weak self] audioPath, localTurns, stream in
             Task { @MainActor in
                 guard let self else { return }
+                // LIVE WINDOW? Routed first, and by the temp-WAV PATH the reply
+                // echoes, so a window can never be mistaken for the stop pass or
+                // the other way round. Returns false for the stop pass, which is
+                // everything below — untouched.
+                if self.handleBatchLiveResult(audio: audioPath, localTurns: localTurns,
+                                              stream: stream) { return }
                 // The DONE line the 2026-08-10 audit added to both batch engines —
                 // see `AudioRecorder+Nemo.configureNemo` for the whole reason. In
                 // short: this log recorded only starts and failures, so a pass that
@@ -100,10 +106,17 @@ extension AudioRecorder {
     ///
     /// The stored `diarization.finalPass` deliberately keeps whatever pyannote
     /// left in it — these engines simply never ask.
+    /// ⚠ `finalPass` JOINED THIS RULE ON 2026-08-13, reversing a deliberate
+    /// omission. It was left out because the toggle was HIDDEN for these engines,
+    /// and a value a pyannote session had stored would then have silently turned
+    /// off the only pass that produces labels — the 🔴 defect the remote half of
+    /// this hit for real. The toggle is now shown for every engine and they have a
+    /// live path to fall back to, so honouring it is what the control means.
     nonisolated static func runsBatchOfficePass(batchActive: Bool,
                                                 hasService: Bool,
-                                                hasRecording: Bool) -> Bool {
-        batchActive && hasService && hasRecording
+                                                hasRecording: Bool,
+                                                finalPass: Bool) -> Bool {
+        batchActive && hasService && hasRecording && finalPass
     }
 
     /// Seconds to allow one WHOLE-FILE batch pass over `recordingLength` seconds
@@ -203,7 +216,14 @@ extension AudioRecorder {
         // honoured. `supportsTail:` already establishes this shape — the caller
         // states its engine's truth, the one pure function keeps enumerating.
         let continueOnStop = diarContinueOnStop
-        let mode = Self.remoteStopMode(finalPass: true,
+        // HONOURED NOW, not forced true. It was pinned because the toggle
+        // was hidden for this engine, so a value left by a pyannote session
+        // deleted every remote label with nothing able to undo it. The
+        // toggle is visible for every engine since 2026-08-13, and off means
+        // the live per-interval path carries the labels instead.
+        let mode = Self.remoteStopMode(
+            finalPass: UserDefaults.standard.object(forKey: "diarization.finalPass")
+                as? Bool ?? true,
                                        continueOnStop: continueOnStop,
                                        remoteStreamActive: remoteStreamActive,
                                        hasDiarizationService: modelLoader.spectral != nil,

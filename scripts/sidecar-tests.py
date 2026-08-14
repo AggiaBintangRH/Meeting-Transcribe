@@ -4728,7 +4728,7 @@ LAYOUT_CHECKS = [
     "layout/log-name-matches-folder",
     "layout/tail-window-start-is-recorded-not-derived",
     "layout/diarization-settings-locked-per-session",
-    "layout/batch-engines-ignore-final-pass",
+    "layout/batch-engines-honour-final-pass",
     "layout/remote-passes-never-send-the-room-count",
     "layout/pdf-export-uses-fixed-ink",
     "layout/error-popup-marker-is-cleared-with-the-message",
@@ -5126,24 +5126,26 @@ def run_layout(rep: Report, ctx):
                    "lockDiarizationSettings(), and nowhere else",
                    "; ".join(problems))
 
-    cid = "layout/batch-engines-ignore-final-pass"
+    cid = "layout/batch-engines-honour-final-pass"
     if ctx.wants(cid):
-        # `diarization.finalPass` may not be READ by either whole-file batch
-        # engine — office pass or remote pass.
+        # ⚠ THIS CHECK WAS REVERSED ON 2026-08-13, and the old one was RIGHT for
+        # the world it was written in. It asserted that no whole-file engine may
+        # read `diarization.finalPass`, because the toggle was HIDDEN under those
+        # engines and their stop pass WAS their only source of labels — so a
+        # `false` left behind by a pyannote session deleted every label with
+        # nothing in the UI able to undo it. That is a value outliving its control,
+        # which the 2026-08-06 settings pass exists to forbid.
         #
-        # Found by the 2026-08-10 audit, and it had been losing data since
-        # 2026-08-05. The office pass already ignored the key (`runsBatchOfficePass`
-        # does not take it) because under a batch engine the stop pass IS the
-        # labels. The REMOTE pass still read it, while `DiarizationTab` HIDES the
-        # toggle under these engines — so a `false` left behind by an earlier
-        # pyannote session deleted every remote label, with no message and no
-        # control able to undo it. A value outliving its control, which the
-        # 2026-08-06 settings pass exists to forbid.
+        # Both halves of that premise are now gone. The owner asked for the toggle
+        # on every engine, and those four gained a live per-interval path to fall
+        # back to (`AudioRecorder+BatchLiveDiarization`), so the setting is
+        # reachable AND switching it off no longer means "no labels". Honouring it
+        # is what the control now means, and NOT honouring it would be the lying
+        # control this project keeps having to fix.
         #
-        # The POSITIVE half is what makes this able to fail at all: pyannote's own
-        # remote pass MUST still read the key, because there the toggle is visible
-        # and must be honoured. Without it, a file that had simply stopped doing
-        # remote diarization would pass.
+        # The POSITIVE half is unchanged and is what lets this fail at all:
+        # pyannote's remote pass must still read the key too, so a file that had
+        # simply stopped doing remote diarization cannot pass.
         needle = 'forKey: "diarization.finalPass"'
         audio_dir = SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
 
@@ -5151,33 +5153,29 @@ def run_layout(rep: Report, ctx):
             return "\n".join(l for l in (audio_dir / name).read_text().splitlines()
                              if not l.strip().startswith("//"))
 
-        # ONE NAME PER BATCH ENGINE, and a new engine must be added here. DiariZen
-        # (2026-08-10) landed with this list still naming two files, so the third
-        # engine's remote pass was unpinned — it happened to pass `true`, but a
-        # future edit making it read the key would have kept this check green while
-        # silently deleting every remote label again.
+        # ONE NAME PER BATCH ENGINE, and a new engine must be added here — the
+        # DiariZen lesson: it landed while this list still named two files, so the
+        # third engine's remote pass went unpinned.
         problems = []
         for name in ("AudioRecorder+Spectral.swift", "AudioRecorder+Nemo.swift",
                      "AudioRecorder+Diarizen.swift", "AudioRecorder+CamPlus.swift"):
             code = _code(name)
-            if needle in code:
-                problems.append(f"{name} reads diarization.finalPass — a batch "
-                                f"engine's stop pass IS its labels, and the toggle "
-                                f"is hidden under it, so a stored value would be "
-                                f"unreachable and silently destructive")
-            if "finalPass: true" not in code:
-                problems.append(f"{name} does not pass finalPass: true to "
-                                f"remoteStopMode — the caller must state its "
-                                f"engine's truth rather than read the key")
+            if needle not in code:
+                problems.append(f"{name} no longer reads diarization.finalPass — "
+                                f"its Run-at-stop toggle is visible in the tab, so "
+                                f"ignoring it would be a control that does nothing")
+            if "finalPass: true" in code:
+                problems.append(f"{name} still forces finalPass: true — that was "
+                                f"correct only while the toggle was hidden")
         pyannote_remote = _code("AudioRecorder+RemoteDiarization.swift")
         if needle not in pyannote_remote:
             problems.append("AudioRecorder+RemoteDiarization.swift no longer reads "
-                            "diarization.finalPass — pyannote's toggle is visible "
-                            "and must still be honoured, so this check has lost the "
-                            "half that lets it fail")
+                            "diarization.finalPass — pyannote's toggle must still be "
+                            "honoured, so this check has lost the half that lets it "
+                            "fail")
         rep.expect(cid, not problems,
-                   "no batch engine reads diarization.finalPass (all four pass "
-                   "true), while pyannote's remote pass still honours it",
+                   "every engine's stop pass honours diarization.finalPass, and no "
+                   "batch engine forces it true any more",
                    "; ".join(problems))
 
     cid = "layout/remote-passes-never-send-the-room-count"

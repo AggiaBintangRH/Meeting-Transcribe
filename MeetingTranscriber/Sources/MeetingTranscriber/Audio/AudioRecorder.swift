@@ -266,6 +266,12 @@ final class AudioRecorder: ObservableObject {
     /// When the far end has finished an utterance — see `RemoteUtteranceGate`.
     var remoteUtteranceGate = RemoteUtteranceGate()
 
+    /// Temp-WAV path → the recording time that window began, for the four
+    /// whole-file engines running live. Keyed by PATH because that is what their
+    /// replies echo, so two windows can be in flight and each still finds its own
+    /// start. See `AudioRecorder+BatchLiveDiarization`.
+    var liveDiarWindowByPath: [String: Double] = [:]
+
     /// Hands out the arrival order of LIVE rows, across both streams.
     ///
     /// **A row's place is decided when it first appears, and then it stays there**
@@ -1780,24 +1786,28 @@ final class AudioRecorder: ObservableObject {
         let runsSpectralPass = Self.runsBatchOfficePass(
             batchActive: spectralDiarizationActive,
             hasService: modelLoader.spectral != nil,
-            hasRecording: lastRecordingURL != nil)
+            hasRecording: lastRecordingURL != nil,
+            finalPass: finalOn)
         let runsNemoPass = Self.runsBatchOfficePass(
             batchActive: nemoDiarizationActive,
             hasService: modelLoader.nemo != nil,
-            hasRecording: lastRecordingURL != nil)
+            hasRecording: lastRecordingURL != nil,
+            finalPass: finalOn)
         // Its OWN rule, not folded into NeMo's: `runsBatchOfficePass` takes the
         // engine's flag AND its service, and sharing one call would have asked
         // whether NeMo's sidecar was up for a DiariZen session.
         let runsDiarizenPass = Self.runsBatchOfficePass(
             batchActive: diarizenDiarizationActive,
             hasService: modelLoader.diarizen != nil,
-            hasRecording: lastRecordingURL != nil)
+            hasRecording: lastRecordingURL != nil,
+            finalPass: finalOn)
         // Its OWN rule again, for the reason stated above DiariZen's: sharing one
         // call would ask whether ANOTHER engine's sidecar was up for this session.
         let runsCamPlusPass = Self.runsBatchOfficePass(
             batchActive: camPlusDiarizationActive,
             hasService: modelLoader.camPlus != nil,
-            hasRecording: lastRecordingURL != nil)
+            hasRecording: lastRecordingURL != nil,
+            finalPass: finalOn)
         let willRunStopPass = runsSpectralPass || runsNemoPass || runsDiarizenPass
             || runsCamPlusPass
             || (finalOn && modelLoader.pyannote != nil)

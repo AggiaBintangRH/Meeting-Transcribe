@@ -25,6 +25,9 @@ struct DiarizationTab: View {
     @AppStorage("diarization.finalPass")   private var finalPass = true
     @AppStorage("diarization.continueOnStop") private var continueOnStop = false
     @AppStorage("diarization.intervalSec") private var intervalSec = 30
+    /// Read only to warn when live labelling runs on Auto — the picker
+    /// itself lives beside the record button, not here.
+    @AppStorage("diarization.numSpeakers") private var numSpeakers = 0
     // REMOVED 2026-08-06 (owner), controls and reads both: `diarization.live`
     // (always on), `.detectOverlap` (the Detect overlap tab owns this now),
     // `.resetOnStart` (always fresh) and `.numSpeakers` (always auto). Each is
@@ -87,13 +90,32 @@ struct DiarizationTab: View {
             // so they are not one key with two readers.
             // NOTHING SHARED APPLIES UNDER EITHER BATCH ENGINE (owner, 2026-08-06;
             // NeMo joined 2026-08-07) — see `isBatchEngine` for the whole reason.
-            if !isBatchEngine {
+            // EVERY ENGINE NOW HAS THIS BLOCK (owner, 2026-08-13). The four
+            // whole-file engines used to be excluded because they had no live
+            // path, so switching the stop pass off left a meeting with no labels
+            // at all. They have one now — a window is just a short recording, sent
+            // as an ordinary whole-file job and stitched across windows by
+            // `identify`. See `AudioRecorder+BatchLiveDiarization`.
             SettingBlock(title: "Run at stop") {
                 SettingToggle(label: "Run a diarization pass at stop", isOn: stopPassBinding)
                 Text("One more pass after you stop, to finalise speaker labels.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)
+                // THE MEASURED COST OF LEAVING THE COUNT ON AUTO, shown only when
+                // it applies. A live window is a 25–30 s clip, and on clips that
+                // short three of these four engines counted 9 to 15 speakers for
+                // two people. Stated rather than refused: the mode works, and the
+                // SPK picker is what makes it trustworthy.
+                if let warning = AudioRecorder.liveCountWarning(
+                    isBatchEngine: isBatchEngine,
+                    finalPass: stopPassBinding.wrappedValue,
+                    numSpeakers: numSpeakers) {
+                    Text(warning)
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.amber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             // VISIBILITY IS THE OWNER'S RULE, chosen with the consequence stated:
@@ -128,7 +150,6 @@ struct DiarizationTab: View {
                         .foregroundColor(Theme.textFaint)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-            }
             }
 
             // THE SELECTED ENGINE'S OWN SETTINGS, directly under the shared ones
