@@ -779,10 +779,21 @@ import os, sys
 os.environ.pop("HF_HUB_OFFLINE", None)
 try:
     from huggingface_hub import hf_hub_download
-    # Only the two files the sidecar reads. The repo also ships a 25 MB ONNX
-    # copy of the same weights, which nothing here loads — this engine runs the
-    # PyTorch checkpoint through the vendored architecture.
-    for name in ("avg_model.pt", "config.yaml"):
+    # The two files the sidecar reads, PLUS the model card. The repo also ships a
+    # 25 MB ONNX copy of the same weights, which nothing here loads — this engine
+    # runs the PyTorch checkpoint through the vendored architecture.
+    #
+    # README.md IS NOT OPTIONAL AND IS NOT DOCUMENTATION. `build.sh` [B4] derives
+    # MODEL-LICENSES.txt from each checkpoint's own card and FAILS the build when
+    # one cannot be read — weights whose terms nobody can name must not ship. This
+    # is the only checkpoint fetched file-by-file rather than as a snapshot, so it
+    # is the only one that can arrive without its card.
+    #
+    # Found 2026-08-13 on the owner's SECOND machine: the gate landed after this
+    # download was written, and this Mac happened to have the card already, so the
+    # build passed here and failed on the first clean checkout with
+    # "the snapshot has no README.md".
+    for name in ("avg_model.pt", "config.yaml", "README.md"):
         path = hf_hub_download("Wespeaker/wespeaker-voxceleb-campplus-LM", name)
     print(f"   OK: Wespeaker/wespeaker-voxceleb-campplus-LM -> {os.path.dirname(path)}")
 except Exception as exc:

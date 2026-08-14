@@ -4733,6 +4733,7 @@ LAYOUT_CHECKS = [
     "layout/pdf-export-uses-fixed-ink",
     "layout/error-popup-marker-is-cleared-with-the-message",
     "layout/no-speech-is-routed-by-kind-not-prose",
+    "layout/hub-downloads-fetch-their-model-card",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5427,6 +5428,51 @@ def run_layout(rep: Report, ctx):
         rep.expect(cid, not problems,
                    "the no-speech verdict travels as a machine key on both sides "
                    "of the wire, never as a sentence to be matched",
+                   "; ".join(problems))
+
+    cid = "layout/hub-downloads-fetch-their-model-card"
+    if ctx.wants(cid):
+        # `build.sh` [B4] derives MODEL-LICENSES.txt from each checkpoint's own
+        # card and FAILS the build when one cannot be read. So a checkpoint
+        # fetched FILE BY FILE — rather than as a whole snapshot — must ask for
+        # README.md explicitly, or it arrives without the card and the build
+        # cannot ship it.
+        #
+        # THIS IS INVISIBLE ON A MACHINE THAT ALREADY HAS THE CARD, which is why
+        # it is pinned rather than left to notice. CAM++ is fetched two files at a
+        # time; the licence gate landed a day after that download was written; the
+        # owner's main Mac happened to have README.md from an earlier fetch, so the
+        # build passed here and failed on their SECOND machine at the first clean
+        # checkout — "the snapshot has no README.md".
+        #
+        # Checked generically, not against a list of repos: any `hf_hub_download`
+        # that does NOT pass `local_dir` lands in the hub cache and so needs a
+        # card. The ones that DO pass it are flat layouts with no card to read,
+        # covered by `model-licenses.py`'s own FLAT table.
+        setup = PROJECT / "download-best-models.sh"
+        problems = []
+        if not setup.exists():
+            problems.append("download-best-models.sh is gone")
+        else:
+            lines = [l for l in setup.read_text().splitlines()
+                     if not l.lstrip().startswith("#")]
+            for i, line in enumerate(lines):
+                if "hf_hub_download(" not in line:
+                    continue
+                # The call and the loop that feeds it: a small window either side,
+                # which is how both of these are written.
+                window = "\n".join(lines[max(0, i - 6):i + 4])
+                if "local_dir" in window:
+                    continue                      # flat layout — no card to read
+                if "README.md" not in window:
+                    problems.append(
+                        f"the hf_hub_download near line {i + 1} caches a hub "
+                        f"checkpoint but never fetches README.md, so a clean "
+                        f"machine gets weights with no model card and build.sh "
+                        f"[B4] refuses to ship them")
+        rep.expect(cid, not problems,
+                   "every per-file hub download also fetches the model card the "
+                   "licence gate reads",
                    "; ".join(problems))
 
     cid = "layout/log-name-matches-folder"
