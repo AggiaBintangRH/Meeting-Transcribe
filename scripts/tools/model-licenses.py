@@ -118,14 +118,31 @@ def main() -> int:
     for repo, snap in hub_repos(args.models):
         readme = os.path.join(snap, "README.md")
         lic = name = None
-        if os.path.exists(readme):
-            with open(readme, encoding="utf-8", errors="replace") as fh:
-                lic, name = card_licence(fh.read())
+        # WHY the card could not be read, not just that it could not.
+        #
+        # This used to be one `os.path.exists` and one message, and the message
+        # named the wrong thing: `exists` FOLLOWS a symlink, and every file in an
+        # HF snapshot is a symlink into ../../blobs. A card that plainly declares
+        # `license: apache-2.0` therefore reported as "no licence could be
+        # established" when its blob was missing — a build failure that sends the
+        # reader to look for a licence question that does not exist.
+        if not os.path.lexists(readme):
+            why = "the snapshot has no README.md"
+        elif not os.path.exists(readme):
+            why = ("README.md is a broken link — its blob is missing from "
+                   "models/hub/…/blobs (an interrupted or partial model copy)")
+        else:
+            try:
+                with open(readme, encoding="utf-8", errors="replace") as fh:
+                    lic, name = card_licence(fh.read())
+                why = "README.md declares no `license:` field"
+            except OSError as exc:
+                why = f"README.md could not be read ({exc.strerror})"
         source = "declared on the model card"
         if not lic and repo in EXCEPTIONS:
             lic, source = EXCEPTIONS[repo]
         if not lic:
-            unknown.append(repo)
+            unknown.append((repo, why, snap))
             continue
         rows.append((repo, name or lic, source))
 
@@ -134,8 +151,10 @@ def main() -> int:
             rows.append((repo, lic, note))
 
     if unknown and not args.lenient:
-        for repo in unknown:
+        for repo, why, snap in unknown:
             print(f"  no licence could be established for {repo}", file=sys.stderr)
+            print(f"    reason: {why}", file=sys.stderr)
+            print(f"    looked in: {snap}", file=sys.stderr)
         return 1
 
     width = max((len(r) for r, _, _ in rows), default=0)
