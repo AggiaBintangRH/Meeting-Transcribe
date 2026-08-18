@@ -22,8 +22,17 @@ Every figure below is chosen because something in this project depends on it:
                     from something narrower, which costs the embedding.
   DC offset         a non-zero mean biases RMS and every energy gate built on it.
 
+By default only the FIVE most recent files are profiled. A glob over a
+recordings folder grows without bound, every file costs a full Silero pass, and
+the question being asked is almost always about the last attempt or two — so the
+default is the useful answer rather than the complete one. It says what it
+skipped; `--all` profiles everything.
+
 Usage:
     scripts/tools/audio-profile.py FILE [FILE ...]
+    scripts/tools/audio-profile.py recordings/*.wav          # newest 5
+    scripts/tools/audio-profile.py --last 2 recordings/*.wav
+    scripts/tools/audio-profile.py --all recordings/*.wav
 """
 from __future__ import annotations
 
@@ -82,7 +91,16 @@ def profile(path: str) -> dict:
         rms_of = lambda a: float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0
         db_of = lambda v: 20 * np.log10(v) if v > 0 else float("-inf")
         sig_db, noise_db = db_of(rms_of(x[mask])), db_of(rms_of(x[~mask]))
-        snr = sig_db - noise_db
+        # ⚠ NO SNR WHEN THERE IS NO SPEECH, rather than `-inf - -inf = nan`.
+        # A digitally silent recording is a NORMAL outcome here — CLAUDE.md
+        # records it as "nothing was recorded that session, not a bug" — and
+        # printing `nan dB` invites someone to chase a number that means nothing.
+        # Absent must read as absent, the same rule the transcript's confidence
+        # figures follow.
+        snr = (sig_db - noise_db
+               if mask.any() and (~mask).any() and sig_db > float("-inf")
+                  and noise_db > float("-inf")
+               else None)
     except Exception as exc:  # noqa: BLE001 — reported, never fatal
         speech = f"unavailable ({type(exc).__name__})"
 
@@ -118,11 +136,43 @@ def profile(path: str) -> dict:
     }
 
 
+DEFAULT_LAST = 5
+
+
 def main() -> int:
-    if len(sys.argv) < 2:
+    args = sys.argv[1:]
+    limit = DEFAULT_LAST
+    files = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--all":
+            limit = None
+        elif args[i] == "--last" and i + 1 < len(args):
+            i += 1
+            try:
+                limit = int(args[i])
+            except ValueError:
+                print(f"--last needs a number, got {args[i]!r}", file=sys.stderr)
+                return 2
+        else:
+            files.append(args[i])
+        i += 1
+
+    if not files:
         print(__doc__)
         return 2
-    rows = [profile(p) for p in sys.argv[1:]]
+
+    # NEWEST FIRST, by modification time — a shell glob arrives alphabetically,
+    # which for `meeting-<timestamp>.wav` happens to be chronological and for
+    # anything else is arbitrary. Sorting by mtime is right for both.
+    files = [f for f in files if os.path.isfile(f)]
+    files.sort(key=os.path.getmtime, reverse=True)
+    skipped = 0
+    if limit is not None and len(files) > limit:
+        skipped = len(files) - limit
+        files = files[:limit]
+
+    rows = [profile(p) for p in files]
     for r in rows:
         print(f"\n=== {r['file']}")
         print(f"  format        {r['sr']} Hz, {r['ch']} ch, {r['subtype']}, "
@@ -134,6 +184,8 @@ def main() -> int:
         if r["snr_db"] is not None:
             print(f"  SNR           {r['snr_db']:.1f} dB    "
                   f"(speech {r['sig_db']:.1f} dB, background {r['noise_db']:.1f} dB)")
+        elif isinstance(r["speech_sec"], float):
+            print("  SNR           n/a — no speech, or no silence to compare it against")
         if isinstance(r["speech_sec"], float):
             pct = 100 * r["speech_sec"] / r["sec"] if r["sec"] else 0
             print(f"  speech        {r['speech_sec']:.1f} s of {r['sec']:.1f} s "
@@ -177,6 +229,9 @@ def main() -> int:
             flags.append("DC offset biases every energy gate")
         for f in flags:
             print(f"  ⚠ {f}")
+    if skipped:
+        print(f"\n({skipped} older file(s) not profiled — newest {len(files)} shown. "
+              f"Use --all, or --last N.)")
     return 0
 
 
