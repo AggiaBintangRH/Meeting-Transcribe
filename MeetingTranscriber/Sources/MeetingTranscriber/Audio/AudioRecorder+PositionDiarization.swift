@@ -95,9 +95,25 @@ extension AudioRecorder {
         }
         if window.upperBound > cursor { gaps.append((cursor, window.upperBound)) }
 
+        // ⚠ THE FLOOR APPLIES ONLY WHERE IT HAS A REASON, and that condition is
+        // `covered` being non-empty. The 0.75 s exists to ignore SLOP AROUND A
+        // VOICE-TURN BOUNDARY — a sliver between two turns is the diarizer's edge
+        // being a little off, not a person. With `covered` empty there is no
+        // boundary to be sloppy about: the whole window is one gap because no
+        // voice engine labelled it at all, which is the ATND-only case.
+        //
+        // Applying it there deleted exactly the row the owner photographed. A
+        // short realtime utterance ("Fridays to", 0.4 s) is its own segment, its
+        // window is the utterance, the single gap is 0.4 s < 0.75 s, so it was
+        // skipped, `filled` came back empty and the row rendered SPEAKER UNKNOWN
+        // while the array had been streaming angle and rotation throughout.
+        // `testNoRowIsUnknownWhileTheArrayIsStreaming` is that row, and it still
+        // failed after the smoother fix — which is why this is a second change
+        // and not a tidy-up of the first.
+        let floorApplies = !covered.isEmpty
         for (a, b) in gaps {
             let dur = b - a
-            if dur < minGapSec {
+            if floorApplies && dur < minGapSec {
                 positionLog("SKIP gap<0.75s [\(fmt3(a))..\(fmt3(b))]")
                 continue
             }

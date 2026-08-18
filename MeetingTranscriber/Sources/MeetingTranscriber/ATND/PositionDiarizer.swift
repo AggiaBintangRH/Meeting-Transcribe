@@ -156,15 +156,48 @@ final class PositionDiarizer: ObservableObject {
 
         switch notice {
         case .silence:
-            smoother.reset()
+            // ⚠ THIS USED TO CALL `smoother.reset()`, AND IT WAS THE WHOLE BUG.
+            //
+            // The smoother emits nothing until it has held notices for a full
+            // `windowSec` (0.4 s) since its last reset. At the array's 10 Hz that
+            // is a run of ~5 consecutive notices. A reset here restarts that run
+            // from zero — so a `.silence` arriving more often than about once a
+            // second starves the clusterer PERMANENTLY, while angle and rotation
+            // keep streaming and the array's own UI shows a talker the whole time.
+            //
+            // Measured in `PositionBlackoutTests`, 20 s streams at 10 Hz:
+            //
+            //     silence every 200 / 300 / 400 / 500 ms -> samples=0  spans=0
+            //     silence every 1000 ms                  -> samples=88 spans=1
+            //
+            // That is the owner's report exactly: 186 `no-spans` lines in their
+            // log, every one `samples=0`, with 1 s to 30 s blackouts.
+            //
+            // DOING NOTHING IS NOT "IGNORING THE SILENCE" — the smoother already
+            // handles it, and better. It drops samples older than its trailing
+            // window and resets itself on a gap larger than one window, so a
+            // silence longer than 0.4 s still clears the buffer exactly as before,
+            // while a 100 ms blip no longer destroys a nearly-complete warm-up.
+            // The reason the reset existed (never average one talker's direction
+            // into the next one's) is preserved by that time rule; what is gone is
+            // punishing a brief blip as if it were a change of speaker.
+            break
         case .talking(let talker):
             // The array is tracking SOMETHING, but only speech may become a
-            // speaker position. Reset the smoother so non-speech direction never
-            // averages into the next real utterance's samples.
-            guard speechAllows(t) else {
-                smoother.reset()
-                return
-            }
+            // speaker position — measured 2026-07-27, piano through the room
+            // speakers still moved the beam with the array's own SVAD on.
+            //
+            // ⚠ NO RESET HERE EITHER, for the same reason and on the same
+            // evidence. The gate closing is a statement about THIS instant, not a
+            // verdict on the samples already collected. Skipping the sample keeps
+            // the noise out, which is all the gate was ever for; resetting also
+            // threw away the warm-up, so a normal speaking rhythm could not
+            // accumulate one. Measured: with the gate flickering 300 ms open in
+            // every 700 ms, the reset version still reached 196 samples on its own
+            // — so this one was NOT the dominant cause, and it is fixed here only
+            // because it stacks with the silence case above (both together
+            // measured samples=0, either alone did not).
+            guard speechAllows(t) else { return }
             let vector = PositionMath.unitVector(rotateDeg: Double(talker.rotation),
                                                  angleDeg: Double(talker.elevation))
             guard let sample = smoother.push(t: t, vector: vector) else { return }
