@@ -275,6 +275,44 @@ final class PositionDiarizer: ObservableObject {
         return (Self.positionIDBase + clusterID, name)
     }
 
+    /// The label a LIVE CAPTION should show at `now` — responsive first, then the
+    /// timeline, never nothing.
+    ///
+    /// ⚠ WHY THIS IS NOT JUST `label(for:minSamples:)` (owner, 2026-08-18, from a
+    /// screenshot: *"itunya silent mungkin karena itu gak jadi speaker unknown"* —
+    /// and they were right). The caption asked `dominantCluster` over the last
+    /// second with `minSamples: 3`, while the ROWS ask `timeline.spans`, whose last
+    /// boundary is OPEN-ENDED and therefore always has an answer. Direction is
+    /// collected only while our own VAD hears speech, so a silent second yields no
+    /// fresh samples and the caption fell to nil — `SPEAKER UNKNOWN` sitting above
+    /// rows that were labelled perfectly well. Two readers of one fact, disagreeing.
+    ///
+    /// It bites hardest on QUIET capture, which is this project's live problem: the
+    /// owner's Dante chain records at ~-47 dBFS, and Silero is level-sensitive
+    /// enough that the same session measured 0 % speech on a -53 dBFS file that
+    /// Whisper transcribed at 362 words. So the gate closes on audio that really
+    /// does contain speech, and the caption goes blank mid-sentence.
+    ///
+    /// The recent-samples lookup stays FIRST and unchanged, because it is what
+    /// makes the caption flip quickly on a talker switch — the reason `minSamples`
+    /// was tightened in the first place. Only the nil case changes: instead of
+    /// claiming ignorance, fall back to what the timeline already asserts — "the
+    /// beam last settled here and nothing has changed since". That is the same
+    /// sentence the rows below are printing, so the two surfaces now agree by
+    /// construction rather than by coincidence.
+    ///
+    /// Still nil before the FIRST boundary of a session, which is correct: there is
+    /// genuinely no talker to name yet.
+    func captionLabel(at now: Double,
+                      window: Double = 1.0,
+                      minSamples: Int = 3) -> (id: Int, name: String)? {
+        let range = max(0, now - window)...max(0, now)
+        if let fresh = label(for: range, minSamples: minSamples) { return fresh }
+        // `spans` clips to the query and its final boundary owns everything after
+        // it, so this is empty ONLY when the session has no boundary at all.
+        return labeledSpans(in: range).last.map { (id: $0.id, name: $0.name) }
+    }
+
     func sampleCount(in range: ClosedRange<Double>) -> Int {
         clusterer.sampleCount(in: range)
     }

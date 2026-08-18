@@ -1115,9 +1115,14 @@ final class AudioRecorder: ObservableObject {
                                                   || self.state == .preparing,
                                        mossActive: self.mossDiarizationActive)
                             .usesPosition
-                        ? self.positionDiarizer?.label(
-                            for: max(0, self.recordingElapsed - 1.0)...self.recordingElapsed,
-                            minSamples: 3)?.name
+                        // `captionLabel`, not `label`: the recent-samples lookup
+                        // still answers first (that is what makes the caption flip
+                        // quickly on a talker switch), and only its nil case now
+                        // falls back to the timeline the ROWS read. Without that
+                        // fallback a silent second — routine on quiet capture,
+                        // where Silero's gate closes on real speech — printed
+                        // SPEAKER UNKNOWN above rows that were labelled fine.
+                        ? self.positionDiarizer?.captionLabel(at: self.recordingElapsed)?.name
                         : nil
                 }
             }

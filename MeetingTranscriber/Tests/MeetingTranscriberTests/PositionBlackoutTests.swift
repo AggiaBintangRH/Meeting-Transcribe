@@ -200,4 +200,66 @@ final class PositionBlackoutTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - The live caption went blank while the rows stayed labelled (2026-08-18)
+
+    /// ⚠ THE OWNER'S OBSERVATION, FROM A SCREENSHOT: rows read `SPEAKER 1` while the
+    /// caption above them read `SPEAKER UNKNOWN`, with the VAD chip on SILENT —
+    /// *"itunya silent mungkin karena itu gak jadi speaker unknown"*. Correct.
+    ///
+    /// The caption asked `dominantCluster(minSamples: 3)` over the last second; the
+    /// rows ask `timeline.spans`, whose final boundary is open-ended. Direction is
+    /// collected only while VAD hears speech, so a silent second gave the caption
+    /// nothing and the two surfaces disagreed about the same instant.
+    ///
+    /// Drives a real talker, then goes silent, then asks about the silent moment.
+    func testTheCaptionKeepsTheLastSeatThroughASilentSecond() {
+        let d = PositionDiarizer()
+        var now = 0.0
+        d.start(tauDeg: 15, smoothingSec: 0.4, mode: .firstCome,
+                gateOnSpeech: true, now: { now })
+        // 3 s of a settled talker.
+        while now < 3.0 {
+            d.noteSpeech(true, at: now)
+            ATNDBeamService.shared.rawNotices.send(
+                (.now, .talking(.init(channel: 1, elevation: 30, rotation: 120))))
+            now += 0.1
+        }
+        XCTAssertNotNil(d.captionLabel(at: now), "precondition: a seat is known by now")
+        let seated = d.captionLabel(at: now)!
+
+        // Now 2 s where VAD reports nothing — no samples reach the smoother.
+        while now < 5.0 {
+            ATNDBeamService.shared.rawNotices.send(
+                (.now, .talking(.init(channel: 1, elevation: 30, rotation: 120))))
+            now += 0.1
+        }
+
+        // The OLD lookup finds nothing here — that is the bug, asserted so this
+        // test cannot pass for the wrong reason (e.g. the VAD gate quietly opening).
+        XCTAssertNil(d.label(for: max(0, now - 1.0)...now, minSamples: 3),
+                     "precondition: the recent-samples lookup really is starved")
+
+        let caption = d.captionLabel(at: now)
+        XCTAssertNotNil(caption,
+                        "a silent second must not blank the caption — the timeline still "
+                        + "says who the beam last settled on, and the rows are printing it")
+        XCTAssertEqual(caption?.id, seated.id, "and it must be the SAME seat, not a new one")
+        // The rows' own answer, for the same instant — they must agree.
+        XCTAssertEqual(d.labeledSpans(in: max(0, now - 1.0)...now).last?.id, caption?.id,
+                       "caption and rows must resolve one instant identically")
+    }
+
+    /// Before the FIRST boundary there is genuinely no talker, and the caption must
+    /// still say so. Without this the fallback could be "always name someone".
+    func testTheCaptionIsStillNilBeforeTheFirstBoundary() {
+        let d = PositionDiarizer()
+        var now = 0.0
+        d.start(tauDeg: 15, smoothingSec: 0.4, mode: .firstCome,
+                gateOnSpeech: true, now: { now })
+        now = 2.0
+        XCTAssertNil(d.captionLabel(at: now),
+                     "no notice has ever arrived — inventing a seat here would be fabrication")
+    }
+
 }
