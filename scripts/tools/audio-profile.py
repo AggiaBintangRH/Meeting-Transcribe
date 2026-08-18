@@ -44,8 +44,27 @@ def profile(path: str) -> dict:
     # A sample within one 16-bit step of full scale is at the rail.
     clipped = int(np.sum(np.abs(mono) >= 0.999)) if mono.size else 0
 
-    # Speech share, by the project's own gate rather than a new threshold.
-    speech = None
+    # Speech share AND SNR, both from Silero's own verdict rather than a new
+    # threshold — the same gate the app runs on.
+    #
+    # ⚠ SNR IS THE NUMBER THAT DECIDES, AND LEVEL IS NOT. Measured on one source
+    # played into three captures:
+    #
+    #     signal -38.8 dB, noise -55.9 dB -> SNR 17.2 ->  9 turns, sane
+    #     signal  -9.0 dB, noise -13.2 dB -> SNR  4.2 -> 31 turns, chaos
+    #     signal -39.2 dB, noise -41.5 dB -> SNR  2.3 -> 20 turns, chaos
+    #
+    # The middle one is THIRTY dB louder than the first and far worse. Changing a
+    # gain moves signal and noise together, so it cannot fix this — the owner set
+    # the peak to -12 dB and nothing improved, exactly as these numbers predict.
+    #
+    # Why the diarizer cares: WeSpeaker and CAM++ embed whatever is in the speech
+    # band. At 17 dB the embedding is dominated by the voice, so five people land
+    # in five places. At 2-4 dB every embedding also carries the SAME noise, so
+    # they all drag toward one point, the distances between voices collapse, and
+    # clustering cuts arbitrarily. That is the 9 -> 31 turn jump: not more people,
+    # just unstable boundaries.
+    speech = snr = sig_db = noise_db = None
     try:
         import torch
         from silero_vad import get_speech_timestamps, load_silero_vad
@@ -57,6 +76,13 @@ def profile(path: str) -> dict:
         ts = get_speech_timestamps(torch.from_numpy(x), load_silero_vad(),
                                    sampling_rate=16000)
         speech = sum(t["end"] - t["start"] for t in ts) / 16000
+        mask = np.zeros(len(x), dtype=bool)
+        for t in ts:
+            mask[t["start"]:t["end"]] = True
+        rms_of = lambda a: float(np.sqrt(np.mean(a ** 2))) if a.size else 0.0
+        db_of = lambda v: 20 * np.log10(v) if v > 0 else float("-inf")
+        sig_db, noise_db = db_of(rms_of(x[mask])), db_of(rms_of(x[~mask]))
+        snr = sig_db - noise_db
     except Exception as exc:  # noqa: BLE001 — reported, never fatal
         speech = f"unavailable ({type(exc).__name__})"
 
@@ -85,6 +111,9 @@ def profile(path: str) -> dict:
         "clipped_pct": 100 * clipped / len(mono) if mono.size else 0,
         "dc": float(np.mean(mono)) if mono.size else 0.0,
         "speech_sec": speech,
+        "snr_db": snr,
+        "sig_db": sig_db,
+        "noise_db": noise_db,
         "band99_hz": band,
     }
 
@@ -102,6 +131,9 @@ def main() -> int:
               f"peak {r['peak']:.4f}")
         print(f"  clipping      {r['clipped']} samples ({r['clipped_pct']:.3f}%)")
         print(f"  DC offset     {r['dc']:+.6f}")
+        if r["snr_db"] is not None:
+            print(f"  SNR           {r['snr_db']:.1f} dB    "
+                  f"(speech {r['sig_db']:.1f} dB, background {r['noise_db']:.1f} dB)")
         if isinstance(r["speech_sec"], float):
             pct = 100 * r["speech_sec"] / r["sec"] if r["sec"] else 0
             print(f"  speech        {r['speech_sec']:.1f} s of {r['sec']:.1f} s "
@@ -113,6 +145,18 @@ def main() -> int:
         # The one line that reads as a verdict, and it only ever flags what is
         # measured against a threshold this project already uses.
         flags = []
+        # THE VERDICT LINE. Ranked first because it is the one that predicted the
+        # outcome on all three measured captures, while level predicted nothing.
+        if r["snr_db"] is not None:
+            if r["snr_db"] < 10:
+                flags.append(f"SNR {r['snr_db']:.1f} dB — speaker embeddings will "
+                             "carry more background than voice, and diarization "
+                             "will split people arbitrarily. Above 15 dB is the "
+                             "target. Raising the gain will NOT help: it moves "
+                             "signal and background together.")
+            elif r["snr_db"] < 15:
+                flags.append(f"SNR {r['snr_db']:.1f} dB — below the 15 dB that "
+                             "measured well here; diarization may be unstable.")
         if r["rms"] < 0.004:
             flags.append("BELOW the realtime silence gate (0.004) — the VAD and "
                          "the ATND beam collector will see this as silence")
