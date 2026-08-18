@@ -155,6 +155,29 @@ import traceback
 # Bundled, that root is Contents/Resources.
 BASE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("HF_HOME", os.path.join(BASE, "models"))
+
+
+def hub_dir() -> str:
+    """Where the HF snapshots actually are.
+
+    ⚠ NOT `HF_HOME/hub`. That is only the default; `HF_HUB_CACHE` overrides it,
+    and the packaged app SETS THEM TO DIFFERENT PLACES on purpose
+    (`PythonRuntime.sidecarEnvironment`):
+
+        HF_HOME      = Application Support/.../hf-home   (mutable, no models)
+        HF_HUB_CACHE = <app bundle>/models/hub           (the 35 GB of weights)
+
+    So globbing `HF_HOME/hub` finds nothing in the bundle while working perfectly
+    in dev, where HF_HOME defaults to the project `models/` and its `hub` is the
+    real one. That is the dev-vs-bundle divergence this project has paid for
+    repeatedly — and it is why hand-driving the bundled sidecar did not catch it:
+    a hand drive inherits the DEFAULT env, not the app's.
+
+    Reported from a client Mac 2026-08-18: "Wespeaker/wespeaker-voxceleb-campplus-LM
+    is not in /Users/ess/Library/Application Support/Meeting Transcriber/hf-home/hub"
+    — the weights were in the bundle the whole time.
+    """
+    return os.environ.get("HF_HUB_CACHE") or os.path.join(os.environ["HF_HOME"], "hub")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 # The vendored WeSpeaker tree, inserted BEFORE the import below. Its own folder
@@ -273,13 +296,14 @@ def load_campplus():
     import torch
     from wespeaker.models.campplus import CAMPPlus
 
-    pattern = os.path.join(os.environ["HF_HOME"], "hub",
+    pattern = os.path.join(
+        hub_dir(), 
                            "models--" + MODEL_REPO.replace("/", "--"),
                            "snapshots", "*", "avg_model.pt")
     found = sorted(glob.glob(pattern))
     if not found:
         raise FileNotFoundError(
-            f"{MODEL_REPO} is not in {os.environ['HF_HOME']}/hub — "
+            f"{MODEL_REPO} is not in {hub_dir()} — "
             "run download-best-models.sh")
 
     state = torch.load(found[-1], map_location="cpu")
