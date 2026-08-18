@@ -36,6 +36,28 @@ enum PositionSource: String, CaseIterable {
     /// it — unlike `atnd`, where every row carries a position id and `applyRepair`
     /// matches nothing. A span no pyannote turn overlaps keeps its position id.
     case atndTimingPyannoteIdentity = "atndTiming"
+    /// Talker direction WHILE RECORDING, then nothing once the recording stops —
+    /// the finished transcript is purely the voice engine's (owner, 2026-08-18:
+    /// *"pokoknya ATND gak akan digunakan ketika stop recording, full
+    /// diarization model"*).
+    ///
+    /// THE ONLY TIME-DEPENDENT MODE, and that is why it is a case rather than a
+    /// checkbox beside the others: the four above are fixed rules, so a flag that
+    /// silently rewrote one of them into a schedule would make the rest untrue as
+    /// written. Here the schedule IS the mode.
+    ///
+    /// It exists because the batch engines have no live labels — with CAM++ or
+    /// spectral the room has no names at all until Stop — so direction is the
+    /// only thing that can fill the meeting as it happens, while the whole-file
+    /// pass is the answer anyone keeps.
+    ///
+    /// ⚠ IT IS NOT THE SAME AS `both`, and the difference is the whole request.
+    /// `both` also lets voice win, but leaves direction filling whatever voice did
+    /// NOT cover. This drops the position layer entirely once recording ends, so a
+    /// stretch the engine never labelled falls back to the nearest voice turn
+    /// instead of to a seat — see `derivedRows`'s `filled.isEmpty` branch, which
+    /// is what stops it becoming SPEAKER UNKNOWN.
+    case atndLiveOnly = "atndLive"
 
     static let defaultsKey = "atnd.position.source"
 
@@ -47,7 +69,30 @@ enum PositionSource: String, CaseIterable {
 
     /// True when the ATND layer contributes anything to the display at all —
     /// gates the live-partial position label alongside the gap-fill itself.
+    /// True when the ATND layer contributes anything to the display at all —
+    /// gates the live-partial position label alongside the gap-fill itself.
+    ///
+    /// `atndLiveOnly` is TRUE here on purpose: while recording it behaves exactly
+    /// like `both`, and the live caption is the surface that mode exists to serve.
+    /// What changes at Stop is handled by `effective(recording:)`, not here.
     var usesPosition: Bool { self != .pyannote }
+
+    /// The mode that actually applies right now.
+    ///
+    /// One place resolves the schedule, so `derivedRows`, the live caption and any
+    /// future reader cannot disagree about when the position layer stops counting
+    /// — the two-readers-of-one-setting shape this project has been bitten by more
+    /// than once.
+    /// ⚠ IT RESOLVES TO ONE OF THE FOUR FIXED MODES, NEVER BACK TO ITSELF. That
+    /// is the property worth having: after this call no time-dependent mode
+    /// remains anywhere downstream, so `plan`, `usesPosition` and every future
+    /// reader only ever handle rules that mean one thing. Returning `self` while
+    /// recording — the first version — type-checked and behaved correctly, and
+    /// still let the schedule leak past the one place that is supposed to end it.
+    func effective(recording: Bool) -> PositionSource {
+        guard self == .atndLiveOnly else { return self }
+        return recording ? .both : .pyannote
+    }
 }
 
 /// A labeled stretch of recording time: the tuple shape `speakerRanges`,
@@ -98,6 +143,16 @@ extension PositionSource {
         case .atndTimingPyannoteIdentity:
             return PositionCoveragePlan(displayRanges: [], gapFillCoverage: [],
                                         relabelFromPyannote: true)
+        case .atndLiveOnly:
+            // WHILE RECORDING it is `both`, verbatim. After Stop this case is
+            // never reached, because `effective(recording:)` has already resolved
+            // it to `.pyannote` — resolving in ONE place is what keeps the two
+            // halves of a time-dependent mode from drifting apart.
+            //
+            // Falling through to `both`'s plan rather than repeating the literal:
+            // if `both` is ever retuned, this mode must move with it, and a copy
+            // would silently not.
+            return PositionSource.both.plan(pyannoteRanges: pyannoteRanges)
         }
     }
 }

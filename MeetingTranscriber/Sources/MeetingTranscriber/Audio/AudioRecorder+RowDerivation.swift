@@ -359,7 +359,13 @@ extension AudioRecorder {
         // rows would also put position ids on rows this engine labels, which is
         // exactly the id-space collision the ranges are kept disjoint to prevent.
         // Logged once per session in `configureMoss`, not per rebuild.
-        let source = mossDiarizationActive ? PositionSource.pyannote : positionSource
+        // `effective(recording:)` resolves the ONE time-dependent mode
+        // (`atndLiveOnly` — direction while recording, nothing after Stop). The
+        // MOSS override stays outermost: under that engine the position layer is
+        // off in every mode, for the reasons in the block above.
+        let source = mossDiarizationActive
+            ? PositionSource.pyannote
+            : positionSource.effective(recording: state == .recording || state == .preparing)
         let plan = source.plan(pyannoteRanges: ranges)
         // Off/silent ATND → fills is [] regardless of the source.
         let fills = plan.gapFillCoverage.map { positionGapFill(window: window, covered: $0) } ?? []

@@ -1106,7 +1106,14 @@ final class AudioRecorder: ObservableObject {
                     // confirmed row below it showed a MOSS label — two naming systems
                     // on screen at once, the top one vanishing as it commits.
                     self.partialSpeakerName = !self.mossDiarizationActive
-                        && self.positionSource.usesPosition
+                        // Through the SAME resolver the rows use. A realtime
+                        // partial can still land after Stop, and a caption
+                        // showing a seat above rows that no longer do would
+                        // be the two-readers-of-one-setting shape again.
+                        && self.positionSource
+                            .effective(recording: self.state == .recording
+                                                  || self.state == .preparing)
+                            .usesPosition
                         ? self.positionDiarizer?.label(
                             for: max(0, self.recordingElapsed - 1.0)...self.recordingElapsed,
                             minSamples: 3)?.name
