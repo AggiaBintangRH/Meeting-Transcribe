@@ -205,15 +205,28 @@ extension AudioRecorder {
         guard mossDiarizationActive else { return }
         mossLog("engine=moss chunked=\(chunkedID) "
                 + "mode=\(mossIsChunkedModel ? "one process (ASR + diarization)" : "second MOSS process")")
-        // Stated once per session rather than on every row rebuild: under this
-        // engine the ATND position layer contributes nothing to the display, so a
-        // configured position source is silently not in effect and the log is the
-        // only place that would otherwise say so. Beam collection itself is
-        // untouched — only the display plan is forced.
+        // Stated once per session rather than on every row rebuild, because a
+        // display plan that is silently NOT the configured one has no other place
+        // to be seen. Beam collection itself is untouched either way — only the
+        // display plan is decided here.
+        //
+        // Both outcomes are logged, not just the suppressed one: "the beam is
+        // labelling this meeting" is the line someone reads to confirm `Live only`
+        // is doing its job, and its absence was read as failure on 2026-08-18 when
+        // the truth was simply that nothing had been written.
         if positionDiarizer != nil, positionSource != .pyannote {
-            mossLog("position source '\(positionSource.rawValue)' is not applied under the MOSS "
-                    + "engine — the position layer fills gaps in PYANNOTE turns, and there are "
-                    + "none this session. Rows use MOSS labels only.")
+            if positionSource == .atndLiveOnly {
+                mossLog("position source 'atndLive' IS applied while recording under the MOSS "
+                        + "engine — beam direction labels the meeting as it happens, and the "
+                        + "layer drops out entirely at Stop, so the finished transcript is "
+                        + "MOSS only. Expect FILL lines in logs/position-diarization.log.")
+            } else {
+                mossLog("position source '\(positionSource.rawValue)' is not applied under the MOSS "
+                        + "engine — the position layer fills gaps in PYANNOTE turns, and there are "
+                        + "none this session. Rows use MOSS labels only. Pick 'Live only' if you "
+                        + "want beam labels while recording; it is the one mode that survives "
+                        + "this engine, because it removes itself at Stop.")
+            }
         }
         installMossDiarizationCallbacks()
     }

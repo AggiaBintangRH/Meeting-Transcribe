@@ -16,9 +16,11 @@ final class PositionLiveOnlyTests: XCTestCase {
 
     /// While recording it is `both`, verbatim. After Stop it is `pyannote`.
     func testItIsBothWhileRecordingAndVoiceOnlyAfterStop() {
-        XCTAssertEqual(PositionSource.atndLiveOnly.effective(recording: true), .both,
+        XCTAssertEqual(PositionSource.atndLiveOnly.effective(recording: true, mossActive: false),
+                       .both,
                        "while recording, direction must fill what voice has not covered")
-        XCTAssertEqual(PositionSource.atndLiveOnly.effective(recording: false), .pyannote,
+        XCTAssertEqual(PositionSource.atndLiveOnly.effective(recording: false, mossActive: false),
+                       .pyannote,
                        "after Stop the position layer must contribute nothing at all")
     }
 
@@ -28,7 +30,7 @@ final class PositionLiveOnlyTests: XCTestCase {
     func testEveryOtherModeIgnoresTheSchedule() {
         for mode in PositionSource.allCases where mode != .atndLiveOnly {
             for recording in [true, false] {
-                XCTAssertEqual(mode.effective(recording: recording), mode,
+                XCTAssertEqual(mode.effective(recording: recording, mossActive: false), mode,
                                "\(mode.rawValue) changed with recording=\(recording); "
                                + "only Live only may depend on when it is asked")
             }
@@ -54,7 +56,7 @@ final class PositionLiveOnlyTests: XCTestCase {
     func testAfterStopTheGapFillIsDisabledNotWidened() {
         let ranges: [LabeledRange] = [(start: 0, end: 5, id: 3, name: "Speaker 3")]
         let plan = PositionSource.atndLiveOnly
-            .effective(recording: false)
+            .effective(recording: false, mossActive: false)
             .plan(pyannoteRanges: ranges)
         XCTAssertNil(plan.gapFillCoverage,
                      "empty coverage would make direction tile the whole window — "
@@ -90,4 +92,57 @@ final class PositionLiveOnlyTests: XCTestCase {
                            + "take the nearest voice turn — never SPEAKER UNKNOWN")
         }
     }
+
+    // MARK: - The MOSS engine (2026-08-18)
+
+    /// ⚠ THE CHANGE THIS FILE EXISTS TO PIN. `Live only` keeps working under the
+    /// MOSS engine, where every FIXED mode is still suppressed.
+    ///
+    /// The owner recorded with `atnd.position.enabled = 1` and
+    /// `atnd.position.source = atndLive` — both correct — and got SPEAKER UNKNOWN
+    /// plus no position log at all, because an outer `mossActive ? .pyannote :`
+    /// answered before the mode could. The suppression is right for the fixed
+    /// modes (their beam spans survive into the finished transcript, alongside
+    /// MOSS ids) and wrong for this one, which removes itself at Stop.
+    func testLiveOnlySurvivesTheMossEngineWhileEveryFixedModeIsStillSuppressed() {
+        XCTAssertEqual(PositionSource.atndLiveOnly.effective(recording: true, mossActive: true),
+                       .both,
+                       "under MOSS, Live only must still label the meeting as it happens — "
+                       + "MOSS emits nothing until its first 30 s chunk lands, so suppressing "
+                       + "the beam leaves the meeting with no labels at all")
+        XCTAssertEqual(PositionSource.atndLiveOnly.effective(recording: false, mossActive: true),
+                       .pyannote,
+                       "and it must still drop out at Stop — that is what makes it safe here")
+
+        for mode in PositionSource.allCases where mode != .atndLiveOnly {
+            for recording in [true, false] {
+                XCTAssertEqual(mode.effective(recording: recording, mossActive: true), .pyannote,
+                               "\(mode.rawValue) must stay suppressed under MOSS: its spans "
+                               + "would reach the finished transcript")
+            }
+        }
+    }
+
+    /// The POSITIVE half. Without MOSS, nothing is suppressed — otherwise a file
+    /// that had simply stopped showing the beam anywhere would pass the test above.
+    func testWithoutMossNoModeIsSuppressed() {
+        for mode in PositionSource.allCases {
+            let live = mode.effective(recording: true, mossActive: false)
+            XCTAssertEqual(live, mode == .atndLiveOnly ? .both : mode,
+                           "\(mode.rawValue) must be untouched when MOSS is not the engine")
+        }
+    }
+
+    /// The live caption and the rows read ONE resolver, so they cannot disagree.
+    /// `usesPosition` is what gates the caption; asserting it against the same
+    /// resolved mode is what pins them together.
+    func testTheLiveCaptionAgreesWithTheRowsUnderMoss() {
+        let recording = PositionSource.atndLiveOnly.effective(recording: true, mossActive: true)
+        XCTAssertTrue(recording.usesPosition,
+                      "rows show beam labels while recording under MOSS, so the caption must too")
+        let stopped = PositionSource.atndLiveOnly.effective(recording: false, mossActive: true)
+        XCTAssertFalse(stopped.usesPosition,
+                       "and both must go quiet at Stop")
+    }
+
 }

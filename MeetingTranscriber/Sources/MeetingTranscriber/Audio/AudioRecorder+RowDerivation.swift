@@ -349,23 +349,18 @@ extension AudioRecorder {
         // `ranges` itself is untouched in every mode, and the position ids the
         // fills carry never leave `filled` — liveTurns/overlapRegions/
         // speakerCount/SpeakerProfileStore stay pure pyannote throughout.
-        // Under the MOSS engine the position plan is forced to pure-pyannote —
-        // i.e. "show the ranges, run no gap-fill, relabel nothing". The name is
-        // now a misnomer for what `ranges` holds (they are MOSS spans), but the
-        // PLAN is what matters: the ATND layer exists to fill holes in pyannote's
-        // coverage and to lend pyannote its boundaries, and neither question is
-        // meaningful against turns that came from an ASR model rather than from a
-        // voice-embedding pass over the room. Mixing beam-derived spans into MOSS
-        // rows would also put position ids on rows this engine labels, which is
-        // exactly the id-space collision the ranges are kept disjoint to prevent.
-        // Logged once per session in `configureMoss`, not per rebuild.
-        // `effective(recording:)` resolves the ONE time-dependent mode
-        // (`atndLiveOnly` — direction while recording, nothing after Stop). The
-        // MOSS override stays outermost: under that engine the position layer is
-        // off in every mode, for the reasons in the block above.
-        let source = mossDiarizationActive
-            ? PositionSource.pyannote
-            : positionSource.effective(recording: state == .recording || state == .preparing)
+        // ONE resolver decides both the schedule (`atndLiveOnly` — direction while
+        // recording, nothing after Stop) and the engine rule (MOSS forces the
+        // pyannote-pure plan in the FIXED modes: show the ranges, run no gap-fill,
+        // relabel nothing). Both used to be expressed here, the MOSS half as an
+        // outer ternary — and an outer ternary cannot be overridden by the mode it
+        // wraps, which is precisely what `Live only` had to do. They live in
+        // `PositionSource.effective(recording:mossActive:)` now, with the reasoning
+        // and the accepted cost written there. `configureMoss` logs the outcome
+        // once per session rather than per rebuild.
+        let source = positionSource.effective(
+            recording: state == .recording || state == .preparing,
+            mossActive: mossDiarizationActive)
         let plan = source.plan(pyannoteRanges: ranges)
         // Off/silent ATND → fills is [] regardless of the source.
         let fills = plan.gapFillCoverage.map { positionGapFill(window: window, covered: $0) } ?? []

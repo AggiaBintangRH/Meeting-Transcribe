@@ -1100,19 +1100,20 @@ final class AudioRecorder: ObservableObject {
                     // Short so the live-partial label flips quickly on a talker switch.
                     // In `pyannote` source mode the position layer is not displayed
                     // anywhere, so the live partial must not carry its label either.
-                    // The MOSS engine is the same case for the same reason
-                    // (`derivedRows` forces the pyannote-pure plan under it): without
-                    // this the caption would show an ATND position name while every
-                    // confirmed row below it showed a MOSS label — two naming systems
-                    // on screen at once, the top one vanishing as it commits.
-                    self.partialSpeakerName = !self.mossDiarizationActive
-                        // Through the SAME resolver the rows use. A realtime
-                        // partial can still land after Stop, and a caption
-                        // showing a seat above rows that no longer do would
-                        // be the two-readers-of-one-setting shape again.
-                        && self.positionSource
+                    //
+                    // Through the SAME resolver the rows use — including the MOSS
+                    // rule, which used to sit here as a separate `!mossActive &&`
+                    // term. Two expressions of one fact is how the caption and the
+                    // rows come to disagree, and under `Live only` they now really
+                    // would: the rows show beam labels while recording, so a caption
+                    // still carrying the old veto would be the only blank thing on
+                    // screen. A realtime partial can also land after Stop, where
+                    // this resolves to `.pyannote` and the caption goes quiet with
+                    // the rows.
+                    self.partialSpeakerName = self.positionSource
                             .effective(recording: self.state == .recording
-                                                  || self.state == .preparing)
+                                                  || self.state == .preparing,
+                                       mossActive: self.mossDiarizationActive)
                             .usesPosition
                         ? self.positionDiarizer?.label(
                             for: max(0, self.recordingElapsed - 1.0)...self.recordingElapsed,

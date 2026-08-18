@@ -69,12 +69,10 @@ enum PositionSource: String, CaseIterable {
 
     /// True when the ATND layer contributes anything to the display at all —
     /// gates the live-partial position label alongside the gap-fill itself.
-    /// True when the ATND layer contributes anything to the display at all —
-    /// gates the live-partial position label alongside the gap-fill itself.
     ///
     /// `atndLiveOnly` is TRUE here on purpose: while recording it behaves exactly
     /// like `both`, and the live caption is the surface that mode exists to serve.
-    /// What changes at Stop is handled by `effective(recording:)`, not here.
+    /// What changes at Stop is handled by `effective(recording:mossActive:)`.
     var usesPosition: Bool { self != .pyannote }
 
     /// The mode that actually applies right now.
@@ -89,9 +87,38 @@ enum PositionSource: String, CaseIterable {
     /// reader only ever handle rules that mean one thing. Returning `self` while
     /// recording — the first version — type-checked and behaved correctly, and
     /// still let the schedule leak past the one place that is supposed to end it.
-    func effective(recording: Bool) -> PositionSource {
-        guard self == .atndLiveOnly else { return self }
-        return recording ? .both : .pyannote
+    ///
+    /// ⚠ `mossActive` HAS NO DEFAULT, DELIBERATELY. A default is how a future call
+    /// site forgets it and silently falls back to "the beam never shows" — the
+    /// invisible direction. The compiler naming every call site is the guard, the
+    /// same reason `wantedOverlapEngine`'s `detectEnabled` has none.
+    ///
+    /// THE MOSS OVERRIDE DOES NOT APPLY TO `atndLiveOnly`, and that is the whole
+    /// of the 2026-08-18 change (owner: *"pas recording itu pakai ATND … realtime
+    /// itu pakai atnd labelnya"*). The override exists to keep beam-derived spans
+    /// out of a finished MOSS transcript — position ids alongside MOSS ids, and a
+    /// gap-fill whose whole meaning is "the complement of a VOICE pass". `Live
+    /// only` already guarantees the first: it drops the position layer entirely at
+    /// Stop, so nothing beam-shaped survives into the transcript anyone keeps. The
+    /// override was therefore guarding something already guarded, and the only
+    /// thing it still bought was a meeting with NO labels at all while it ran —
+    /// MOSS emits nothing until its first 30 s chunk lands, and the beam was
+    /// forbidden from filling that silence.
+    ///
+    /// It still applies to every fixed mode, because those keep showing beam spans
+    /// after Stop and the original objection stands there unchanged.
+    ///
+    /// ⚠ Known cost, accepted: while recording under MOSS the screen carries two
+    /// naming schemes at once — a chunk's `Speaker 1` and a seat's `Speaker 1` are
+    /// unrelated. That is not new damage. MOSS labels are anonymous PER CALL, so
+    /// chunk 7's `Speaker 1` already had nothing to do with chunk 8's; the honesty
+    /// has always lived in the id, and the ids stay disjoint here too
+    /// (100_000 <= position < 1_000_000 <= MOSS).
+    func effective(recording: Bool, mossActive: Bool) -> PositionSource {
+        // Order matters: the schedule is asked FIRST, so `Live only` answers for
+        // itself before the engine rule can speak for it.
+        if self == .atndLiveOnly { return recording ? .both : .pyannote }
+        return mossActive ? .pyannote : self
     }
 }
 
