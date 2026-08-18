@@ -4,7 +4,9 @@ import SwiftUI
 struct LoadingOverlayView: View {
     @ObservedObject var loader: ModelLoader
 
-    private var failed: Bool { loader.failureMessage != nil }
+    /// The one rule, owned by the loader — see `ModelLoader.hasFailure`
+    /// for the client-Mac trap it exists to make impossible.
+    private var failed: Bool { loader.hasFailure }
 
     var body: some View {
         OverlayCard {

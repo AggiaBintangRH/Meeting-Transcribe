@@ -25,6 +25,16 @@ final class ModelLoader: ObservableObject {
         /// does not hold the panel open — a correct outcome must not demand an
         /// acknowledgement.
         case skipped(String)
+
+        /// Red, and therefore something the user must be able to get out of.
+        ///
+        /// `.skipped` deliberately does NOT count: it is a correct outcome, and a
+        /// correct outcome must not demand an acknowledgement — the same rule
+        /// `AudioRecorder.stopFailed` follows for the stop panel.
+        var isFailed: Bool {
+            if case .failed = self { return true }
+            return false
+        }
     }
 
     struct Item: Identifiable {
@@ -40,8 +50,41 @@ final class ModelLoader: ObservableObject {
     /// read what went wrong. Cleared via `dismissFailure()`.
     @Published private(set) var failureMessage: String?
 
+    /// Close the startup overlay.
+    ///
+    /// ⚠ IT CLEARS THE ROWS TOO, and that is not tidiness — without it this
+    /// button does nothing. `hasFailure` now also reads the rows (see below), so
+    /// clearing only the message would leave the red row asserting a failure the
+    /// user had just dismissed, the overlay would stay, and Close would be a dead
+    /// control: the exact symptom this whole change exists to remove, rebuilt one
+    /// commit later. Caught by `testDismissingReallyCloses`, which was written
+    /// asserting the bug before it was noticed.
+    ///
+    /// Safe because `items` belongs to the overlay alone and `loadAll` rebuilds
+    /// it from scratch on the next attempt.
     func dismissFailure() {
         failureMessage = nil
+        items = []
+    }
+
+    /// Is there anything the user must be able to dismiss?
+    ///
+    /// ⚠ ANY RED ROW COUNTS, not only `failureMessage`. A client Mac showed the
+    /// startup overlay with CAM++ marked failed, the models below it never
+    /// attempted, the header still reading "Loading models" and NO Close button —
+    /// the app unusable and Settings unreachable (2026-08-18).
+    ///
+    /// The two are set one line apart in `loadAll`, so how they came to disagree
+    /// there is NOT established, and that is the reason this reads the rows rather
+    /// than being "fixed" by trusting the variable harder: the way out must depend
+    /// on what the user can SEE. A red row with no way out is a trap whatever set
+    /// it, and a second variable that has to agree with the rows is one more thing
+    /// that can fail to.
+    ///
+    /// Lives here, not in the view, so it is testable and so any other surface
+    /// asking the same question gets the same answer.
+    var hasFailure: Bool {
+        failureMessage != nil || items.contains { $0.state.isFailed }
     }
 
     /// Rows for models this session TORE DOWN, shown above the load rows.

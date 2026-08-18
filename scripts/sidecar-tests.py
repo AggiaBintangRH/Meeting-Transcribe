@@ -4741,6 +4741,7 @@ LAYOUT_CHECKS = [
     "layout/inert-speaker-count-says-why-once",
     "layout/live-window-failures-leave-the-stop-gate-alone",
     "layout/no-banner-hard-codes-an-engine-name",
+    "layout/the-startup-overlay-always-has-a-way-out",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5380,6 +5381,61 @@ def run_layout(rep: Report, ctx):
         rep.expect(cid, not problems,
                    "every clear of `errorMessage` clears the already-read marker "
                    "with it, so an identical second failure is still shown",
+                   "; ".join(problems))
+
+    cid = "layout/the-startup-overlay-always-has-a-way-out"
+    if ctx.wants(cid):
+        # A client Mac showed the startup overlay with CAM++ marked failed, the
+        # models below it never attempted, the header still reading "Loading
+        # models" and NO Close button — the app unusable, Settings unreachable
+        # (2026-08-18). `failureMessage` and the row's `.failed` state are set one
+        # line apart in `loadAll`, so how they disagreed there is not established;
+        # the fix makes the way out depend on the rows the user can SEE.
+        #
+        # PINNED HERE BECAUSE SWIFT CANNOT. `ModelLoader.items` is `private(set)`
+        # — correctly, it is the loader's own record — so no test can pose "a
+        # failed row with no message", which is exactly the reported state. The
+        # negative control proved it: reverting `hasFailure` to the message alone
+        # left the whole Swift suite green.
+        #
+        # Two halves, because either alone is satisfiable by a broken pair: the
+        # rule must read the ROWS, and dismissing must CLEAR them — without the
+        # second, Close clears the message, the red row still asserts a failure,
+        # and the button is dead. That regression was written and caught inside
+        # this same change.
+        loader = (SWIFT_SOURCES / "MeetingTranscriber" / "Models" / "ModelLoader.swift")
+        view = (SWIFT_SOURCES / "MeetingTranscriber" / "Views" / "Main"
+                / "LoadingOverlayView.swift")
+        problems = []
+        for path, label in [(loader, "ModelLoader.swift"), (view, "LoadingOverlayView.swift")]:
+            if not path.exists():
+                problems.append(f"{label} is gone")
+        if not problems:
+            # Comments stripped — both files explain this trap at length, so a
+            # textual search matches its own documentation.
+            code = "\n".join(l for l in loader.read_text().splitlines()
+                              if not l.strip().startswith("//"))
+            vcode = "\n".join(l for l in view.read_text().splitlines()
+                               if not l.strip().startswith("//"))
+            body = code.split("var hasFailure")[-1].split("}")[0] if "var hasFailure" in code else ""
+            if "var hasFailure" not in code:
+                problems.append("ModelLoader has no `hasFailure` — the overlay's way "
+                                "out is no longer a rule anything can pin")
+            elif "isFailed" not in body:
+                problems.append("`hasFailure` no longer reads the rows, so a failed "
+                                "row with no failureMessage traps the user again — "
+                                "the exact state reported from a client Mac")
+            dismiss = code.split("func dismissFailure")[-1].split("}")[0] if "func dismissFailure" in code else ""
+            if "items = []" not in dismiss:
+                problems.append("`dismissFailure` no longer clears the rows, so Close "
+                                "leaves a red row asserting a failure and the overlay "
+                                "never goes — a dead button")
+            if "loader.hasFailure" not in vcode:
+                problems.append("LoadingOverlayView no longer asks the loader — it "
+                                "has its own copy of the rule to drift from")
+        rep.expect(cid, not problems,
+                   "the startup overlay's Close depends on the rows the user can see, "
+                   "and dismissing really clears them",
                    "; ".join(problems))
 
     cid = "layout/no-banner-hard-codes-an-engine-name"
