@@ -309,12 +309,19 @@ extension AudioRecorder {
     /// still works with Voxtral.
     nonisolated static func chunkedFullPassRefusalMessage(chunkedModelID: String) -> String? {
         switch chunkedModelID {
-        case "moss":
-            return "MOSS cannot re-transcribe a whole recording. Measured on this Mac, a single "
-                 + "360 s pass already hits its 2048-token limit — the transcript is cut off "
-                 + "mid-sentence and the truncated part is dropped silently — and a 600 s pass "
-                 + "never finished in over 20 minutes. Keep \"Continue from live text (tail only)\" "
-                 + "on with MOSS, or pick another chunked model."
+        // ⚠ MOSS USED TO BE REFUSED HERE, AND THE REASON HAD EXPIRED TWICE OVER
+        // (lifted 2026-08-18, owner-requested). The message cited a single 360 s
+        // pass hitting a 2048-token cap. Both halves are stale: `MAX_NEW_TOKENS`
+        // has been 5120 since 2026-08-05 (the checkpoint's own default — the 2048
+        // was a copy of upstream's CLI default, never a model limit), and this
+        // pass has never sent 360 s of audio in one call. It cuts at
+        // `chunked.intervalSec`, so 120 s is its ceiling — measured at ~1638 of
+        // the budget even on the OLD cap.
+        //
+        // What actually blocked it was never the cap: the FILE-TRANSCRIBE frame
+        // discarded MOSS's speaker segments, so a full pass produced a
+        // re-transcribed meeting with nobody in it. `emit_file` carries them now,
+        // and `replaceOfficeSegments` rebuilds pinned rows from them.
         case "voxtral":
             return "Voxtral cannot re-transcribe a whole recording in reasonable time. It needs "
                  + "about 27 s per 30 s chunk (Qwen3 4.3 s, Whisper 0.3–2.1 s, Granite 5.6 s), "
@@ -345,8 +352,12 @@ extension AudioRecorder {
                  + "to re-transcribe a 60-minute meeting, which is why the full pass is refused "
                  + "with it."
         case "moss":
-            return "MOSS takes about 6.4 s per 30 s of audio on this Mac, but it cannot do a full "
-                 + "pass at all — it truncates past about 6 minutes of audio in one call."
+            return "MOSS takes about 6.4 s per 30 s of audio on this Mac — roughly 13 minutes to "
+                 + "re-transcribe a 60-minute meeting. It is the one model where the full pass also "
+                 + "REDIARIZES: MOSS writes speaker labels with the text, so the whole meeting is "
+                 + "re-labelled from the file. Measured on a 5-person recording, longer windows are "
+                 + "what fixes its speaker count (30 s gave 6 speakers, 120 s gave the correct 5), "
+                 + "and the pass cuts its windows at silence rather than at fixed offsets."
         default:
             return ""
         }
@@ -468,6 +479,21 @@ extension AudioRecorder {
             segments.removeAll { !$0.confirmed }
             rebuildDisplayRows()
         }
+        // MOSS+MOSS: the labels are about to be replaced wholesale too, because
+        // this model writes them WITH the text. Cleared up front for the same
+        // reason as the unconfirmed rows — a stale set shown under a transcript
+        // being rebuilt is worse than none — and `mossChunkIndex` restarts so the
+        // full pass's windows are numbered 0..n rather than continuing the live
+        // count. Window numbering is what `identifyMossTurns` groups on, so a
+        // continued count would leave it grouping live windows that no longer
+        // exist. Inert for every other model: `mossDiarizationActive` is false.
+        if mossDiarizationActive, mossIsChunkedModel {
+            mossTurns = []
+            mossChunkIndex = 0
+            mossIdentifyStarted = false
+            mossLog("FULL PASS — live labels cleared; the whole recording is "
+                    + "re-transcribed and re-labelled from the file")
+        }
 
         let totalWindows = windows.count * (remoteRecording == nil ? 1 : 2)
         startFullPassWatchdog(windowCount: totalWindows)
@@ -541,7 +567,8 @@ extension AudioRecorder {
                     replaceRemoteSegments(window: window, text: trimmed, conf: result.conf)
                 } else {
                     replaceOfficeSegments(window: window, text: trimmed, conf: result.conf,
-                                          aligner: aligner, samples: samples)
+                                          aligner: aligner, samples: samples,
+                                          mossSegments: result.segments)
                 }
                 chunkedStopLog("FULL PASS \(span) "
                                + (trimmed.isEmpty ? "empty transcript" : trimmed))
@@ -570,10 +597,41 @@ extension AudioRecorder {
     /// pass must run in chronological order.
     private func replaceOfficeSegments(window: ClosedRange<Double>, text: String,
                                        conf: Double?, aligner: AlignerService?,
-                                       samples: [Float]) {
+                                       samples: [Float],
+                                       mossSegments: [ChunkedASRService.MossSegment]? = nil) {
         segments.removeAll { segment in
             guard segment.confirmed, let existing = segment.window else { return false }
             return existing.overlaps(window)
+        }
+        // MOSS+MOSS: this model transcribed AND labelled the window in one call,
+        // so its reply becomes one PINNED row per speaker plus the turns behind
+        // them — the same two products `applyMossChunk` makes from a live chunk,
+        // built by the same two pure functions so the id scheme cannot drift.
+        //
+        // Deliberately BEFORE the plain-text branch and returning early: appending
+        // both would put every word in the window on screen twice, which is the
+        // exact duplication `applyMossChunk`'s return value exists to prevent on
+        // the live path.
+        if mossDiarizationActive, mossIsChunkedModel, let mossSegments {
+            let index = mossChunkIndex
+            mossChunkIndex += 1
+            let turns = Self.mossTurns(from: mossSegments, window: window, chunkIndex: index)
+            mossTurns.append(contentsOf: turns)
+            let pinned = Self.mossPinnedSegments(from: mossSegments,
+                                                 window: window, chunkIndex: index)
+            for segment in pinned {
+                let at = segments.firstIndex {
+                    ($0.window?.lowerBound ?? .infinity) > (segment.window?.lowerBound ?? 0)
+                } ?? segments.count
+                segments.insert(segment, at: at)
+            }
+            // No aligner request: a pinned row's speaker is already decided, and
+            // word times would only re-split a row the model attributed itself.
+            mossLog("FULL PASS window #\(index) [\(fmt(window.lowerBound))-"
+                    + "\(fmt(window.upperBound))] \(pinned.count) row(s), "
+                    + "speakers \(Set(turns.map(\.name)).sorted())")
+            rebuildDisplayRows()
+            return
         }
         if !text.isEmpty {
             let segment = TranscriptSegment(text: text, confirmed: true,

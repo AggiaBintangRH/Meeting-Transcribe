@@ -2090,6 +2090,20 @@ MOSS_ASR_ONLY_EMIT_CASES = [
      '{"type": "file_error", "id": 7, "text": "file not found: /nope.wav"}'),
     (("file_error", None, "file transcription failed: boom"),
      '{"type": "file_error", "id": null, "text": "file transcription failed: boom"}'),
+    # WITH segments — the stop-time full pass (2026-08-18). MOSS transcribes and
+    # labels in one call, and this frame used to discard the labels, so a full
+    # pass produced a re-transcribed meeting with nobody in it. Pinned LAST in
+    # key order on purpose: appended after `text`, so the four cases above stay
+    # byte-identical and an older app still decodes a newer sidecar's reply.
+    (("file_result", 7, "hello", [{"start": 0.0, "end": 1.0, "speaker": "S01",
+                                   "text": "hello"}]),
+     '{"type": "file_result", "id": 7, "text": "hello", "segments": '
+     '[{"start": 0.0, "end": 1.0, "speaker": "S01", "text": "hello"}]}'),
+    # An empty LIST is not the same as absent: it says "this model reports
+    # speakers and found none here", where absent says "this model has no
+    # speakers to report". Both must survive on the wire.
+    (("file_result", 7, "hello", []),
+     '{"type": "file_result", "id": 7, "text": "hello", "segments": []}'),
 ]
 
 # Constants that are part of MOSS's wire/gate behaviour, not implementation
@@ -2406,7 +2420,13 @@ def run_moss(rep: Report, ctx):
                 "status": {"type", "text"},
                 "error": {"type", "text"},
                 "final": {"type", "text", "segments"},
-                "file_result": {"type", "id", "text"},
+                # `segments` on a file_result is the 2026-08-18 addition, and it
+                # is in the UNION rather than required on every reply: the frame
+                # omits it entirely when the caller passes none, which is what
+                # keeps Remote and overlap repair byte-identical and lets an older
+                # app decode a newer sidecar. `file_error` must NEVER carry it —
+                # a failed transcription has no speakers to report.
+                "file_result": {"type", "id", "text", "segments"},
                 "file_error": {"type", "id", "text"},
             }
             for kind, want in expected_keys.items():
@@ -4742,6 +4762,7 @@ LAYOUT_CHECKS = [
     "layout/live-window-failures-leave-the-stop-gate-alone",
     "layout/no-banner-hard-codes-an-engine-name",
     "layout/the-startup-overlay-always-has-a-way-out",
+    "layout/the-moss-full-pass-rebuilds-speakers",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5044,6 +5065,53 @@ def run_layout(rep: Report, ctx):
                    f"<folder>-service.py as a direct child; "
                    f"{len(LAYOUT_EXEMPT)} exemptions hold none; none at scripts/ root",
                    "; ".join(script_problems))
+
+    cid = "layout/the-moss-full-pass-rebuilds-speakers"
+    if ctx.wants(cid):
+        # A Swift test cannot see a CALL SITE (the 2026-08-06 MOSS lesson), and
+        # this feature is three call sites that must all be present together. Any
+        # one of them missing fails SILENTLY and in the worst direction:
+        #
+        #   * segments not forwarded  -> the full pass re-transcribes the meeting
+        #                                and leaves NOBODY in it, which is worse
+        #                                than the live chunks it just deleted
+        #   * mossTurns not cleared   -> the live labels and the rebuilt ones both
+        #                                stand, with different chunk indices, so
+        #                                the meeting has two overlapping sets of
+        #                                speaker spans (the 2026-08-05 duplication)
+        #   * identify flag not reset -> `startMossIdentifyForOwnASR` short-circuits
+        #                                on the live session's run and the rebuilt
+        #                                windows are never stitched
+        # Comments stripped first, for the reason the 2026-08-05 check learned the
+        # hard way: this file documents the change at length, so a plain search
+        # matches its own explanation.
+        src = (SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+               / "AudioRecorder+ChunkedStop.swift").read_text()
+        body = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("//"))
+        missing = []
+        if "mossSegments: result.segments" not in body:
+            missing.append("the full pass does not forward `result.segments` to "
+                           "replaceOfficeSegments — a MOSS full pass would produce "
+                           "text with no speakers at all")
+        for token, why in (("mossTurns = []", "the live labels are not cleared"),
+                           ("mossChunkIndex = 0", "window numbering continues the live count, "
+                                                  "so identify groups windows that no longer exist"),
+                           ("mossIdentifyStarted = false", "identity cannot run again, so the "
+                                                           "rebuilt windows are never stitched")):
+            if token not in body:
+                missing.append(f"`{token}` is absent — {why}")
+        # The POSITIVE half, and it is what stops this passing on a file that had
+        # simply stopped doing a full pass at all.
+        if "mossPinnedSegments(from:" not in body:
+            missing.append("replaceOfficeSegments no longer builds pinned MOSS rows")
+        if "chunkedFullPassRefusalMessage" in body and '"moss"' in body.split(
+                "chunkedFullPassRefusalMessage")[1][:1200]:
+            missing.append("MOSS looks refused again in chunkedFullPassRefusalMessage")
+        rep.expect(cid, not missing,
+                   "the MOSS full pass forwards segments, clears the live labels, "
+                   "restarts window numbering, re-arms identity and builds pinned rows",
+                   "; ".join(missing))
 
     cid = "layout/tail-window-start-is-recorded-not-derived"
     if ctx.wants(cid):

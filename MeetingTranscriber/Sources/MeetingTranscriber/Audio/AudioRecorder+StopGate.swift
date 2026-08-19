@@ -224,9 +224,16 @@ extension AudioRecorder {
             segments.removeAll { !$0.confirmed }
             rebuildDisplayRows()
         }
-        // MOSS+MOSS: this pass was the last source of turns, so identity runs here
-        // rather than in a full pass that mode never has. It settles the rest of
-        // the gate itself, which is why this returns instead of falling through.
+        // MOSS+MOSS: this pass was the last source of turns, so identity runs here.
+        // TRUE OF BOTH STOP MODES since 2026-08-18, which is why the hook stayed
+        // put when the full pass landed: the tail pass appends its last chunk's
+        // turns through `applyMossChunk`, and the full pass rebuilds every turn
+        // from the file through `replaceOfficeSegments` — either way this is the
+        // moment after which no more arrive. `startChunkedFullPass` resets
+        // `mossIdentifyStarted`, so the pass gets its own run rather than being
+        // blocked by the live session's.
+        // It settles the rest of the gate itself, which is why this returns
+        // instead of falling through.
         if startMossIdentifyForOwnASR() { return }
         maybeStartOverlapRepair()
         checkStopProcessingDone()

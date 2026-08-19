@@ -188,21 +188,36 @@ final class ChunkedStopSettingsTests: XCTestCase {
 
     // MARK: - 4. Refusals
 
-    /// Both refusals fire, and only for the full pass — the tail still works with
-    /// either model, which is why the refusal is on the combination and not on
-    /// the model.
-    func testMossAndVoxtralRefuseTheFullPass() {
-        for id in ["moss", "voxtral"] {
-            XCTAssertNotNil(AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: id), id)
-            // The mid-recording hole: a refused full pass degrades to the tail,
-            // never to "no pass at all", so no audio is left untranscribed.
-            XCTAssertEqual(mode(continueOnStop: false, model: id), .tail, id)
-            XCTAssertEqual(mode(continueOnStop: true, model: id), .tail, id)
-        }
+    /// ⚠ VOXTRAL IS NOW THE ONLY REFUSAL. MOSS was lifted 2026-08-18 — the
+    /// message cited a 2048-token cap raised to 5120 on 2026-08-05, and a 360 s
+    /// pass this code has never made (it cuts at `chunked.intervalSec`, ceiling
+    /// 120 s). What actually blocked it was the FILE-TRANSCRIBE frame discarding
+    /// MOSS's speaker segments; that frame carries them now.
+    ///
+    /// Voxtral's refusal is untouched and is about TIME, which no cap change can
+    /// move: ~27 s per 30 s chunk is ~54 minutes for a 60-minute meeting.
+    func testOnlyVoxtralRefusesTheFullPass() {
+        XCTAssertNotNil(AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: "voxtral"))
+        // The mid-recording hole: a refused full pass degrades to the tail,
+        // never to "no pass at all", so no audio is left untranscribed.
+        XCTAssertEqual(mode(continueOnStop: false, model: "voxtral"), .tail)
+        XCTAssertEqual(mode(continueOnStop: true, model: "voxtral"), .tail)
+    }
+
+    /// The half that would have caught the lift being done by deletion rather
+    /// than by decision: MOSS must now REACH the full pass, not merely stop
+    /// being refused.
+    func testMossReachesTheFullPassNow() {
+        XCTAssertNil(AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: "moss"),
+                     "the token-cap reason expired twice over — see chunkedFullPassRefusalMessage")
+        XCTAssertEqual(mode(continueOnStop: false, model: "moss"), .full,
+                       "stop pass on + continue off must re-transcribe the whole recording")
+        XCTAssertEqual(mode(continueOnStop: true, model: "moss"), .tail,
+                       "and continue-on-stop must still mean tail, exactly as before")
     }
 
     func testEveryOtherModelMayRunTheFullPass() {
-        for id in ["qwen3", "whisper", "granite"] {
+        for id in ["qwen3", "whisper", "granite", "moss"] {
             XCTAssertNil(AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: id), id)
             XCTAssertEqual(mode(continueOnStop: false, model: id), .full, id)
         }
@@ -212,7 +227,7 @@ final class ChunkedStopSettingsTests: XCTestCase {
     /// setting by the words the user actually sees — the shape every other
     /// refusal in this app follows.
     func testRefusalsSayWhatToDoAboutIt() {
-        for id in ["moss", "voxtral"] {
+        for id in ["voxtral"] {
             let message = AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: id) ?? ""
             XCTAssertTrue(message.contains("Continue from live text (tail only)"), id)
             XCTAssertTrue(message.contains("chunked model"), id)

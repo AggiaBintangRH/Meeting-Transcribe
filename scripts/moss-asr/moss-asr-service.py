@@ -43,7 +43,10 @@ client (`ChunkedASRService`) drives them all:
           {"type":"final","text":"Hello there. Hi.","segments":[
               {"start":0.0,"end":4.1,"speaker":"S01","text":"Hello there."},
               {"start":4.4,"end":5.2,"speaker":"S02","text":"Hi."}]}
-          {"type":"file_result","id":N,"text":"..."}
+          {"type":"file_result","id":N,"text":"...","segments":[...]}
+                     `segments` is OMITTED on file_error and present on
+                     file_result — same shape as the FLUSH `final`, so the
+                     stop-time full pass can rebuild speakers as well as words.
           {"type":"file_error","id":N,"text":"..."}
           {"type":"error","text":"..."}
   stdin:  length-prefixed frames:
@@ -199,10 +202,26 @@ def emit_final(text: str, segments) -> None:
         sys.exit(0)
 
 
-def emit_file(kind: str, req_id, text: str) -> None:
-    """Emit a file-transcribe result carrying its request id (remote / repair)."""
+def emit_file(kind: str, req_id, text: str, segments=None) -> None:
+    """Emit a file-transcribe result carrying its request id (remote / repair).
+
+    `segments` is ADDITIVE and OPTIONAL, and both halves of that matter. It is
+    omitted entirely when None, so `file_error` and every caller that predates it
+    put the identical three keys on the wire and an older app still decodes a
+    reply from a newer sidecar.
+
+    IT EXISTS FOR THE STOP-TIME FULL PASS (2026-08-18). MOSS transcribes and
+    labels in ONE call, and this frame used to throw the labels away
+    (`text, _ = transcribe_path(path)`), so a full pass driven through it produced
+    a re-transcribed meeting with NOBODY in it — strictly worse than the live
+    chunks it replaced. Remote and overlap repair do not read the key and are
+    unaffected; they ask this frame a question about words, not about people.
+    """
+    payload = {"type": kind, "id": req_id, "text": text}
+    if segments is not None:
+        payload["segments"] = segments
     try:
-        sys.stdout.write(json.dumps({"type": kind, "id": req_id, "text": text}) + "\n")
+        sys.stdout.write(json.dumps(payload) + "\n")
         sys.stdout.flush()
     except BrokenPipeError:
         sys.exit(0)
@@ -513,9 +532,13 @@ def main() -> None:
                     emit_file("file_error", req_id, f"file not found: {path}")
                     continue
                 log(f"file-transcribe id={req_id}: {path}")
-                text, _ = transcribe_path(path)
-                log(f"file-transcribe id={req_id} done ({len(text)} chars)")
-                emit_file("file_result", req_id, text)
+                text, segments = transcribe_path(path)
+                log(f"file-transcribe id={req_id} done ({len(text)} chars, "
+                    f"{len(segments)} segment(s))")
+                # Segments ride along now — see `emit_file`. The FLUSH path has
+                # always carried them; this frame discarded them, which is what
+                # made a MOSS full pass impossible rather than merely refused.
+                emit_file("file_result", req_id, text, segments)
             except Exception:  # noqa: BLE001
                 emit_file("file_error", req_id,
                           f"file transcription failed: {brief_traceback()}")

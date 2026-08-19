@@ -513,9 +513,15 @@ final class ChunkedASRService: @unchecked Sendable {
 
     // MARK: - File transcription (overlap repair)
 
-    /// One file-transcribe result: the text, and the model's confidence in it
-    /// when the runtime reports one (Whisper) — nil otherwise.
-    typealias FileTranscript = (text: String, conf: Double?)
+    /// One file-transcribe result: the text, the model's confidence in it when
+    /// the runtime reports one (Whisper) — nil otherwise — and, for MOSS only,
+    /// the per-speaker segmentation of that same text.
+    ///
+    /// `segments` is nil for every other model, and nil is NOT an empty list: it
+    /// means "this runtime does not report speakers at all", the same
+    /// absent-means-absent convention `conf` follows. Only the stop-time full
+    /// pass reads it; Remote and overlap repair ask this frame about words.
+    typealias FileTranscript = (text: String, conf: Double?, segments: [MossSegment]?)
 
     /// Transcribe one WAV file with the already-loaded chunked model.
     /// Serialized (one at a time), id-correlated, 120s timeout. Used by the
@@ -569,14 +575,15 @@ final class ChunkedASRService: @unchecked Sendable {
         }
     }
 
-    private func resolveFile(id: Int?, text: String, conf: Double?, isError: Bool) {
+    private func resolveFile(id: Int?, text: String, conf: Double?,
+                             segments: [MossSegment]?, isError: Bool) {
         guard let id else { return }
         let cont = withFileLock { fileContinuations.removeValue(forKey: id) }
         guard let cont else { return }   // already timed out
         if isError {
             cont.resume(throwing: ServiceError.startupFailed(text))
         } else {
-            cont.resume(returning: (text: text, conf: conf))
+            cont.resume(returning: (text: text, conf: conf, segments: segments))
         }
     }
 
@@ -663,11 +670,15 @@ final class ChunkedASRService: @unchecked Sendable {
                     self.onChunkTranscript?(message.text, message.conf)
                 case "error": self.onChunkError?(message.text)
                 case "file_result":
+                    // `segments` is present only from moss-asr, and only since
+                    // 2026-08-18. Absent for every other model and for any
+                    // packaged sidecar older than that — nil, never [].
                     self.resolveFile(id: message.id, text: message.text,
-                                     conf: message.conf, isError: false)
+                                     conf: message.conf, segments: message.segments,
+                                     isError: false)
                 case "file_error":
                     self.resolveFile(id: message.id, text: message.text,
-                                     conf: nil, isError: true)
+                                     conf: nil, segments: nil, isError: true)
                 default: break
                 }
             }
