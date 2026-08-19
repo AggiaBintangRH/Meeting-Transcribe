@@ -4763,6 +4763,7 @@ LAYOUT_CHECKS = [
     "layout/no-banner-hard-codes-an-engine-name",
     "layout/the-startup-overlay-always-has-a-way-out",
     "layout/the-moss-full-pass-rebuilds-speakers",
+    "layout/the-overwriting-migration-runs-once",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5065,6 +5066,50 @@ def run_layout(rep: Report, ctx):
                    f"<folder>-service.py as a direct child; "
                    f"{len(LAYOUT_EXEMPT)} exemptions hold none; none at scripts/ root",
                    "; ".join(script_problems))
+
+    cid = "layout/the-overwriting-migration-runs-once"
+    if ctx.wants(cid):
+        # `adoptMeasuredEngineDefaults` is the ONLY migration in this app that
+        # overwrites a value the user already chose. That is acceptable for
+        # exactly one reason — it can never run twice — and the failure if the
+        # marker guard is ever lost is severe AND silent: the two settings become
+        # permanently unchangeable, because every launch would put them back.
+        # The user would see their choice "not save" with nothing in the UI to
+        # explain it.
+        #
+        # A Swift test cannot cover this: it would have to write UserDefaults,
+        # and the suite runs in the owner's REAL preference domain (the standing
+        # rule that also keeps `layout/diarization-settings-locked-per-session` a
+        # source scan rather than a test).
+        src = (SWIFT_SOURCES / "MeetingTranscriber" / "App"
+               / "MeetingTranscriberApp.swift").read_text()
+        body = "\n".join(l for l in src.splitlines()
+                          if not l.strip().startswith("//") and not l.strip().startswith("///"))
+        problems = []
+        if "func adoptMeasuredEngineDefaults" not in body:
+            problems.append("adoptMeasuredEngineDefaults is gone")
+        else:
+            fn = body.split("func adoptMeasuredEngineDefaults", 1)[1]
+            if "guard !d.bool(forKey: marker)" not in fn:
+                problems.append("the run-once guard is gone — the migration would "
+                                "overwrite the engine and model on EVERY launch, "
+                                "making both permanently unchangeable")
+            # The marker must be written BEFORE the values, so a crash midway
+            # leaves it done rather than pending: at-most-once beats at-least-once
+            # for a migration that overwrites a deliberate choice.
+            before = fn.find("d.set(true, forKey: marker)")
+            first_write = fn.find('d.set(value, forKey: key)')
+            if before < 0:
+                problems.append("the marker is never set — the guard can never trip")
+            elif first_write >= 0 and before > first_write:
+                problems.append("the marker is set AFTER the values are written; a "
+                                "crash in between would re-run an overwriting migration")
+            if "adoptMeasuredEngineDefaults(d)" not in body:
+                problems.append("nothing calls it — the migration is dead code")
+        rep.expect(cid, not problems,
+                   "the one overwriting migration is guarded by a marker written "
+                   "before it changes anything, and is actually called",
+                   "; ".join(problems))
 
     cid = "layout/the-moss-full-pass-rebuilds-speakers"
     if ctx.wants(cid):

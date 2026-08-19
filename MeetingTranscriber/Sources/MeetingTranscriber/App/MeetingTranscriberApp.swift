@@ -252,5 +252,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let legacy = d.object(forKey: "overlap.mossformer.enabled") as? Bool {
             d.set(legacy, forKey: "overlap.repair.enabled")
         }
+        adoptMeasuredEngineDefaults(d)
+    }
+
+    /// ONE-TIME, AND IT OVERWRITES A STORED CHOICE — the only migration here that
+    /// does (owner-requested 2026-08-19, so a fresh `git pull && ./build.sh` on a
+    /// second Mac lands on the measured configuration without anyone changing a
+    /// setting by hand).
+    ///
+    /// ⚠ WHY THIS IS NOT MERELY A CHANGED `@AppStorage` DEFAULT. A default applies
+    /// only while the key is ABSENT, and on both of the owner's Macs these keys
+    /// exist — `defaults read` showed `diarization.engine = moss` on one of them.
+    /// Shipping a new default would therefore have changed nothing at all on the
+    /// machines it was meant to fix, which is exactly what was asked for and
+    /// exactly what a default cannot do.
+    ///
+    /// WHAT IT SETS, and the evidence for each. Measured on the 43-minute,
+    /// 7-speaker recording (`meeting-2026-08-19T02-30-22Z`) together with the four
+    /// shorter known-answer files:
+    ///
+    ///   diarization.engine = pyannote   4/5 files correct — the best score of the
+    ///                                   six, tied with DiariZen, and the only
+    ///                                   top-scorer that also marks its own
+    ///                                   overlap. CAM++ was exact on the long
+    ///                                   meeting (7 vs pyannote's 8) and returned
+    ///                                   15 and 9 on two 2-speaker clips, so
+    ///                                   promoting it would have tuned the default
+    ///                                   to one recording.
+    ///   chunked.model      = qwen3      Clean punctuated text at 27x realtime,
+    ///                                   and the highest agreement with an
+    ///                                   unrelated model (95.9% vs MOSS). Already
+    ///                                   the shipped default; set here because
+    ///                                   MOSS-as-ASR forces MOSS-as-diarizer
+    ///                                   (the MOSS<->MOSS biconditional), so
+    ///                                   moving the engine without the model would
+    ///                                   leave the pair to be corrected by the UI
+    ///                                   rule rather than by this decision.
+    ///
+    /// Deliberately NOT set: `chunked.intervalSec` (120 s is measured better for
+    /// MOSS and UNMEASURED for Qwen3 — 30 s stays until someone measures it),
+    /// `diarization.numSpeakers` (a per-meeting fact, not a setup choice), and
+    /// every tuning constant that lives in a sidecar and has no UI.
+    ///
+    /// It runs EXACTLY ONCE, guarded by its own marker key. A later deliberate
+    /// choice is therefore permanent — this can never reach back and take it
+    /// again, which is the one property that makes an overwriting migration
+    /// acceptable at all.
+    private func adoptMeasuredEngineDefaults(_ d: UserDefaults) {
+        let marker = "migration.measuredEngineDefaults.2026-08-19"
+        guard !d.bool(forKey: marker) else { return }
+        d.set(true, forKey: marker)
+
+        var changed: [String] = []
+        for (key, value) in [("diarization.engine", "pyannote"),
+                             ("chunked.model", "qwen3")] {
+            let before = d.string(forKey: key)
+            guard before != value else { continue }
+            d.set(value, forKey: key)
+            changed.append("\(key): \(before ?? "unset") -> \(value)")
+        }
+        // Said out loud, once, because a migration that changes a user's setting
+        // in silence is indistinguishable from the app losing it.
+        FileHandle.standardError.write(Data(
+            (changed.isEmpty
+             ? "[migration] measured engine defaults: already in place, nothing changed\n"
+             : "[migration] measured engine defaults applied — "
+               + changed.joined(separator: ", ")
+               + " (one time only; change either freely from Settings afterwards)\n"
+            ).utf8))
     }
 }
