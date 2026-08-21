@@ -209,19 +209,81 @@ CANNED_MIN_DURATION_SEC = 4.0
 CANNED_MIN_WORDS_PER_SEC = 0.5
 
 
+# Vocabulary for the two sub-rules added 2026-08-20 (see canned_drop_reason).
+# Deliberately NOT the same shape as CANNED_HALLUCINATIONS above: that set holds
+# whole PHRASES, this one holds single WORDS, because the escapes it exists for
+# are not phrases in that set.
+CANNED_WORDS = frozenset((
+    # Every entry is either MEASURED from these models ('you', 'thank',
+    # 'thanks') or already a member of CANNED_HALLUCINATIONS, the project's
+    # agreed canned-caption set. Nothing here is by analogy.
+    "you", "thank", "thanks", "bye", "goodbye",
+    "subscribe", "watching", "listening",
+    "music", "applause", "silence",
+))
+# ⚠ 'okay' / 'ok' ARE DELIBERATELY ABSENT, and this is not an oversight to be
+# tidied. CANNED_HALLUCINATIONS excludes them on purpose so that a genuine
+# short reply survives ("A genuine 'Okay.' survives because it is not in this
+# set" — CLAUDE.md). Adding them here was tried on 2026-08-20 and caught
+# immediately by `chunked/canned-gate-spares-real-short-replies`, which fails
+# with 'Okay.' (30 s) dropped. Neither word has ever been OBSERVED as a
+# hallucination from these models; funasr's own gate lists 'okay.' because it
+# was measured THERE, on a different model.
+
+
 def canned_drop_reason(text: str, duration: float):
     """Why this whole-chunk text is a canned hallucination, or None to keep it.
 
     Model-agnostic: uses only the text and the audio duration, so it works for
     the mlx-audio models that expose no confidence numbers.
+
+    ── TWO SUB-RULES ADDED 2026-08-20, AGAINST MEASURED ESCAPES ──────────────
+    The exact-PHRASE test below is the original and is unchanged. Swept over 62
+    speech-free inputs (silence, white/pink/rumble noise at three levels and
+    three seeds, DC, a 50 Hz hum, a 1 kHz tone, at 30 s and 120 s), GRANITE
+    escaped it FOUR times — all at 120 s, and none of them a phrase in the set:
+
+        'thank.'   'thank'   '.'      (1 word, or none, in 120 seconds)
+
+    'thank' is not 'thanks' and not 'thank you', so the set never matched; '.'
+    strips to the empty string and takes the `not stripped` early return. Qwen3
+    escaped 0 of 62 and Voxtral has never been observed to hallucinate at all —
+    the rule is added to all three copies anyway because these files are kept
+    byte-identical in this section by `chunked/canned-gate-*`, and a gate that
+    provably never fires costs less than three copies that have drifted.
+
+    Both sub-rules keep the ORIGINAL density condition, which is what stops them
+    reaching real speech: they can only fire on a chunk that is long AND nearly
+    wordless. A sparse real sentence contains a word outside CANNED_WORDS.
     """
+    words_raw = text.split()
+    long_enough = duration >= CANNED_MIN_DURATION_SEC
+    sparse = len(words_raw) < duration * CANNED_MIN_WORDS_PER_SEC
+
+    # (a) No word characters at all. Safe in every direction — there is nothing
+    #     here to lose. Measured: granite returned '.' for 120 s of white noise.
+    if long_enough and text.strip() and not any(c.isalnum() for c in text):
+        return f"no words at all ({text.strip()[:20]!r} over {duration:.0f}s)"
+
     stripped = text.strip().strip(".!?,;:").lower()
-    if not stripped or stripped not in CANNED_HALLUCINATIONS:
+    if not stripped:
         return None
-    words = len(stripped.split())
-    if duration >= CANNED_MIN_DURATION_SEC and words < duration * CANNED_MIN_WORDS_PER_SEC:
-        return (f"canned hallucination ({words}w in {duration:.0f}s = "
-                f"{words / duration:.2f}/s)")
+
+    if stripped in CANNED_HALLUCINATIONS:
+        words = len(stripped.split())
+        if long_enough and words < duration * CANNED_MIN_WORDS_PER_SEC:
+            return (f"canned hallucination ({words}w in {duration:.0f}s = "
+                    f"{words / duration:.2f}/s)")
+        return None
+
+    # (b) EVERY word canned, but not as one of the phrases above — 'thank.' on
+    #     its own, or the same canned word repeated. A phrase set cannot express
+    #     either. Same density condition as (a) and as the phrase rule.
+    if long_enough and sparse:
+        normalised = [w.strip(".,!?;:\u2026\"'`-").lower() for w in words_raw]
+        if normalised and all(w in CANNED_WORDS for w in normalised):
+            return (f"canned words ({len(words_raw)}w in {duration:.0f}s = "
+                    f"{len(words_raw) / duration:.2f}/s, every word canned)")
     return None
 
 

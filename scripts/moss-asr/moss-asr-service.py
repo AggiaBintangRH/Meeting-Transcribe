@@ -149,7 +149,35 @@ MAX_NEW_TOKENS = 5120     # the model's OWN generation_config.json default
 # — which would land in the transcript as real speech. It does NOT do this when
 # silence is merely the leading part of a chunk that also contains speech, so
 # skipping the all-silent chunk closes the failure at its trigger.
-SILENCE_RMS = 0.004
+# LOWERED 2026-08-20 from 0.004 (= -48.0 dBFS) after that value was measured
+# deleting real speech. THE MEASUREMENT, on this M4, gate bypassed:
+#
+#   real meeting speech attenuated to  -44 / -50 / -53 / -57 / -62 / -70 dBFS
+#     -> TRANSCRIBED at every level, 880-912 chars, essentially the same text.
+#        MOSS does not care about capture level at all.
+#   room noise at the same levels, and digital silence, at 30 / 60 / 120 s
+#     -> the MODEL ITSELF stops after 1-13 tokens. Nothing to gate.
+#
+# At 0.004 the client Mac's Dante chain, which averages -47 dBFS, sat ONE dB
+# above the cliff: a chunk quieter than average produced ZERO characters, and
+# that loss leaves no trace in the transcript — only a `FLUSH skipped` line.
+# Measured side by side: -47 dBFS gave MOSS 1836 chars and -50 dBFS gave 0,
+# while Qwen3 (which has no audio gate at all) gave 1845 at BOTH.
+#
+# ⚠ WHAT THIS GATE IS ACTUALLY FOR, and the correction that made lowering it
+# safe: the docstring below says all-silent input makes the model answer as a
+# chatbot, and that is TRUE — reproduced here, 30 s of digital silence, 65
+# tokens of "I'm sorry, I can't assist with that request. I'm a Qwen-1 model
+# developed by Qwen-Omni...". But it was `refusal_drop_reason` that caught it,
+# not this threshold. The RMS gate was never the defence against the chatbot
+# answer; it was only ever deleting quiet speech alongside it.
+#
+# 0.0001 = -80 dBFS. That is 10x below the quietest level at which speech was
+# still transcribed perfectly (-70 dBFS), and it still refuses the two cases
+# worth refusing: true digital silence (rms 0.00000 — the owner's dead
+# BlackHole capture measured exactly that over 4027 s) and a dead channel.
+# Headroom against the client's capture is now 33 dB instead of 1.
+SILENCE_RMS = 0.0001
 
 # Hard ceiling on what this process may allocate on the GPU, in GB.
 #
@@ -286,6 +314,55 @@ REFUSAL_PREFIXES = ("i'm sorry, i can't assist with that request",
                     "i am sorry, i can't assist with that request",
                     "i can't assist with that request")
 
+# ⚠ A SECOND, LOOSER FAMILY — added 2026-08-20 because the exact list above is
+# one rewording behind the model, and that was demonstrated rather than feared:
+# the sibling Fun-ASR sidecar carried "i'm not sure if i can do that" and the
+# model said "I'm not sure if I can do IT". The owner separately reported seeing
+# "I'm not gonna do that" in a MOSS transcript on the client Mac — a third
+# wording, which nothing here matched. An assistant paraphrases; a list of whole
+# sentences cannot keep up.
+#
+# The price of a looser match is paid by a SECOND CONDITION, exactly as in the
+# filler gate below: these fire only when the chunk is also implausibly sparse.
+# "I'm not sure if I can make it on Friday" is a thing people say in meetings —
+# and a chunk containing it contains the rest of the meeting's words too, so its
+# density clears the bar. A refusal is the ENTIRE content of a chunk that had no
+# speech in it. That pairing is what discriminates, not the wording alone.
+#
+# ⚠ THIS IS NOT A REPLACEMENT FOR REFUSAL_PREFIXES. Those drop unconditionally
+# and must keep doing so: a chunk that is 65 tokens of "I'm sorry, I can't
+# assist with that request. I'm a Qwen-1 model..." can be dense enough to clear
+# the sparseness bar on a short chunk, and it is a refusal at any density.
+REFUSAL_STEMS = ("i'm not sure if i can",
+                 "i am not sure if i can",
+                 "i'm not gonna",
+                 "i'm not going to",
+                 "i am not going to",
+                 "i can't help with",
+                 "i cannot help with")
+REFUSAL_STEM_MAX_WORDS_PER_SEC = 0.5
+# ⚠ AND AN ABSOLUTE CEILING, because the density bar alone is not a bar at all
+# on a long window. 0.5 w/s over the 120 s window `chunked.intervalSec` ships
+# means "fewer than 60 words" — and a real 120 s stretch of a quiet meeting is
+# routinely under 60 words. Measured 2026-08-21 against this very rule:
+#
+#   "I'm not going to be there on Thursday, but Sam can cover it and we should
+#    still ship the release by Friday afternoon."      22 words / 120 s
+#                                                      -> 0.19 w/s -> DROPPED
+#
+# an entirely ordinary sentence, deleted with no trace outside this log. So the
+# chunk must ALSO be short in absolute terms. Both refusals ever OBSERVED from
+# these models are well under this: "I'm not gonna do that." is 5 words and
+# "I'm not sure if I can do it." is 8, so 10 keeps every measured case while
+# sparing any real utterance that carries a clause after the opening.
+#
+# ⚠ WHAT REMAINS, stated rather than discovered later: a real, SHORT
+# "I'm not gonna do that." that is the only speech in a long window is still
+# dropped. That is irreducible here — the text is identical to the
+# hallucination, so only the audio could tell them apart, and this gate has
+# only the text. It is logged, like every drop.
+REFUSAL_STEM_MAX_WORDS = 10
+
 
 def refusal_drop_reason(text: str):
     """Why this whole-chunk text is an LLM refusal, or None to keep it."""
@@ -300,6 +377,122 @@ def refusal_drop_reason(text: str):
         if lowered.startswith(prefix):
             return f"refusal opening ({prefix!r})"
     return None
+
+
+def refusal_stem_drop_reason(text: str, duration):
+    """Why this chunk is a REWORDED refusal, or None to keep it.
+
+    Separate from refusal_drop_reason because it carries a second condition —
+    see REFUSAL_STEMS. `duration` may be None (unreadable file), which fails
+    OPEN: an unknown duration must not become a reason to delete a transcript.
+    """
+    stripped = (text or "").strip()
+    if not stripped or duration is None or duration <= 0:
+        return None
+    words = len(stripped.split())
+    if words > REFUSAL_STEM_MAX_WORDS:
+        return None
+    density = words / duration
+    if density >= REFUSAL_STEM_MAX_WORDS_PER_SEC:
+        return None
+    lowered = stripped.lower()
+    for stem in REFUSAL_STEMS:
+        if lowered.startswith(stem):
+            return (f"refusal opening over sparse audio ({stem!r}, "
+                    f"{words}w, {density:.2f} w/s)")
+    return None
+
+
+# --- filler-only chunk gate (2026-08-20) ------------------------------------
+#
+# MEASURED, over 62 speech-free inputs (silence, white/pink/rumble noise at three
+# levels and three seeds, DC, a 50 Hz hum, a 1 kHz tone, at 30 s and 120 s). MOSS
+# escaped ONCE, and only through the case a bad audio chain really does produce:
+#
+#     30 s of a 50 Hz mains hum  ->  '嗯。 嗯。'   (2 tokens in 30 s = 0.067/s)
+#
+# The RMS gate cannot stop it — a hum at rms 0.03 is far above SILENCE_RMS — and
+# refusal_drop_reason is about the model answering as a chatbot, which this is
+# not. So it needed its own rule, and this is the narrowest one that catches it.
+#
+# THREE conditions, all required, the same shape as the gates in the Whisper and
+# mlx-audio sidecars (each service owns its own copy — nothing is shared here):
+#   1. the chunk is long,
+#   2. its token density is implausible for speech,
+#   3. EVERY token is a filler with no content.
+#
+# Condition 3 is what makes over-deletion structural: any real utterance contains
+# a token outside this set, so the rule cannot reach it. Over-deletion is the
+# dangerous direction — dropped text leaves no trace in the transcript, and in
+# the DIARIZATION role it drops that window's speaker turns with it.
+#
+# ONE ENTRY, because one is what was OBSERVED. Do not pad this out by analogy
+# with fillers the model has not been seen to produce — that is how 'okay' got
+# into the mlx-audio vocabulary the same day and immediately deleted a genuine
+# short reply. Add an entry when a sweep produces it, and say where.
+FILLER_TOKENS = frozenset(("嗯",))
+FILLER_MIN_DURATION_SEC = 20.0
+FILLER_MAX_TOKENS_PER_SEC = 0.1
+# CJK punctuation as well as ASCII: '嗯。' must normalise to '嗯'.
+FILLER_STRIP = ".,!?;:-'\"`\u2026\u3002\uff0c\uff01\uff1f\u3001"
+
+
+def audio_seconds(path: str):
+    """Length of the WAV at `path`, or None if it cannot be read.
+
+    Read from the FILE, never from the parsed segments — the segments are
+    exactly what filler_drop_reason distrusts.
+
+    ⚠ SOUNDFILE, NOT `wave`, AND THAT IS THE WHOLE POINT OF THIS FUNCTION.
+    The first version used the `wave` module on the strength of a comment
+    claiming every path reaching this sidecar is "16 kHz mono PCM16". Half of
+    that was false, and the half that was false is the half that matters:
+
+        write_temp_wav (below, this file)   PCM16   -> `wave` reads it
+        AudioRecorder.writeTempWAV (Swift)  FLOAT32 -> `wave` RAISES
+                                                       "unknown format: 3"
+
+    Swift builds it with AVAudioFormat(commonFormat: .pcmFormatFloat32) and
+    AVAudioFile, which writes IEEE-float WAV, and CPython's `wave` supports
+    only integer PCM. So `audio_seconds` returned None for every `-2`
+    file-transcribe request, and because both gates below FAIL OPEN on None,
+    they were silently inert on exactly the paths that carry transcript:
+    the office FULL PASS at Stop (AudioRecorder+ChunkedStop), Remote chunks
+    (AudioRecorder+RemoteStream) and overlap-repair re-ASR. Only the live
+    office FLUSH, which writes its own PCM16 file here, was ever gated.
+
+    soundfile reads both, and it is what every other sidecar in this project
+    already uses for exactly this (`sf.info(path).duration` in the three
+    mlx-audio services, `sf.info(...).frames` in nemo and diarizen) — this was
+    the only reader in the tree that did not.
+
+    Returning None on anything unreadable keeps the FAIL-OPEN direction, which
+    is the safe one: an unreadable file must not become a reason to delete a
+    transcript.
+    """
+    try:
+        import soundfile as sf
+        return sf.info(path).duration or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def filler_drop_reason(text: str, duration):
+    """Why this whole chunk is filler noise, or None to keep it."""
+    tokens = (text or "").split()
+    if not tokens:
+        return None
+    if duration is None:
+        return None
+    if duration < FILLER_MIN_DURATION_SEC:
+        return None
+    if len(tokens) >= duration * FILLER_MAX_TOKENS_PER_SEC:
+        return None
+    normalised = [t.strip(FILLER_STRIP) for t in tokens]
+    if not all(t in FILLER_TOKENS for t in normalised):
+        return None
+    return (f"filler only ({len(tokens)} tokens in {duration:.0f}s = "
+            f"{len(tokens) / duration:.2f}/s)")
 
 
 def truncation_warning(generated: int, cap: int = MAX_NEW_TOKENS):
@@ -473,6 +666,17 @@ def main() -> None:
         segments = wire_segments(parse_transcript(raw))
         text = joined_text(segments)
         reason = refusal_drop_reason(text)
+        if reason:
+            log(f"drop {reason}: {text[:120]!r}")
+            return "", []
+        # Same ("", []) contract as the refusal above: in the diarization role a
+        # kept hallucination becomes a SpeakerTurn nobody spoke.
+        seconds = audio_seconds(path)
+        reason = refusal_stem_drop_reason(text, seconds)
+        if reason:
+            log(f"drop {reason}: {text[:120]!r}")
+            return "", []
+        reason = filler_drop_reason(text, seconds)
         if reason:
             log(f"drop {reason}: {text[:120]!r}")
             return "", []

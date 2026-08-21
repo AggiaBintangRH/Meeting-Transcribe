@@ -373,6 +373,22 @@ def near_silence(seconds: float, seed=1):
     return (rng.standard_normal(int(seconds * SR)) * 0.0004).astype("float32")
 
 
+def dead_channel(seconds: float, seed=2):
+    """Below MOSS's SILENCE_RMS (0.0001 = -80 dBFS) — a channel with no signal.
+
+    DELIBERATELY NOT near_silence(). That fixture is -68 dBFS, and on 2026-08-20
+    MOSS was measured transcribing real speech perfectly all the way down to
+    -70 dBFS — so -68 dBFS is a level a real, quiet meeting genuinely occupies,
+    and skipping it is what the lowered threshold exists to stop. The realtime
+    engines still gate their PARTIALS at 0.004 and still use near_silence(),
+    because there the question is "is this lane idle enough to skip the compute",
+    not "is there speech here to lose".
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    return (rng.standard_normal(int(seconds * SR)) * 0.00002).astype("float32")
+
+
 def first_speech_offset(audio, block_sec=1.0, min_rms=0.01):
     """Seconds until the first block of real speech, or None if there is none.
 
@@ -785,6 +801,7 @@ def run_nemotron(rep: Report, ctx):
 REALTIME_CHECKS = [
     "realtime/protocol-matches-nemotron",
     "realtime/engine-divergences",
+    "realtime/funasr-signal-gate",
 ]
 
 # The constants that decide WHAT the two engines put on the wire and WHEN. Every
@@ -1069,6 +1086,150 @@ def run_realtime(rep: Report, ctx):
     #    Without it, a file that had simply stopped configuring attention context
     #    — the exact over-deletion this project treats as the dangerous direction
     #    — would keep this check green.
+    # -- Fun-ASR's SIGNAL-shape gate. Pure numpy, no model load, milliseconds.
+    #
+    #    Pinned because it replaced a defence rather than adding one: the FLUSH
+    #    level gate was lowered from 0.004 to 0.0001 on the strength of THIS
+    #    rule, so losing it silently restores a hallucination that reaches the
+    #    transcript at any level. Both directions — the keep cases are what stop
+    #    a future tightening from deleting quiet or noisy real speech.
+    if ctx.wants("realtime/funasr-signal-gate"):
+        cid = "realtime/funasr-signal-gate"
+        try:
+            import numpy as np
+            import scipy.signal as ss_
+            module, source = load_sidecar_module(
+                SCRIPTS / "funasr" / "funasr-service.py", "funasr_service")
+            fn = getattr(module, "speech_peak_ratio", None)
+            problems = []
+            if fn is None:
+                problems.append("funasr-service.py no longer defines "
+                                "speech_peak_ratio — noise-driven hallucinations "
+                                "return at every level, and FINAL_SILENCE_RMS was "
+                                "lowered on the strength of this rule")
+            elif getattr(module, "FINAL_SILENCE_RMS", None) != 0.0001:
+                problems.append("FINAL_SILENCE_RMS moved; re-measure the pair "
+                                "before changing either half")
+            else:
+                bar = module.MIN_SPEECH_PEAK_RATIO
+                floor_sec = getattr(module, "MIN_SPEECH_JUDGE_SEC", None)
+                pct = getattr(module, "SPEECH_FLOOR_PERCENTILE", None)
+                if floor_sec is None or pct is None:
+                    problems.append("the gate no longer declares "
+                                    "MIN_SPEECH_JUDGE_SEC / SPEECH_FLOOR_PERCENTILE "
+                                    "— both were added 2026-08-21 after the median "
+                                    "form was measured deleting real sentences")
+                    floor_sec, pct = floor_sec or 4.0, pct or 10
+                rng = np.random.default_rng(4)
+                b, a = ss_.butter(1, 0.08)
+
+                def at(x, target):
+                    return (x / np.sqrt((x * x).mean()) * target).astype("float32")
+
+                # NO SPEECH — must all read below the bar, at any level.
+                white = rng.standard_normal(30 * SR)
+                pink = ss_.lfilter(b, a, rng.standard_normal(30 * SR))
+                t = np.arange(30 * SR) / SR
+                for label, sig in (("white", white), ("pink", pink),
+                                   ("hum50", np.sin(2 * np.pi * 50 * t)),
+                                   ("tone1k", np.sin(2 * np.pi * 1000 * t))):
+                    for level in (0.0002, 0.02, 0.08):
+                        got = fn(at(np.asarray(sig, dtype="float64"), level))
+                        if got is None or got >= bar:
+                            problems.append(f"{label} at rms {level} read {got} "
+                                            f"(>= {bar}) — that is the input this "
+                                            "model invents sentences over")
+
+                # SPEECH — must all read above the bar. Synthetic on purpose, so
+                # the check needs no fixture: bursts of noise separated by a
+                # quiet floor is what "bursty" means, and it is the shape the
+                # measurement on real recordings found (4.73 - 313).
+                floor = ss_.lfilter(b, a, rng.standard_normal(30 * SR)) * 0.02
+                bursty = np.array(floor, dtype="float32")
+                for start in range(0, 30, 3):          # 1 s of speech every 3 s
+                    i0 = int(start * SR)
+                    bursty[i0:i0 + SR] += (rng.standard_normal(SR) * 0.2).astype("float32")
+                lone = np.array(ss_.lfilter(b, a, rng.standard_normal(120 * SR)) * 0.0006,
+                                dtype="float32")
+                lone[:int(1.5 * SR)] += (rng.standard_normal(int(1.5 * SR)) * 0.05).astype("float32")
+
+                # ⚠ DENSE CONTINUOUS SPEECH — THE CASE THAT BROKE THE FIRST
+                # VERSION OF THIS RULE, and the reason the two fixtures above
+                # were not enough. Both of them are SPARSE: mostly silence with
+                # speech in it, which is the easiest thing this statistic sees.
+                # A person talking without pauses is the opposite, and there the
+                # median frame IS speech. Measured on real audio 2026-08-21,
+                # confirmed by transcribing every offender with mlx_whisper:
+                # "I think that's a great idea." read 1.86 and would have been
+                # deleted by the shipped 2.0 bar.
+                #
+                # Carrier modulated at a syllable rate but NEVER reaching
+                # silence, which is exactly that property. Verified to stand in
+                # for the real thing: under the OLD max/median statistic these
+                # read 1.75 and 1.88 — i.e. this fixture reproduces the failure
+                # rather than merely resembling it — and the assertion below
+                # that the ratio far exceeds the bar is what fails if anyone
+                # reverts the denominator.
+                dense = []
+                for depth in (0.85, 0.95):
+                    for secs in (4.0, 30.0):
+                        n = int(secs * SR)
+                        tt = np.arange(n) / SR
+                        car = ss_.lfilter(b, a, rng.standard_normal(n))
+                        car = car / np.abs(car).max()
+                        env = 1.0 - depth * 0.5 * (1 + np.sin(2 * np.pi * 4.0 * tt))
+                        dense.append((f"dense speech depth={depth} {secs:.0f}s",
+                                      np.asarray(car * env, dtype="float32")))
+
+                for label, sig in ([("bursty speech", bursty),
+                                    ("ONE utterance in 120 s", lone)] + dense):
+                    for level in (0.0002, 0.02, 0.08):
+                        got = fn(at(sig.astype("float64"), level))
+                        if got is None or got < bar:
+                            problems.append(f"{label} at rms {level} read {got} "
+                                            f"(< {bar}) — real speech would be deleted")
+
+                # Level-independence is the property that stops this gate
+                # reintroducing the -48 dBFS cliff it was written to avoid.
+                # Relative, not exact: rescaling to each level round-trips
+                # through float32, so the last couple of digits legitimately
+                # move. A real level dependency would move it by orders of
+                # magnitude, which 0.1 % catches with room to spare.
+                ratios = [fn(at(bursty.astype("float64"), lv))
+                          for lv in (0.0002, 0.02, 0.08)]
+                if max(ratios) / min(ratios) - 1.0 > 1e-3:
+                    problems.append(f"the ratio moved with LEVEL ({ratios}) — it must "
+                                    "be dimensionless or it is a loudness gate again")
+
+                # ⚠ THE ABSTAIN FLOOR, asserted at the boundary and in BOTH
+                # directions. Below it the two populations genuinely overlap —
+                # swept at 50 and 20 ms frames against p50/p25/p10/p5, the best
+                # separation at 1 s is 1.21x — so a rule that cannot tell must
+                # not answer. The `flush_lane` buffer is ONE UTTERANCE (the app
+                # flushes on the VAD speech->silence edge), which is precisely
+                # this range, so this half is not an edge case: it is the
+                # commonest input the gate sees.
+                quiet = np.zeros(int(SR // 2), dtype="float32")
+                for secs in (0.2, 1.0, 2.0, floor_sec - 0.01):
+                    if fn(np.zeros(int(secs * SR), dtype="float32")) is not None:
+                        problems.append(f"a {secs:.2f}s buffer was judged — below "
+                                        f"{floor_sec}s nothing separates speech from "
+                                        "noise, and answering there deleted real "
+                                        "sentences on 2026-08-20")
+                if fn(np.zeros(int(floor_sec * SR), dtype="float32")) is None:
+                    problems.append(f"a buffer of exactly {floor_sec}s was NOT judged "
+                                    "— the floor must let the partial path's own "
+                                    "4 s tail through or that gate is dead code")
+                del quiet
+            rep.expect(cid, not problems,
+                       "noise/tones read below the bar and speech above it at every "
+                       "level — bursty, lone AND dense-continuous, the last being "
+                       "the case the median form deleted — the ratio is "
+                       "level-independent, and the abstain floor holds on both sides",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the signal gate: {exc!r}")
+
     if ctx.wants("realtime/engine-divergences"):
         cid = "realtime/engine-divergences"
         try:
@@ -1225,6 +1386,44 @@ WHISPER_GATE_CASES = [
 ]
 
 
+# The WHOLE-CHUNK backstop added 2026-08-20, and it is a SEPARATE table from
+# WHISPER_GATE_CASES on purpose: that one judges a segment against its own
+# duration, this one judges the surviving transcript against the CHUNK's. The
+# blind spot it covers is invisible to the other — measured over 62 speech-free
+# inputs, TWO escaped (120 s of digital silence, and 120 s of a 1 kHz tone),
+# both as four one-word 'you' segments of which three were individually short
+# enough and confident enough to pass every per-segment rule.
+#
+# BOTH DIRECTIONS, because this rule deletes an entire chunk and over-deletion
+# leaves no trace in a transcript. The keep cases are the load-bearing half.
+WHISPER_CHUNK_GATE_CASES = [
+    # (surviving text, chunk seconds, keep?)
+    ("you you you", 120.0, False),                     # THE measured escape
+    ("Thank you.", 30.0, False),                       # the classic, a full window
+    ("Okay.", 30.0, True),   # ⚠ KEPT, and load-bearing: 'okay' is deliberately
+                             # NOT in the vocabulary, so a genuine short reply
+                             # survives. Adding it there fails the mlx-audio
+                             # check too — see the note beside the constant.
+    ("you", 120.0, False),
+    ("Thank you. Bye.", 8.0, True),      # a real closing tail — under the floor
+    ("Okay.", 2.0, True),                # genuine short reply
+    ("Okay.", 18.0, True),               # still under CANNED_CHUNK_MIN_DURATION
+    ("Thanks.", 120.0, False),           # 'thanks' IS canned, and 0.008 w/s
+    ("", 120.0, True),                   # nothing kept is not a drop
+    ("Let's try that next week.", 120.0, True),        # sparse REAL speech
+    ("you know what I mean", 120.0, True),             # one non-canned word is enough
+    ("thank you very much everyone", 120.0, True),
+    (" ".join(["you"] * 13), 120.0, True),   # 0.108 w/s — above the density floor
+    (" ".join(["you"] * 12), 120.0, True),   # 0.100 w/s — AT it, and `<` keeps it,
+                                             # matching whisper_drop_reason's own
+                                             # boundary convention. The safe side.
+    (". . .", 120.0, False),   # no word characters at all — measured on granite,
+                               # which returned '.' for 120 s of white noise.
+                               # Dropping it loses no words, by definition.
+    (". . .", 8.0, True),      # ...but the duration floor still comes first
+]
+
+
 def run_chunked(rep: Report, ctx):
     # -- the model-agnostic canned-phrase gate. Granite/Qwen3 expose no
     #    confidence numbers, so this is their only hallucination check — and the
@@ -1351,6 +1550,7 @@ def run_chunked(rep: Report, ctx):
 # call used to pass changes every transcript, and nothing anywhere says so.
 WHISPER_CHECKS = [
     "whisper/gate-keeps-real-speech",
+    "whisper/canned-chunk-backstop",
     "whisper/conf-pooling",
     "whisper/conf-only-from-kept-segments",
     "whisper/protocol-matches-chunked",
@@ -1466,6 +1666,43 @@ def run_whisper(rep: Report, ctx):
         except Exception as exc:  # noqa: BLE001
             rep.fail(cid, f"could not evaluate the gate: {exc}")
 
+    # -- the WHOLE-CHUNK backstop. Pure, no model load, milliseconds.
+    #    Pinned rather than left to notice because its failure is silent in BOTH
+    #    directions: losing it puts 'you you you' back into a two-minute chunk
+    #    with nothing to say it happened, and loosening it deletes real speech
+    #    that likewise leaves no trace outside logs/whisper.log.
+    if ctx.wants("whisper/canned-chunk-backstop"):
+        cid = "whisper/canned-chunk-backstop"
+        try:
+            fn = getattr(module, "canned_chunk_drop_reason", None)
+            if fn is None:
+                rep.fail(cid, "whisper-service.py no longer defines "
+                              "canned_chunk_drop_reason — the per-segment gate "
+                              "cannot see a whole-chunk hallucination, so the "
+                              "measured 'you you you' escape is back")
+            else:
+                wrong = []
+                for text, secs, want_keep in WHISPER_CHUNK_GATE_CASES:
+                    reason = fn(text, secs)
+                    if (reason is None) != want_keep:
+                        verdict = "kept" if reason is None else f"dropped as {reason}"
+                        wrong.append(f"{text[:34]!r} @{secs:g}s was {verdict}")
+                # The constants must stay SEPARATE from the per-segment ones.
+                # Reusing those was measured to delete a real 'Thank you. Bye.'
+                # closing tail; a future tidy-up that folds them back would
+                # reintroduce exactly that, and every case above would still pass.
+                if getattr(module, "CANNED_CHUNK_MAX_WORDS_PER_SEC", None) == \
+                        getattr(module, "WHISPER_MIN_WORDS_PER_SEC", None):
+                    wrong.append("CANNED_CHUNK_MAX_WORDS_PER_SEC has been folded "
+                                 "into WHISPER_MIN_WORDS_PER_SEC — measured to "
+                                 "delete a real closing tail")
+                rep.expect(cid, not wrong,
+                           f"all {len(WHISPER_CHUNK_GATE_CASES)} chunk cases judged "
+                           "correctly, on their own constants",
+                           "; ".join(wrong))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the chunk backstop: {exc}")
+
     # -- transcript confidence, as a pure pooling rule. No model load.
     #    The number goes in front of the user as "asr 0.92", so the way it is
     #    pooled is the part that can be quietly, unfalsifiably wrong: averaging
@@ -1562,7 +1799,13 @@ def run_whisper(rep: Report, ctx):
                  "transcribe_kwargs": module.whisper_transcribe_kwargs(
                      "mlx-community/whisper-large-v3-mlx", "en"),
                  "prompt_words": 0,
-                 "load_audio_16k": lambda path: None,
+                 # A LENGTH is now required, not merely an object: since the
+                 # whole-chunk backstop landed (2026-08-20) transcribe_path
+                 # measures the chunk from the decoded samples. 33 s matches the
+                 # segments below, and the surviving 8-word sentence is far above
+                 # the backstop's density floor, so it changes nothing this check
+                 # is about. `None` here used to be enough and now raises.
+                 "load_audio_16k": lambda path: [0.0] * (33 * 16000),
                  "log": logs.append},
             )
             text, conf = fn("/dev/null")
@@ -2048,6 +2291,8 @@ def run_aligner(rep: Report, ctx):
 MOSS_CHECKS = [
     "moss/silence-gate-skips-allsilent",
     "moss/refusal-gate-is-narrow",
+    "moss/refusal-stems-need-sparse-audio",
+    "moss/duration-reader-accepts-the-apps-wav",
     "moss/truncation-warning-fires-at-cap",
     "moss/parse-to-wire-shape",
     "moss/final-shape-empty-on-skip",
@@ -2110,8 +2355,65 @@ MOSS_ASR_ONLY_EMIT_CASES = [
 # detail. The two gate constants matter as much as the framing ones: a different
 # SILENCE_RMS in one copy means one role calls the model on silence and answers
 # as a chatbot while the other does not.
+# The reworded-refusal family (2026-08-20). BOTH DIRECTIONS: the keep cases are
+# the load-bearing half, because a stem alone is a thing people really say.
+MOSS_REFUSAL_STEM_CASES = [
+    # (text, chunk seconds, keep?)
+    ("I'm not gonna do that.", 120.0, False),        # the owner's reported wording
+    ("I'm not sure if I can do it.", 120.0, False),  # the wording Fun-ASR produced
+    ("I'm not sure if I can do that.", 30.0, False),
+    ("I can't help with that.", 120.0, False),
+    # ...and the other half. A real sentence lives in a chunk that carries the
+    # rest of the meeting's words, so its density clears the bar.
+    ("I'm not sure if I can make it on Friday, but let me check my calendar "
+     "and come back to you before the end of today.", 30.0, True),
+    ("I'm not gonna do that, honestly, because the roadmap is public and "
+     "everyone can already see it.", 30.0, True),
+    ("Let's try that next week.", 120.0, True),      # sparse, but no refusal
+    ("", 120.0, True),
+    ("I'm not gonna do that.", None, True),          # unknown duration fails OPEN
+
+    # ⚠ THE SAME REAL SENTENCES AT 120 s, and they are the cases this table was
+    # MISSING. Both keep-cases above sit at 30 s, where 24 words is 0.8 w/s and
+    # clears the density bar on its own — so nothing here tested a real sentence
+    # in a LONG window, which is exactly what `chunked.intervalSec` ships (120)
+    # and what the office FULL PASS at Stop uses. At 120 s the bar means "fewer
+    # than 60 words", which no ordinary sentence reaches, and the first of these
+    # was measured on 2026-08-21 being DROPPED at 0.19 w/s before
+    # REFUSAL_STEM_MAX_WORDS existed. Delete that ceiling and these three fail.
+    ("I'm not going to be there on Thursday, but Sam can cover it and we "
+     "should still ship the release by Friday afternoon.", 120.0, True),
+    ("I'm not sure if I can make it on Friday, but let me check my calendar "
+     "and come back to you before the end of today.", 120.0, True),
+    ("I'm not gonna do that, honestly, because the roadmap is public and "
+     "everyone can already see it.", 120.0, True),
+
+    # The ceiling itself, at the boundary and on both sides of it. 10 words is
+    # comfortably above both refusals ever OBSERVED (5 and 8 words), so the
+    # measured cases stay caught while a sentence that carries a clause after
+    # the opening survives.
+    ("I'm not gonna do that because it is not ready.", 120.0, False),      # 10w
+    ("I'm not gonna do that because it is not ready yet.", 120.0, True),   # 11w
+]
+
 MOSS_PROTOCOL_CONSTANTS = ["SR", "MIN_CHUNK_SEC", "MAX_BUFFER_SEC", "SILENCE_RMS",
                            "MAX_NEW_TOKENS", "REFUSAL_MARKERS", "REFUSAL_PREFIXES",
+                           # The filler gate (2026-08-20). Listed for the same
+                           # reason as everything else here: it DELETES a chunk,
+                           # and in the diarization role its speaker turns with
+                           # it, so the two copies drifting would mean one role
+                           # keeping a hallucination the other dropped — on the
+                           # same audio, in the same meeting, in MOSS+MOSS mode.
+                           "FILLER_TOKENS", "FILLER_MIN_DURATION_SEC",
+                           "FILLER_MAX_TOKENS_PER_SEC", "FILLER_STRIP",
+                           # Same reasoning for the reworded-refusal family. The
+                           # absolute ceiling joined them on 2026-08-21: without
+                           # it the density bar is no bar at all on a 120 s
+                           # window (0.5 w/s there means "fewer than 60 words"),
+                           # and a copy that lost it would delete real sentences
+                           # the other kept.
+                           "REFUSAL_STEMS", "REFUSAL_STEM_MAX_WORDS_PER_SEC",
+                           "REFUSAL_STEM_MAX_WORDS",
                            # A per-copy MPS cap would let one role survive a long
                            # chunk while the other died on the same audio — and in
                            # MOSS+MOSS mode both are live at once, so the two caps
@@ -2169,19 +2471,130 @@ def run_moss(rep: Report, ctx):
             for label, module, _, _ in copies:
                 if module.silence_skip_reason(digital_silence) is None:
                     problems.append(f"{label}: 30 s of digital silence was NOT skipped")
-                if module.silence_skip_reason(near_silence(30.0)) is None:
-                    problems.append(f"{label}: an idle (near-silent) channel was NOT skipped")
+                if module.silence_skip_reason(dead_channel(30.0)) is None:
+                    problems.append(f"{label}: a dead channel (-94 dBFS) was NOT skipped")
+                # ...and the OTHER direction, which is the one the 2026-08-20
+                # measurement added: a QUIET but live capture must reach the
+                # model. The client Mac records at -47 dBFS and MOSS was
+                # measured transcribing real speech down to -70; near_silence()
+                # is -68 dBFS, so at the old 0.004 threshold this was skipped
+                # and the meeting's text was silently lost.
+                if module.silence_skip_reason(near_silence(30.0)) is not None:
+                    problems.append(f"{label}: a quiet (-68 dBFS) capture was skipped — "
+                                    "that is where real speech was being deleted")
                 reason = module.silence_skip_reason(speech_like)
                 if reason is not None:
                     problems.append(f"{label}: the tone fixture was skipped as {reason!r}")
                 if module.silence_skip_reason(np.zeros(0, dtype="float32")) is None:
                     problems.append(f"{label}: an empty buffer was NOT skipped")
             rep.expect(cid, not problems,
-                       f"silence/near-silence skipped, tone kept, in all "
+                       f"digital silence and a dead channel skipped, a QUIET "
+                       f"capture and a tone kept, in all "
                        f"{len(copies)} copies (threshold {copies[0][1].SILENCE_RMS})",
                        "; ".join(problems))
         except Exception as exc:  # noqa: BLE001
             rep.fail(cid, f"could not evaluate the silence gate: {exc!r}")
+
+    # -- check 1b: the REWORDED-refusal family. Its own check rather than more
+    #    MOSS_REFUSAL_CASES rows, because it takes a second argument and asks a
+    #    different question: refusal_drop_reason drops on wording alone, this one
+    #    needs wording AND sparse audio, and that pairing is the whole design.
+    if ctx.wants("moss/refusal-stems-need-sparse-audio"):
+        cid = "moss/refusal-stems-need-sparse-audio"
+        try:
+            problems = []
+            for label, module, _, _ in copies:
+                fn = getattr(module, "refusal_stem_drop_reason", None)
+                if fn is None:
+                    problems.append(f"{label}: refusal_stem_drop_reason is gone — a "
+                                    "reworded refusal ('I'm not gonna do that') is "
+                                    "back in the transcript")
+                    continue
+                for text, secs, want_keep in MOSS_REFUSAL_STEM_CASES:
+                    reason = fn(text, secs)
+                    if (reason is None) != want_keep:
+                        verdict = "kept" if reason is None else f"dropped as {reason}"
+                        problems.append(f"{label}: {text[:38]!r} @{secs}s was {verdict}")
+            rep.expect(cid, not problems,
+                       f"all {len(MOSS_REFUSAL_STEM_CASES)} cases judged correctly in "
+                       f"all {len(copies)} copies — reworded refusals dropped only "
+                       "over sparse audio, real sentences kept",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the refusal stems: {exc!r}")
+
+    # -- check 1b: the duration reader accepts the WAV the APP really hands it.
+    #
+    # 🔴 THE FAILURE THIS GUARDS SHIPPED FOR A DAY AND WAS COMPLETELY SILENT.
+    # `audio_seconds` first used CPython's `wave` module, on the strength of a
+    # comment asserting that every path reaching this sidecar is "16 kHz mono
+    # PCM16". Half of that was false, and it was the half that matters:
+    #
+    #     write_temp_wav (in the sidecar)     PCM16    -> `wave` reads it
+    #     AudioRecorder.writeTempWAV (Swift)  FLOAT32  -> `wave` RAISES
+    #                                                     "unknown format: 3"
+    #
+    # Swift builds it with AVAudioFormat(commonFormat: .pcmFormatFloat32) and
+    # AVAudioFile, which writes IEEE-float WAV; `wave` supports integer PCM
+    # only. Both gates that take a duration FAIL OPEN on None, by design — so
+    # they were inert on every `-2` file-transcribe request, which is to say on
+    # the office FULL PASS at Stop, on Remote chunks, and on overlap-repair
+    # re-ASR. Nothing failed, nothing was logged, and the two gates added
+    # against a hallucination the owner had actually SEEN could not fire on the
+    # paths that carry the transcript.
+    #
+    # A unit test over the gates themselves cannot catch this — they were
+    # correct; it was the value handed to them that was always None. That is
+    # the project's own lesson ("a component test cannot see a call site"), so
+    # the fixture here is the FORMAT, written the way the app writes it.
+    if ctx.wants("moss/duration-reader-accepts-the-apps-wav"):
+        cid = "moss/duration-reader-accepts-the-apps-wav"
+        try:
+            import numpy as np
+            import soundfile as sf
+            problems = []
+            tmp = pathlib.Path(ctx.tmp)
+            tone_ = (np.sin(2 * np.pi * 220 * np.arange(3 * SR) / SR)
+                     * 0.1).astype("float32")
+            # 'FLOAT' is exactly what AVAudioFile emits for .pcmFormatFloat32;
+            # 'PCM_16' is what this sidecar's own write_temp_wav emits.
+            fixtures = []
+            for subtype in ("FLOAT", "PCM_16"):
+                p = tmp / f"moss-duration-{subtype.lower()}.wav"
+                sf.write(str(p), tone_, SR, subtype=subtype)
+                fixtures.append((subtype, str(p)))
+            missing = str(tmp / "moss-duration-absent.wav")
+
+            for label, module, _, _ in copies:
+                fn = getattr(module, "audio_seconds", None)
+                if fn is None:
+                    problems.append(f"{label}: audio_seconds is gone — the filler and "
+                                    "refusal-stem gates have no duration and fail open "
+                                    "everywhere")
+                    continue
+                for subtype, path in fixtures:
+                    got = fn(path)
+                    if got is None or abs(got - 3.0) > 0.01:
+                        problems.append(
+                            f"{label}: a {subtype} WAV read {got!r}, not 3.0 — "
+                            + ("this is the format AudioRecorder.writeTempWAV "
+                               "produces, so every -2 request (Stop full pass, "
+                               "Remote chunks, overlap repair) loses both gates"
+                               if subtype == "FLOAT" else
+                               "this is what the sidecar writes for its own live "
+                               "FLUSH, so even the office path loses them"))
+                # ...and the fail-OPEN half, which must survive any fix to the
+                # above: an unreadable file must never become a reason to delete
+                # a transcript.
+                if fn(missing) is not None:
+                    problems.append(f"{label}: a missing file did not fail open")
+            rep.expect(cid, not problems,
+                       f"both copies read a FLOAT WAV (what the app writes) and a "
+                       f"PCM_16 one (what the sidecar writes) as 3.0 s, and an "
+                       f"unreadable path still fails open",
+                       "; ".join(problems))
+        except Exception as exc:  # noqa: BLE001
+            rep.fail(cid, f"could not evaluate the duration reader: {exc!r}")
 
     # -- check 2: the refusal backstop, in BOTH directions. Over-deletion is the
     #    dangerous direction (a dropped chunk leaves no trace in the transcript,
@@ -4764,6 +5177,7 @@ LAYOUT_CHECKS = [
     "layout/the-startup-overlay-always-has-a-way-out",
     "layout/the-moss-full-pass-rebuilds-speakers",
     "layout/the-overwriting-migration-runs-once",
+    "layout/shipped-defaults-have-one-source",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5066,6 +5480,92 @@ def run_layout(rep: Report, ctx):
                    f"<folder>-service.py as a direct child; "
                    f"{len(LAYOUT_EXEMPT)} exemptions hold none; none at scripts/ root",
                    "; ".join(script_problems))
+
+    cid = "layout/shipped-defaults-have-one-source"
+    if ctx.wants(cid):
+        # THE FAILURE THIS GUARDS IS SILENT AND USER-VISIBLE IN THE WORST WAY.
+        # Before ShippedDefaults existed, the shipped default for
+        # `overlap.detect.enabled` was written EIGHT times — three
+        # `@AppStorage(...) = false` declarations in Settings and five
+        # `d.object(forKey:) as? Bool ?? false` reads in ModelLoader and
+        # AudioRecorder — and `chunked.model` was written TWELVE times. Change
+        # one copy and miss another and the Settings toggle draws ON while the
+        # loader, reading its own literal, never loads the model. Nothing fails,
+        # nothing is logged, and the app quietly does not do what the UI says.
+        #
+        # This is the project's own recurring defect — two readers of one fact —
+        # and the same reasoning as `layout/no-banner-hard-codes-an-engine-name`:
+        # a hand-written copy of a value beside a derived one only ever drifts.
+        #
+        # Both halves are asserted. The POSITIVE half matters as much: a file
+        # that had simply stopped declaring these constants would satisfy "no
+        # literal defaults" trivially.
+        keys = {
+            "overlap.detect.enabled": "overlapDetect",
+            "overlap.repair.enabled": "overlapRepair",
+            "realtime.model": "realtimeModel",
+            "diarization.engine": "diarizationEngine",
+            "chunked.model": "chunkedModel",
+        }
+        # An APPROVED ALIAS is a name that is *defined as* one of these
+        # constants, not a second copy of its value — `defaultModelID` reads far
+        # better at a RealtimeASRService call site than the fully qualified name
+        # would, and it cannot drift because it is derived. The definition itself
+        # is asserted below, so the alias cannot quietly become a literal.
+        aliases = {"realtime.model": "RealtimeASRService.defaultModelID"}
+        problems = []
+        decl = SWIFT_SOURCES / "MeetingTranscriber" / "App" / "ShippedDefaults.swift"
+        if not decl.exists():
+            problems.append("ShippedDefaults.swift is gone — every default is back "
+                            "to being written once per reader")
+        else:
+            declared = decl.read_text()
+            for key, name in keys.items():
+                if f"static let {name}" not in declared:
+                    problems.append(f"ShippedDefaults no longer declares {name} "
+                                    f"(the default for {key})")
+
+        # ...and no reader may state a default of its own. Comments are stripped
+        # first: this file documents the literals it forbids, so a plain search
+        # matches its own explanation — the same trap `assert_no_torchcodec_use`
+        # and `layout/tail-window-start-is-recorded-not-derived` both record.
+        for path in sorted(SWIFT_SOURCES.rglob("*.swift")):
+            if path.name == "ShippedDefaults.swift":
+                continue
+            for lineno, line in enumerate(path.read_text().splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("//"):
+                    continue
+                for key in keys:
+                    if f'"{key}"' not in line:
+                        continue
+                    # A default is expressed either as an @AppStorage initialiser
+                    # or as a `??` fallback on the same line. Both must name
+                    # ShippedDefaults; a bare literal is the drift.
+                    is_default = ("@AppStorage" in line and "=" in line) or "??" in line
+                    ok = "ShippedDefaults" in line
+                    alias = aliases.get(key)
+                    if alias and (alias in line or alias.split(".")[-1] in line):
+                        ok = True
+                    if is_default and not ok:
+                        problems.append(
+                            f"{path.name}:{lineno} states its own default for "
+                            f"{key} — it must read ShippedDefaults.{keys[key]}")
+        # ...and every approved alias really is DERIVED. Without this the alias
+        # rule above would let `defaultModelID = "nemotron"` walk straight back
+        # in — an allowlist that does not check what it allows is a hole.
+        rt = (SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+              / "RealtimeASRService.swift")
+        if rt.exists() and ("static let defaultModelID = ShippedDefaults.realtimeModel"
+                            not in rt.read_text()):
+            problems.append("RealtimeASRService.defaultModelID is no longer defined "
+                            "as ShippedDefaults.realtimeModel — the alias this check "
+                            "accepts has become a value of its own")
+        rep.expect(cid, not problems,
+                   f"all {len(keys)} shipped defaults are declared once in "
+                   f"ShippedDefaults, the one approved alias is derived from it, "
+                   f"and no reader states its own",
+                   "; ".join(problems))
 
     cid = "layout/the-overwriting-migration-runs-once"
     if ctx.wants(cid):

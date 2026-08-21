@@ -197,6 +197,38 @@ PARTIAL_DUTY = 0.08
 # TEXT, where it is a guess.
 PARTIAL_SILENCE_RMS = 0.004
 
+# The FLUSH gate is now its own, far lower number — a FINAL is transcript, a
+# partial is a caption that the chunked pass replaces, and the two deserve
+# different answers.
+#
+# MEASURED 2026-08-20, this model, gate bypassed: real speech attenuated to
+# -40 / -52 / -60 / -70 dBFS transcribed IDENTICALLY at every level. At 0.004
+# (= -48.0 dBFS) every one of the bottom three was discarded instead — and the
+# client Mac's capture chain averages -47 dBFS, one dB above that cliff, so a
+# chunk quieter than average lost its text with no trace outside this log.
+#
+# ⚠ THIS COULD ONLY BE LOWERED ONCE speech_peak_ratio EXISTED, and the order
+# matters. Lowering it alone was tried first and REVERTED within the hour: this
+# model does not go quiet on noise the way MOSS does, it invents fluent
+# sentences, so the level gate really was its primary hallucination defence.
+# What changed is that the defence moved to a BETTER place — the signal's
+# dynamics rather than its loudness — and that one is strictly stronger:
+#
+#   old level gate    caught noise only BELOW -48 dBFS. The measured
+#                     hallucinations at rms 0.02 and 0.08 sailed past it.
+#   speech_peak_ratio catches them at EVERY level, and lets quiet speech
+#                     through at every level.
+#
+# So this threshold no longer has a hallucination job at all. It is left only to
+# refuse a genuinely dead input — true digital silence (rms 0.00000, which the
+# owner's dead BlackHole capture measured over 4027 s) and a dead channel.
+#
+# 0.0001 = -80 dBFS. Measured with the gate bypassed, real speech attenuated to
+# -40 / -52 / -60 / -70 dBFS transcribed IDENTICALLY at every level, while 0.004
+# (= -48.0 dBFS) discarded the bottom three — and the client Mac's chain
+# averages -47 dBFS, one dB above that cliff.
+FINAL_SILENCE_RMS = 0.0001
+
 # The ISO codes mlx-audio's `_map_language()` will accept. Anything else RAISES
 # (decision 3). This is deliberately the roster of the IMPLEMENTATION, not the
 # roster of the model card: FunAudioLLM advertises 30 languages for this
@@ -226,17 +258,182 @@ REFUSAL_PREFIXES = (
     "i'm a qwen",
 )
 
+# ⚠ THE EXACT LIST ABOVE MISSED BY ONE WORD, and that is the whole reason this
+# second family exists. Measured 2026-08-20 on white noise: the model returned
+#
+#     "I'm not sure if I can do it."      <- 'it', where the list says 'that'
+#
+# at every level tested INCLUDING levels above the old audio gate, so this
+# escape predates the gate change entirely. The owner separately reported
+# seeing "I'm not gonna do that" — a THIRD wording. Prose is not a protocol:
+# an assistant paraphrases, and a list of exact sentences will always be one
+# rewording behind it.
+#
+# So these are STEMS, and the price of the looser match is paid by a second
+# condition: they fire ONLY when the chunk is also implausibly sparse, the same
+# two-condition shape as CANNED_OVER_SILENCE. "I'm not sure if I can make it on
+# Friday" is a thing a person really says in a meeting — and a chunk carrying it
+# carries the rest of the meeting's words too, so its density clears the bar and
+# it survives. A refusal is the ENTIRE content of a chunk that had no speech in
+# it, which is what makes the pair discriminating.
+REFUSAL_STEMS = (
+    "i'm not sure if i can",
+    "i am not sure if i can",
+    "i'm not gonna",
+    "i'm not going to",
+    "i am not going to",
+    "i can't help with",
+    "i cannot help with",
+)
+
 # Canned captions this model produced over SILENCE. Unlike the refusals these
 # are things a person really might say, so they are dropped ONLY when the audio
 # was also implausibly sparse — the two-condition rule the Granite gate uses.
 # `Okay.` after real speech survives; `Okay.` over 3 s of digital silence does
 # not.
-CANNED_OVER_SILENCE = ("okay.", "ok.", "thank you.", "thanks.", "yeah.", "bye.")
+# ⚠ THE LAST ENTRY IS KOREAN, AND IT IS THE ONE THAT MATTERS. Measured
+# 2026-08-20 with the FLUSH level gate bypassed: digital silence and room noise
+# at -52, -60 and -70 dBFS ALL returned exactly '음악을 들으면서.' ("while
+# listening to music"), identically, and NOTHING in this gate caught it — the
+# level gate was the only thing standing in front of it. That is why the gate
+# below could not simply be lowered the way MOSS's was; this had to come first.
+# It is a whole-string match under the same two-condition rule as the rest, so a
+# person really saying it in a dense chunk still survives.
+CANNED_OVER_SILENCE = ("okay.", "ok.", "thank you.", "thanks.", "yeah.", "bye.",
+                       "음악을 들으면서.")
 CANNED_MIN_WORDS_PER_SEC = 0.5
+# ⚠ AN ABSOLUTE CEILING FOR THE STEM FAMILY ONLY, and only that family needs it.
+# The canned set above is a WHOLE-STRING match on short phrases, so its text is
+# short by construction; the stems match a PREFIX, so the rest of the sentence
+# is unbounded. On a long buffer the density bar stops being a bar at all —
+# 0.5 w/s over a 120 s chunk-boundary flush means "fewer than 60 words", and a
+# quiet 120 s stretch of a real meeting is routinely under 60. Measured against
+# this rule on 2026-08-21:
+#
+#   "I'm not going to be there on Thursday, but Sam can cover it and we should
+#    still ship the release by Friday afternoon."   22 words / 120 s -> DROPPED
+#
+# Both refusals ever OBSERVED here are far under the ceiling — "I'm not sure if
+# I can do it." is 8 words — so 10 keeps every measured case and spares a real
+# utterance that carries a clause after the opening. What it cannot spare is a
+# real, SHORT "I'm not gonna do that." alone in a long buffer: the text is
+# identical to the hallucination, and this gate has only the text. Logged.
+REFUSAL_STEM_MAX_WORDS = 10
 
 
 def emit(kind: str, text: str, stream: str = None) -> None:
     _emit_raw(kind, text, stream)
+
+
+# --- "is there speech in this buffer at all?", judged on the SIGNAL ----------
+#
+# WHY THIS EXISTS, and why an RMS threshold could never have done it. Measured
+# 2026-08-20 over 78 speech-free inputs, this model does not go quiet on noise
+# the way MOSS does — it invents fluent sentences, in at least three languages:
+#
+#     "I'm not sure if I can do it."
+#     '음악을 들으면서.'                                    (Korean)
+#     'Các bạn có thể xem video và đăng ký kênh của mình…'  (Vietnamese)
+#
+# and it did so at rms 0.02 and 0.08 — ABOVE the level gate — so those reached
+# the transcript whatever that threshold was set to. Enumerating the phrases is
+# a losing game: the model paraphrases, and it does so in languages nobody here
+# has a list for (the exact-sentence refusal list was already caught missing by
+# a single word, 'do it' where it said 'do that').
+#
+# THE DISCRIMINATOR IS DYNAMICS, NOT LEVEL. Speech is bursty — syllables,
+# pauses, breaths. Noise, hum and tones are flat. So: split the buffer into
+# 50 ms frames, take each frame's RMS, and compare the LOUDEST frame to a QUIET
+# one. The ratio is dimensionless, which is the whole point — it is IDENTICAL
+# at -40 dBFS and at -70 dBFS, so it cannot reintroduce the level cliff that
+# this same day's work removed from MOSS.
+#
+# ── 🔴 THE DENOMINATOR WAS THE MEDIAN FOR ONE DAY, AND IT DELETED REAL SPEECH ─
+#
+# Shipped 2026-08-20 as max/MEDIAN at a bar of 2.0, calibrated on 30 s and
+# 120 s buffers. Audited 2026-08-21 and the calibration did not survive the
+# audit, because THE SIDECAR DOES NOT SEE 30 s BUFFERS. `flush_lane` is driven
+# by the app's VAD speech→silence edge (AudioRecorder.swift), so a FINAL buffer
+# is ONE UTTERANCE — a second or two — and `feed_lane` judges a 4 s tail.
+#
+# max/median asks "how much of this buffer is silence?". On a VAD-trimmed
+# utterance the answer is "almost none", so the median frame IS speech and the
+# ratio collapses to the crest factor. Measured on six real recordings, windows
+# the pre-existing rms gate already admits, and every offender below confirmed
+# to be speech by transcribing it with mlx_whisper, which has no audio gate:
+#
+#     2 s windows   8-13% read BELOW 2.0     3 s   1.6%     4 s   2.0%
+#
+#     t= 26.0s ratio 1.86  "I think that's a great idea."
+#     t= 57.0s ratio 1.76  "Does anyone have an idea what's going on?"
+#     t= 34.0s ratio 1.77  'because humans have labored for thousands of years'
+#
+# Those are not edge cases; the last one is the general shape of the failure —
+# DENSE CONTINUOUS SPEECH, where there is no silence to set the median. It
+# persists to 8 s and only disappears near 10 s, i.e. above any real utterance.
+#
+# ── THE FIX, MEASURED IN BOTH DIRECTIONS ────────────────────────────────────
+#
+# Two changes, and neither alone is enough:
+#
+#   1. the denominator is a LOW PERCENTILE, not the median. An inter-syllable
+#      dip exists even in dense speech; in noise, hum and tones the tenth
+#      percentile is the same flat floor as the peak.
+#   2. the rule ABSTAINS below MIN_SPEECH_JUDGE_SEC. Swept at 50 and 20 ms
+#      frames against p50/p25/p10/p5, NOTHING separates below ~4 s: the best
+#      separation at 1 s is 1.21x and at 2 s is 1.40x, i.e. the two populations
+#      genuinely overlap. A rule that cannot tell must not answer.
+#
+# Measured with 50 ms frames and p10 — speech is every window of six real
+# recordings that the rms gate admits; noise is 18 variants (white/pink/rumble/
+# 50 Hz hum/1 kHz tone/DC at three levels each):
+#
+#     window     noise max     speech min     gap
+#       4 s         2.19           4.71      2.16x
+#       5 s         2.19           5.11      2.33x
+#       6 s         2.05           5.42      2.64x
+#       8 s         2.27           6.71      2.96x
+#      15 s         2.22           8.78      3.96x
+#      30 s         2.46          21.38      8.68x
+#      60 s         2.31          26.21     11.37x
+#
+# Noise never reaches 2.46 and speech never falls below 4.71, at every length
+# this rule is allowed to judge. 3.4 is the geometric middle of that pair, not
+# an edge — 1.38x of margin to noise and 1.38x to speech.
+#
+# ⚠ WHAT ABSTAINING COSTS, stated rather than discovered later: a hallucination
+# over a SHORT buffer is no longer caught here. It is still caught by the text
+# gates in drop_reason (REFUSAL_PREFIXES unconditionally, CANNED_OVER_SILENCE
+# and REFUSAL_STEMS over sparse audio) — which is what caught the measured
+# 3 s case, 'Okay.' over digital silence, before this rule existed at all. Every
+# hallucination this rule was written for was measured on a 30 s or 120 s
+# buffer, so none of them moves out of reach.
+#
+# ⚠ AND A BUFFER THAT IS MOSTLY DIGITAL ZEROS reads enormous rather than flat,
+# because the p10 frame lands on the 1e-12 floor. That direction is FAIL-OPEN
+# (text is kept), and true silence is refused by FINAL_SILENCE_RMS a line later,
+# so it is left alone deliberately. It was equally true of the median form.
+SPEECH_FRAME_SEC = 0.05
+SPEECH_FLOOR_PERCENTILE = 10
+MIN_SPEECH_PEAK_RATIO = 3.4
+MIN_SPEECH_JUDGE_SEC = 4.0
+
+
+def speech_peak_ratio(samples: "np.ndarray"):
+    """Loudest 50 ms frame / a quiet one, or None when the buffer cannot say.
+
+    None FAILS OPEN at both call sites: a buffer this rule cannot judge must
+    never become a reason to delete a caption or a final.
+    """
+    if samples.size < MIN_SPEECH_JUDGE_SEC * SR:
+        return None
+    frame = int(SPEECH_FRAME_SEC * SR)
+    count = samples.size // frame
+    if count < 8:
+        return None
+    block = samples[:count * frame].reshape(count, frame)
+    levels = np.sqrt((block * block).mean(axis=1)) + 1e-12
+    return float(levels.max() / np.percentile(levels, SPEECH_FLOOR_PERCENTILE))
 
 
 def rms(samples: "np.ndarray") -> float:
@@ -269,12 +466,21 @@ def drop_reason(text: str, seconds: float, level: float) -> str:
         if lowered.startswith(prefix):
             return f"model refusal ({stripped[:60]!r})"
 
-    if lowered in CANNED_OVER_SILENCE:
-        words = len(bare.split())
-        density = words / seconds if seconds > 0 else 0.0
-        if density < CANNED_MIN_WORDS_PER_SEC:
-            return (f"canned caption over sparse audio ({stripped!r}, "
-                    f"{density:.2f} w/s, rms {level:.5f})")
+    words = len(bare.split())
+    density = words / seconds if seconds > 0 else 0.0
+    sparse = density < CANNED_MIN_WORDS_PER_SEC
+
+    if lowered in CANNED_OVER_SILENCE and sparse:
+        return (f"canned caption over sparse audio ({stripped!r}, "
+                f"{density:.2f} w/s, rms {level:.5f})")
+
+    # The loose family: a refusal OPENING, but only over audio that carried no
+    # speech. See REFUSAL_STEMS for why the exact list above is not enough.
+    if sparse and words <= REFUSAL_STEM_MAX_WORDS:
+        for stem in REFUSAL_STEMS:
+            if lowered.startswith(stem):
+                return (f"refusal opening over sparse audio ({stripped[:60]!r}, "
+                        f"{words}w, {density:.2f} w/s, rms {level:.5f})")
     return ""
 
 
@@ -554,9 +760,15 @@ def main() -> None:
             # final is the text that reaches the transcript, so the cheapest
             # correct answer over a silent buffer is to say nothing.
             level = rms(lane.buffer)
-            if level < PARTIAL_SILENCE_RMS:
-                log(f"{lane.stream or 'office'} final SKIPPED — silent buffer "
-                    f"(rms {level:.5f} < {PARTIAL_SILENCE_RMS})")
+            shape = speech_peak_ratio(lane.buffer)
+            if shape is not None and shape < MIN_SPEECH_PEAK_RATIO:
+                log(f"{lane.stream or 'office'} final SKIPPED — no speech in the "
+                    f"signal (peak/p{SPEECH_FLOOR_PERCENTILE} {shape:.2f} < "
+                    f"{MIN_SPEECH_PEAK_RATIO}, "
+                    f"rms {level:.5f})")
+            elif level < FINAL_SILENCE_RMS:
+                log(f"{lane.stream or 'office'} final SKIPPED — no signal "
+                    f"(rms {level:.5f} < {FINAL_SILENCE_RMS})")
             else:
                 text = timed_transcribe(lane, "final")
                 if text:
@@ -574,6 +786,12 @@ def main() -> None:
         # quiet stops emitting even while its buffer still holds old speech.
         tail = lane.buffer[-4 * SR:]
         if rms(tail) < PARTIAL_SILENCE_RMS:
+            return
+        # Same signal test as the final path. It can only ADD skips, so lane duty
+        # moves down, never up — and a hallucinated caption is worth skipping
+        # even though the chunked pass would eventually replace it.
+        shape = speech_peak_ratio(tail)
+        if shape is not None and shape < MIN_SPEECH_PEAK_RATIO:
             return
         text = timed_transcribe(lane, "partial")
         if text:

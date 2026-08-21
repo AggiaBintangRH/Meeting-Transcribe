@@ -18,11 +18,17 @@ service. What makes that safe is not discipline but a test: sidecar-tests.py
 services through the SAME payload builders and the SAME real FLUSH branch, and
 fails loudly if their reply shapes ever diverge.
 
-DELIBERATELY ABSENT: `canned_drop_reason` / `CANNED_HALLUCINATIONS`. That gate
-belongs to the mlx-audio services only — the Whisper branch never called it.
-Copying it in would ADD a gate Whisper does not have today, in the over-deletion
-direction, which is the dangerous one (see CLAUDE.md, "Hallucination gates — a
-rule that has now failed in BOTH directions").
+STILL DELIBERATELY ABSENT: the mlx-audio services' `canned_drop_reason` /
+`CANNED_HALLUCINATIONS` PHRASE gate. That one is per-chunk and exact-phrase, it
+belongs to those services, and copying it here would ADD a gate Whisper does not
+need in the over-deletion direction — the dangerous one (see CLAUDE.md,
+"Hallucination gates — a rule that has now failed in BOTH directions").
+
+What Whisper DOES now have, added 2026-08-20 against a measured escape, is
+`canned_chunk_drop_reason` — a different rule, and the difference is the point:
+it is a WHOLE-CHUNK backstop, it is VOCABULARY-based rather than phrase-based,
+and it fires only when EVERY surviving word is canned AND the chunk's own word
+density is implausible. See its own comment for the measurement.
 
 Protocol — byte-identical framing to every other ASR sidecar, so the SAME Swift
 client (`ChunkedASRService`) drives them all:
@@ -237,6 +243,128 @@ def whisper_drop_reason(text: str, no_speech: float, compression: float,
         return (f"hallucination ({words} words in {duration:.0f}s = "
                 f"{words / duration:.2f}/s)")
     return None
+
+
+# --- whole-chunk backstop ---------------------------------------------------
+#
+# THE BLIND SPOT `whisper_drop_reason` CANNOT SEE, and why this is a second rule
+# rather than a tightening of the first.
+#
+# That gate judges ONE SEGMENT at a time. Measured 2026-08-20 over 62 speech-free
+# inputs (silence, white/pink/rumble noise at three levels and three seeds, DC, a
+# 50 Hz hum, a 1 kHz tone, at 30 s and 120 s), TWO escaped — 120 s of digital
+# silence, and 120 s of a 1 kHz tone — and both escaped the same way:
+#
+#     Whisper returned FOUR segments, each the single word 'you'.
+#     One was dropped (no_speech 0.89). The other three had no_speech <= 0.5,
+#     and each was under WHISPER_MIN_DENSITY_DURATION, so the density rule
+#     never applied to them either.
+#     Surviving transcript for a 120-SECOND chunk: 'you you you'.
+#
+# No per-segment threshold can catch that, at any value: each segment really is
+# short, and really is one Whisper was confident about. "Three words is the
+# entire content of two minutes" is a property of the CHUNK. So the rule lives
+# at the chunk, runs strictly AFTER the per-segment gate, and leaves that gate
+# byte-for-byte unchanged — which is what keeps everything already pinned by
+# tests pinned.
+#
+# BOTH ESCAPES WERE AT 120 s AND NEITHER AT 30 s. That is not incidental: the
+# owner's measured-best configuration runs `chunked.intervalSec` at 120, so this
+# is the length the shipped default actually uses.
+#
+# ── WHY IT CANNOT DELETE REAL SPEECH ────────────────────────────────────────
+#
+# Three conditions, ALL required, and the vocabulary one is what makes the
+# over-deletion risk structural rather than a matter of picking a good number:
+#
+#   1. the chunk is at least CANNED_CHUNK_MIN_DURATION long;
+#   2. its word density is below CANNED_CHUNK_MAX_WORDS_PER_SEC;
+#   3. EVERY surviving word is in the canned caption vocabulary below.
+#
+# ── WHY 1 AND 2 ARE THEIR OWN CONSTANTS, NOT THE PER-SEGMENT ONES ───────────
+#
+# Reusing WHISPER_MIN_DENSITY_DURATION (4 s) and WHISPER_MIN_WORDS_PER_SEC (0.5)
+# was tried first and REJECTED on a measured case: a real closing tail chunk of
+# 'Thank you. Bye.' is 3 words in 8 s = 0.375 w/s, all canned, and those values
+# delete it. This rule discards an ENTIRE CHUNK where the per-segment gate
+# discards one segment, so it must demand more evidence, not the same evidence.
+#
+#   both measured escapes          0.025 w/s over 120 s
+#   the real closing this spares   0.375 w/s over   8 s
+#
+# The two are 15x apart, so there is a wide plateau between them and the values
+# below sit inside it rather than on either edge: 0.1 w/s leaves the escapes 4x
+# of margin and the real closing 3.75x. The 20 s floor spares short tail chunks
+# outright — the shipped intervals are 30 / 60 / 120 s, so every FULL window is
+# still judged and only a stub tail is exempt.
+#
+# ⚠ WHAT THIS STILL DELETES, stated rather than discovered later: a lone real
+# 'Thank you.' that is the ONLY speech in a full 30 s window. Accepted, on the
+# measurement above — Whisper hallucinated exactly that text on 4 of 5 silent
+# inputs — and consistent with the mlx-audio services, which have deleted it
+# since 2026-07-14. It is logged, like every drop.
+#
+# Condition 3 is the load-bearing one. Sparse real speech DOES happen — a mostly
+# silent chunk with one real sentence in it is ordinary — and such a sentence
+# always contains a word outside this vocabulary, so the rule cannot reach it.
+# What it can reach is a chunk whose whole content is subtitle boilerplate.
+#
+# VOCABULARY, NOT PHRASES, and that is required rather than tidier: the measured
+# escape is 'you you you', which is not any single phrase in the mlx-audio set.
+# A phrase gate cannot express "the same canned word, three times".
+#
+# Keep this list short and grounded in text actually OBSERVED from this model
+# (this project's own drop logs: 'Thank you.', 'you'). Adding a word that
+# Whisper has not been seen to hallucinate buys nothing and widens the only
+# direction that can lose real text with no trace in the transcript.
+CANNED_CHUNK_MIN_DURATION = 20.0
+CANNED_CHUNK_MAX_WORDS_PER_SEC = 0.1
+
+CANNED_CHUNK_VOCABULARY = frozenset((
+    # Every entry is either MEASURED from these models ('you', 'thank',
+    # 'thanks') or already a member of CANNED_HALLUCINATIONS, the project's
+    # agreed canned-caption set. Nothing here is by analogy.
+    "you", "thank", "thanks", "bye", "goodbye",
+    "subscribe", "watching", "listening",
+    "music", "applause", "silence",
+))
+# ⚠ 'okay' / 'ok' ARE DELIBERATELY ABSENT, and this is not an oversight to be
+# tidied. CANNED_HALLUCINATIONS excludes them on purpose so that a genuine
+# short reply survives ("A genuine 'Okay.' survives because it is not in this
+# set" — CLAUDE.md). Adding them here was tried on 2026-08-20 and caught
+# immediately by `chunked/canned-gate-spares-real-short-replies`, which fails
+# with 'Okay.' (30 s) dropped. Neither word has ever been OBSERVED as a
+# hallucination from these models; funasr's own gate lists 'okay.' because it
+# was measured THERE, on a different model.
+
+
+def canned_chunk_drop_reason(text: str, duration: float):
+    """Why this whole chunk is canned-caption noise, or None to keep it.
+
+    `text` is what SURVIVED whisper_drop_reason; `duration` is the CHUNK's
+    length, not any segment's. Pure and module-level so the rule is testable
+    with no model load — the same reasoning as whisper_chunk_confidence.
+    """
+    words = text.split()
+    if not words:
+        return None
+    if duration < CANNED_CHUNK_MIN_DURATION:
+        return None
+    if len(words) >= duration * CANNED_CHUNK_MAX_WORDS_PER_SEC:
+        return None
+    normalised = [w.strip(".,!?;:\u2026\"'`-").lower() for w in words]
+    # A chunk carrying no word characters AT ALL is not speech, whatever else it
+    # is. Measured on granite, which returned '.' for 120 s of white noise; the
+    # vocabulary test below cannot express that case, because an all-punctuation
+    # token normalises to "" and must NOT be admitted to the vocabulary (letting
+    # it in would mean punctuation alone could satisfy the every-word condition).
+    # Safe in any direction: there are no words here to lose.
+    if not any(c.isalnum() for c in text):
+        return (f"no words at all ({text!r} over {duration:.0f}s)")
+    if not all(w in CANNED_CHUNK_VOCABULARY for w in normalised):
+        return None
+    return (f"canned chunk ({len(words)} words in {duration:.0f}s = "
+            f"{len(words) / duration:.2f}/s, every word canned)")
 
 
 # --- transcript confidence (Whisper only) -----------------------------------
@@ -493,7 +621,13 @@ def main() -> None:
             # chunk's text, so the evidence has to sit next to the chunk, not
             # only in a startup line scrolled far above it.
             log(f"prompt active ({prompt_words} words) — text may be echoed from it")
-        result = mlx_whisper.transcribe(load_audio_16k(path), **transcribe_kwargs)
+        audio = load_audio_16k(path)
+        # The CHUNK's own length, for the whole-chunk backstop below. Taken from
+        # the decoded samples rather than from the segments, because the segments
+        # are exactly what the backstop distrusts: on the measured escape they
+        # covered a few seconds of a 120-second chunk.
+        chunk_seconds = len(audio) / SR
+        result = mlx_whisper.transcribe(audio, **transcribe_kwargs)
         segments = result.get("segments")
         if not segments:
             # No per-segment detail ⇒ no avg_logprob to pool ⇒ no confidence.
@@ -519,7 +653,17 @@ def main() -> None:
             logprob = s.get("avg_logprob")
             scored.append((len(text.split()),
                            None if logprob is None else float(logprob)))
-        return " ".join(kept).strip(), whisper_chunk_confidence(scored)
+        whole = " ".join(kept).strip()
+        # Strictly AFTER the per-segment gate, on what survived it. See
+        # canned_chunk_drop_reason for the measurement that made this necessary.
+        chunk_reason = canned_chunk_drop_reason(whole, chunk_seconds)
+        if chunk_reason:
+            log(f"drop {chunk_reason}: {whole!r}")
+            # None, never 0.0: a chunk with nothing kept has nothing to be
+            # confident about, and inventing a number there is the exact failure
+            # the absent-field convention exists to prevent.
+            return "", None
+        return whole, whisper_chunk_confidence(scored)
 
     # Warmup with 0.5s silence — forces the model to load NOW so the
     # loading overlay reflects reality and the first chunk is fast.
