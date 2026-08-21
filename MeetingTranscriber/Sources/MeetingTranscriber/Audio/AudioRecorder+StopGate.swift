@@ -119,7 +119,7 @@ extension AudioRecorder {
     /// feature + engine checks, without the gates that are still pending at stop.
     var overlapRepairWillRun: Bool {
         let d = UserDefaults.standard
-        guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? false else { return false }
+        guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? ShippedDefaults.overlapRepair else { return false }
         // MOSS and spectral cannot mark overlap in their own turns (MOSS's tile
         // exactly, spectral assigns one label per frame), so under those engines
         // repair's regions come from the DETECTOR and there is a leg only when it

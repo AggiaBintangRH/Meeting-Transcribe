@@ -7,10 +7,10 @@ struct ChunkedModelTab: View {
     /// with it off chunked ASR still runs all meeting. This one stops the model
     /// loading at all. See `ModelLoader.wantsChunked`.
     @AppStorage("chunked.enabled")     private var enabled = true
-    @AppStorage("chunked.model")       private var model = "qwen3"
+    @AppStorage("chunked.model")       private var model = ShippedDefaults.chunkedModel
     /// Written ONLY by `selectChunkedModel` below — this tab does not otherwise
     /// own the diarization engine.
-    @AppStorage("diarization.engine")  private var diarizationEngine = "pyannote"
+    @AppStorage("diarization.engine")  private var diarizationEngine = ShippedDefaults.diarizationEngine
     @AppStorage("chunked.language")    private var language = "auto"
     @AppStorage("chunked.intervalSec") private var intervalSec = 30
     // Pipeline-level, NOT per-model, so it is shown for every model. Default is

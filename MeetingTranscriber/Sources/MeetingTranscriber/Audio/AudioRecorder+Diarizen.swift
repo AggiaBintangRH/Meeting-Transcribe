@@ -58,7 +58,7 @@ extension AudioRecorder {
     /// each engine is not a state any display path can render honestly.
     func configureDiarizen() {
         let d = UserDefaults.standard
-        let engine = d.string(forKey: "diarization.engine") ?? ModelLoader.pyannoteEngineID
+        let engine = d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine
         let diarOn = d.object(forKey: "diarization.enabled") as? Bool ?? true
 
         diarizenDiarizationActive = diarOn && engine == ModelLoader.diarizenEngineID

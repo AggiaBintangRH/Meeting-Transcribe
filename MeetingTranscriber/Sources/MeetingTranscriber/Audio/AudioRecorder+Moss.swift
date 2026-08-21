@@ -176,9 +176,9 @@ extension AudioRecorder {
     /// is fixed for the whole recording like every other setting.
     func configureMoss() {
         let d = UserDefaults.standard
-        let engine = d.string(forKey: "diarization.engine") ?? ModelLoader.pyannoteEngineID
+        let engine = d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine
         let diarOn = d.object(forKey: "diarization.enabled") as? Bool ?? true
-        let chunkedID = d.string(forKey: "chunked.model") ?? "qwen3"
+        let chunkedID = d.string(forKey: "chunked.model") ?? ShippedDefaults.chunkedModel
 
         mossDiarizationActive = diarOn && engine == ModelLoader.mossEngineID
         mossIsChunkedModel = chunkedID == "moss"

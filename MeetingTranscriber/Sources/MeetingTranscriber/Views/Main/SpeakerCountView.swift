@@ -31,7 +31,7 @@ struct SpeakerCountView: View {
     @AppStorage("diarization.numSpeakers")       private var office = 0
     @AppStorage("diarization.remoteNumSpeakers") private var remote = 0
 
-    @AppStorage("diarization.engine")         private var engine = "pyannote"
+    @AppStorage("diarization.engine")         private var engine = ShippedDefaults.diarizationEngine
     @AppStorage("diarization.enabled")        private var diarOn = true
     @AppStorage("diarization.finalPass")      private var finalPass = true
     @AppStorage("diarization.continueOnStop") private var continueOnStop = false

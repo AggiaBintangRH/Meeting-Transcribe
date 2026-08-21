@@ -489,7 +489,7 @@ final class AudioRecorder: ObservableObject {
         // Under every other engine this is inert: `overlapRegions()` consults it
         // only when `diarizenDiarizationActive`, so pyannote keeps tagging overlap
         // whatever the Detect overlap switch says, byte-for-byte as before.
-        diarizenOverlapMarking = d.object(forKey: "overlap.detect.enabled") as? Bool ?? false
+        diarizenOverlapMarking = d.object(forKey: "overlap.detect.enabled") as? Bool ?? ShippedDefaults.overlapDetect
     }
     var chunkFileByWindow: [Double: URL] = [:]
 
@@ -914,7 +914,7 @@ final class AudioRecorder: ObservableObject {
         // uses. Refusal, never a silent model swap — the owner picks chunked
         // models deliberately, on measured WER.
         let mic = MicrophoneSettings.current()
-        let chunkedID = UserDefaults.standard.string(forKey: "chunked.model") ?? "qwen3"
+        let chunkedID = UserDefaults.standard.string(forKey: "chunked.model") ?? ShippedDefaults.chunkedModel
         if let refusal = Self.dualStreamRefusalMessage(remoteChannel: mic.remoteChannel,
                                                        chunkedModelID: chunkedID) {
             dualStreamLog("REFUSED start — \(refusal)")
@@ -940,7 +940,7 @@ final class AudioRecorder: ObservableObject {
         // Checked before `loadAll` for the same reason — the user should not
         // wait out a 4B load plus a 3.6 GB one to be told it will not work.
         let diarEngine = UserDefaults.standard.string(forKey: "diarization.engine")
-            ?? ModelLoader.pyannoteEngineID
+            ?? ShippedDefaults.diarizationEngine
         if let refusal = Self.mossRefusalMessage(chunkedModelID: chunkedID,
                                                  diarizationEngine: diarEngine,
                                                  remoteChannel: mic.remoteChannel) {
@@ -1710,7 +1710,7 @@ final class AudioRecorder: ObservableObject {
             continueOnStop: chunkedTailOnly,
             hasChunkedModel: modelLoader.chunkedASR != nil,
             hasRecording: lastRecordingURL != nil,
-            chunkedModelID: UserDefaults.standard.string(forKey: "chunked.model") ?? "qwen3")
+            chunkedModelID: UserDefaults.standard.string(forKey: "chunked.model") ?? ShippedDefaults.chunkedModel)
         let chunkedPlan = Self.chunkedStopPlan(chunkedMode)
         chunkedSweepsUnconfirmed = chunkedPlan.sweepsUnconfirmedTail
         if chunkedPlan.queuesTailWindow {

@@ -71,11 +71,25 @@ final class RealtimeLifecycleTests: XCTestCase {
     /// This is the first-launch-after-update case, and it is the one that fails
     /// invisibly: `ModelLoader.load` reuses a running sidecar only when the new
     /// `Config` is EQUAL to the live one, so a default that is a hair off would
-    /// terminate and reload a perfectly good 1.70 GB process — every session, for
-    /// no reason, with nothing in the UI saying why. The same governing rule the
-    /// Whisper options change was built around: defaults reproduce today's
-    /// behaviour exactly.
-    func testAnAbsentModelKeyIsExactlyTheNemotronConfig() {
+    /// terminate and reload a perfectly good process — every session, for no
+    /// reason, with nothing in the UI saying why.
+    ///
+    /// ⚠ RE-AIMED 2026-08-21, NOT DELETED. It used to assert the absent-key
+    /// config was NEMOTRON's, on the reasoning that an update must not silently
+    /// change which model transcribes a meeting. That reasoning still holds and
+    /// the change is no longer silent: the owner asked for the shipped defaults
+    /// to be the configuration they actually run, so a second Mac needs no
+    /// setting up, and `ShippedDefaults.realtimeModel` is where that decision is
+    /// written down with its measurement. What this test still guards is the
+    /// same invisible failure — the absent-key Config must be EXACTLY the
+    /// shipped engine's, field for field, or every first launch reloads a
+    /// sidecar for nothing.
+    ///
+    /// It is deliberately written against `ShippedDefaults` rather than the
+    /// literal "parakeet", so moving the default again moves this assertion with
+    /// it — while `testTheDefaultIsTheCatalogsFirstEntry` keeps the catalog
+    /// honest about the same fact.
+    func testAnAbsentModelKeyIsExactlyTheShippedDefaultConfig() {
         let d = UserDefaults.standard
         let savedModel = d.object(forKey: "realtime.model")
         let savedLanguage = d.object(forKey: "realtime.language")
@@ -90,18 +104,32 @@ final class RealtimeLifecycleTests: XCTestCase {
         for key in ["realtime.model", "realtime.language", "realtime.chunkMs"] {
             d.removeObject(forKey: key)
         }
-        // chunkMs is the PINNED 1120, not the old 160 default — and 1120 really
-        // is "what has always run". The 160 never reached the model: the sidecar
-        // dropped it into a temp-WAV fallback that cannot carry an attention
-        // context, and 1120 is byte-identical to running with none at all. So
-        // pinning it changed the stored number and NOT the behaviour.
-        XCTAssertEqual(RealtimeASRService.Config.fromSettings(),
-                       .nemotron(language: "auto",
-                                 chunkMs: RealtimeASRService.pinnedChunkMs,
+        let config = RealtimeASRService.Config.fromSettings()
+        XCTAssertEqual(config,
+                       .parakeet(language: "auto",
                                  partialMs: RealtimeASRService.defaultPartialMs),
-                       "with no stored settings the realtime config must be the one "
-                       + "that has always run — otherwise the first launch after an "
-                       + "update silently reloads the sidecar")
+                       "with no stored settings the realtime config must be exactly "
+                       + "the shipped engine's — otherwise the first launch after an "
+                       + "update reloads the sidecar for nothing")
+        // ...and that it really is the SHIPPED one, stated separately: the line
+        // above would still pass if `ShippedDefaults.realtimeModel` moved and
+        // nobody updated it, which is precisely the drift this pair exists for.
+        XCTAssertEqual(config.modelID, ShippedDefaults.realtimeModel,
+                       "the absent-key config must name the shipped default engine")
+        XCTAssertEqual(ModelCatalog.realtimeModels.first?.id,
+                       ShippedDefaults.realtimeModel,
+                       "the catalog's FIRST entry is what realtimeModel(id:) falls "
+                       + "back to, so it must be the shipped default or an unknown "
+                       + "stored id resolves to an engine the loader never started")
+        // Nemotron's own id must remain its own — it was `defaultModelID` until
+        // 2026-08-21, which produced a Config naming one engine while running
+        // the other's script the moment the default moved.
+        XCTAssertEqual(RealtimeASRService.Config
+                        .nemotron(language: "auto",
+                                  chunkMs: RealtimeASRService.pinnedChunkMs,
+                                  partialMs: RealtimeASRService.defaultPartialMs).modelID,
+                       "nemotron",
+                       "the nemotron Config must name nemotron, whatever the default is")
     }
 
     /// THE ENGINE SWITCH REALLY REPLACES THE PROCESS. `Config` equality is the

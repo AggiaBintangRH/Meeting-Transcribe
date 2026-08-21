@@ -19,8 +19,8 @@ import SwiftUI
 /// work fixed on 2026-07-31: a control the engine cannot act on stays visible and
 /// says so, rather than vanishing or quietly lying.
 struct DiarizationTab: View {
-    @AppStorage("diarization.engine")      private var engine = "pyannote"
-    @AppStorage("chunked.model")           private var chunkedModel = "qwen3"
+    @AppStorage("diarization.engine")      private var engine = ShippedDefaults.diarizationEngine
+    @AppStorage("chunked.model")           private var chunkedModel = ShippedDefaults.chunkedModel
     @AppStorage("diarization.enabled")     private var enabled = true
     @AppStorage("diarization.finalPass")   private var finalPass = true
     @AppStorage("diarization.continueOnStop") private var continueOnStop = false

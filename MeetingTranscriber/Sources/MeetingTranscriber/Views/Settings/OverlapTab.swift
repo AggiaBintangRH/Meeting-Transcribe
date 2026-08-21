@@ -12,15 +12,15 @@ import SwiftUI
 /// `overlap.repair.enabled` (the shared on/off) and `overlap.engine` apply to
 /// both; window size and debug rows are per-engine.
 struct OverlapTab: View {
-    @AppStorage("overlap.repair.enabled")           private var enabled = false
+    @AppStorage("overlap.repair.enabled")           private var enabled = ShippedDefaults.overlapRepair
     @AppStorage("overlap.engine")                   private var engine = "mossformer2"
     @AppStorage("overlap.mossformer.windowSec")     private var mossWindowSec = 10
     @AppStorage("overlap.mossformer.showDebugRows") private var mossShowDebugRows = true
     @AppStorage("overlap.dicow.windowSec")          private var dicowWindowSec = 10
     @AppStorage("overlap.dicow.showDebugRows")      private var dicowShowDebugRows = true
 
-    @AppStorage("diarization.engine")     private var diarEngine = "pyannote"
-    @AppStorage("overlap.detect.enabled") private var detectOn = false
+    @AppStorage("diarization.engine")     private var diarEngine = ShippedDefaults.diarizationEngine
+    @AppStorage("overlap.detect.enabled") private var detectOn = ShippedDefaults.overlapDetect
 
     private var dicowSelected: Bool { engine == ModelCatalog.overlapDicow.id }
 

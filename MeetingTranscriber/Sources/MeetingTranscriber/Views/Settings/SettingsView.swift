@@ -275,14 +275,14 @@ struct SettingsView: View {
     // switched ON, so the question is "could this ever apply?" rather than "is it
     // on right now".
 
-    @AppStorage("chunked.model")          private var chunkedModel = "qwen3"
-    @AppStorage("diarization.engine")     private var diarEngine = "pyannote"
+    @AppStorage("chunked.model")          private var chunkedModel = ShippedDefaults.chunkedModel
+    @AppStorage("diarization.engine")     private var diarEngine = ShippedDefaults.diarizationEngine
     @AppStorage("diarization.enabled")    private var diarEnabled = true
     @AppStorage("overlap.engine")         private var overlapEngineID = ModelCatalog.overlapSeparation.id
     @AppStorage("align.enabled")          private var alignEnabled = true
-    @AppStorage("overlap.repair.enabled") private var repairEnabled = false
+    @AppStorage("overlap.repair.enabled") private var repairEnabled = ShippedDefaults.overlapRepair
     @AppStorage("realtime.enabled")       private var realtimeEnabled = true
-    @AppStorage("overlap.detect.enabled") private var detectEnabled = false
+    @AppStorage("overlap.detect.enabled") private var detectEnabled = ShippedDefaults.overlapDetect
     @AppStorage("vad.enabled")            private var vadEnabled = true
     @AppStorage("chunked.enabled")        private var chunkedEnabled = true
 

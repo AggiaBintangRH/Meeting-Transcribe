@@ -127,7 +127,7 @@ final class MossTranscribeDiarizeModel: ChunkedASRModel {
 enum ChunkedASRModelFactory {
     /// The model chosen in Settings → Models → Chunked.
     static func fromSettings() -> any ChunkedASRModel {
-        switch UserDefaults.standard.string(forKey: "chunked.model") ?? "qwen3" {
+        switch UserDefaults.standard.string(forKey: "chunked.model") ?? ShippedDefaults.chunkedModel {
         case "whisper": return WhisperLargeV3Model()
         case "voxtral": return VoxtralMiniModel()
         case "granite": return GraniteSpeechModel()

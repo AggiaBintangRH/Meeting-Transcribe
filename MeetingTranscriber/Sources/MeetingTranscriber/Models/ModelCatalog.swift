@@ -19,11 +19,13 @@ enum ModelCatalog {
     /// process (see `RealtimeASRService`), so there is no second row to show. A
     /// dual-stream session's overlay is identical to a single-stream one here.
     static let realtimeModels: [ModelInfo] = [
-        ModelInfo(id: "nemotron",
-                  name: "Nemotron 3.5 ASR Streaming 0.6B",
-                  detail: "Cache-aware streaming FastConformer-RNNT",
-                  badges: ["MLX", "40 locales", "112x RT", "0.6B"],
-                  hfRepo: "mlx-community/nemotron-3.5-asr-streaming-0.6b"),
+        // ⚠ FIRST ENTRY = THE DEFAULT. `realtimeModel(id:)` falls back to
+        // `realtimeModels[0]`, and SettingsMatrixTests asserts that entry equals
+        // `RealtimeASRService.defaultModelID` — otherwise an unknown stored id
+        // resolves to a model the loader would not have started. Parakeet moved
+        // to the front on 2026-08-21 when it became the shipped default; the
+        // two must always move together.
+        //
         // Measured on this M4 (2026-08-11), whole-buffer re-transcribe — the
         // shape the sidecar actually uses — best of 2 with the warm-up
         // discarded: 10 s buffer 0.083 s, 30 s 0.235 s, 60 s 0.462 s. That is
@@ -37,6 +39,11 @@ enum ModelCatalog {
                   detail: "FastConformer-TDT · CC BY-4.0 · 25 European languages · no Indonesian/Chinese/Japanese",
                   badges: ["MLX", "25 languages", "128x RT", "0.6B", "2.3 GB"],
                   hfRepo: "mlx-community/parakeet-tdt-0.6b-v3"),
+        ModelInfo(id: "nemotron",
+                  name: "Nemotron 3.5 ASR Streaming 0.6B",
+                  detail: "Cache-aware streaming FastConformer-RNNT",
+                  badges: ["MLX", "40 locales", "112x RT", "0.6B"],
+                  hfRepo: "mlx-community/nemotron-3.5-asr-streaming-0.6b"),
         // Measured on this M4 (2026-08-11), same whole-buffer shape and same
         // best-of-2 method as the Parakeet row: 10 s buffer 0.151 s, 30 s
         // 0.609 s, 60 s 0.621 s — i.e. 49–97x realtime, between Parakeet's

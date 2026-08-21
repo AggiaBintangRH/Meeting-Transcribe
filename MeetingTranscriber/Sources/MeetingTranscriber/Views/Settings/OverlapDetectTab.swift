@@ -25,9 +25,9 @@ import SwiftUI
 ///     overlap, 0.0 % of a clean one, and 0.1–1.8 % on the owner's real
 ///     meetings, so it does not simply fire on room noise.
 struct OverlapDetectTab: View {
-    @AppStorage("overlap.detect.enabled") private var enabled = false
+    @AppStorage("overlap.detect.enabled") private var enabled = ShippedDefaults.overlapDetect
     @AppStorage("overlap.detect.model")   private var detector = ModelCatalog.overlapDetectPyannote.id
-    @AppStorage("diarization.engine")     private var engine = "pyannote"
+    @AppStorage("diarization.engine")     private var engine = ShippedDefaults.diarizationEngine
     @AppStorage("diarization.enabled")    private var diarOn = true
 
     /// pyannote already marks overlap on its own, so switching this on there would

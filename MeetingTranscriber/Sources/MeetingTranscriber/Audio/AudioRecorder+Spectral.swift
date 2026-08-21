@@ -37,7 +37,7 @@ extension AudioRecorder {
     /// any display path can render honestly.
     func configureSpectral() {
         let d = UserDefaults.standard
-        let engine = d.string(forKey: "diarization.engine") ?? ModelLoader.pyannoteEngineID
+        let engine = d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine
         let diarOn = d.object(forKey: "diarization.enabled") as? Bool ?? true
 
         spectralDiarizationActive = diarOn && engine == ModelLoader.spectralEngineID

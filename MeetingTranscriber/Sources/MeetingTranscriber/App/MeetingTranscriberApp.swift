@@ -304,8 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         d.set(true, forKey: marker)
 
         var changed: [String] = []
-        for (key, value) in [("diarization.engine", "pyannote"),
-                             ("chunked.model", "qwen3")] {
+        for (key, value) in [("diarization.engine", ShippedDefaults.diarizationEngine),
+                             ("chunked.model", ShippedDefaults.chunkedModel)] {
             let before = d.string(forKey: key)
             guard before != value else { continue }
             d.set(value, forKey: key)

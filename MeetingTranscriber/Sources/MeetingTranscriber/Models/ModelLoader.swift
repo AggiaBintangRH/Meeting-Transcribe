@@ -788,8 +788,8 @@ final class ModelLoader: ObservableObject {
         // profile store) guards on `diarization != nil`, which is exactly what
         // makes them natural no-ops under the MOSS engine; a leftover service
         // from a previous session would quietly re-enable all of them.
-        let diarEngine = d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID
-        let chunkedID = d.string(forKey: "chunked.model") ?? "qwen3"
+        let diarEngine = d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine
+        let chunkedID = d.string(forKey: "chunked.model") ?? ShippedDefaults.chunkedModel
         let chunkedOn = d.object(forKey: "chunked.enabled") as? Bool ?? true
         // BOTH halves of the split go together: leaving the embedder alive under
         // the MOSS engine would keep a process resident that nothing can ask
@@ -912,10 +912,10 @@ final class ModelLoader: ObservableObject {
         // teardown rule that disagrees with the load rule would either drop a
         // service this session needs or keep one it cannot use.
         let wantedRepair = Self.wantedOverlapEngine(
-            repairEnabled: d.object(forKey: "overlap.repair.enabled") as? Bool ?? false,
+            repairEnabled: d.object(forKey: "overlap.repair.enabled") as? Bool ?? ShippedDefaults.overlapRepair,
             engineID: d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id,
             diarEngine: diarEngine,
-            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false)
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? ShippedDefaults.overlapDetect)
         if wantedRepair != ModelCatalog.overlapSeparation.id {
             if overlapRepair != nil { noteUnload(ModelCatalog.overlapSeparation.name) }
             overlapRepair?.terminate()
@@ -930,9 +930,9 @@ final class ModelLoader: ObservableObject {
         // a session that switched it off is the exact bug this file has now had
         // three times.
         if !Self.wantsOverlapDetect(
-            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false,
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? ShippedDefaults.overlapDetect,
             diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true,
-            diarEngine: d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID) {
+            diarEngine: d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine) {
             overlapDetect?.terminate()
             overlapDetect = nil
         }
@@ -983,9 +983,9 @@ final class ModelLoader: ObservableObject {
     private func buildSteps() -> [Step] {
         let d = UserDefaults.standard
         var steps: [Step] = []
-        let chunkedID = d.string(forKey: "chunked.model") ?? "qwen3"
+        let chunkedID = d.string(forKey: "chunked.model") ?? ShippedDefaults.chunkedModel
         let chunkedOn = d.object(forKey: "chunked.enabled") as? Bool ?? true
-        let diarEngine = d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID
+        let diarEngine = d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine
 
         if d.object(forKey: "vad.enabled") as? Bool ?? true {
             steps.append(Step(model: ModelCatalog.vad, checkInstalled: false)) // energy VAD needs no files yet
@@ -1085,9 +1085,9 @@ final class ModelLoader: ObservableObject {
         // step and a teardown that computed this separately is exactly how the
         // engines came to be started and never stopped.
         if Self.wantsOverlapDetect(
-            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false,
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? ShippedDefaults.overlapDetect,
             diarizationEnabled: d.object(forKey: "diarization.enabled") as? Bool ?? true,
-            diarEngine: d.string(forKey: "diarization.engine") ?? Self.pyannoteEngineID) {
+            diarEngine: d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine) {
             // Resolved from the STORED choice, not hard-coded to the one entry.
             // `overlap.detect.model` had a picker and nothing read it — the
             // Granite/Voxtral language-picker trap, harmless only while the list
@@ -1097,10 +1097,10 @@ final class ModelLoader: ObservableObject {
                               checkInstalled: true))
         }
         if let engineID = Self.wantedOverlapEngine(
-            repairEnabled: d.object(forKey: "overlap.repair.enabled") as? Bool ?? false,
+            repairEnabled: d.object(forKey: "overlap.repair.enabled") as? Bool ?? ShippedDefaults.overlapRepair,
             engineID: d.string(forKey: "overlap.engine") ?? ModelCatalog.overlapSeparation.id,
             diarEngine: diarEngine,
-            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? false) {
+            detectEnabled: d.object(forKey: "overlap.detect.enabled") as? Bool ?? ShippedDefaults.overlapDetect) {
             steps.append(Step(model: ModelCatalog.overlapEngine(id: engineID), checkInstalled: true))
         }
         return steps

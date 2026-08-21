@@ -36,7 +36,7 @@ struct AlignerTab: View {
     // ⚠ Only reaches a user who has never touched this toggle: @AppStorage takes
     // the default when the KEY IS ABSENT, so anyone with a stored `false` keeps it.
     @AppStorage("align.enabled") private var enabled = true
-    @AppStorage("chunked.model") private var chunkedModel = "qwen3"
+    @AppStorage("chunked.model") private var chunkedModel = ShippedDefaults.chunkedModel
     @AppStorage("chunked.enabled") private var chunkedEnabled = true
 
     /// The model in force for the CURRENT chunked choice — one function, shared

@@ -222,7 +222,7 @@ struct SettingBlock<Content: View>: View {
 /// Deliberately NOT a silent model fallback: the owner picks models on measured
 /// WER and must not have that choice changed behind their back.
 struct DualStreamVoxtralWarning: View {
-    @AppStorage("chunked.model") private var chunkedModel = "qwen3"
+    @AppStorage("chunked.model") private var chunkedModel = ShippedDefaults.chunkedModel
     @AppStorage(MicrophoneSettings.remoteChannelKey) private var remoteChannel = -1
 
     var body: some View {

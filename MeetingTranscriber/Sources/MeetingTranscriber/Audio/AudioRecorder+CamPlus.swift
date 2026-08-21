@@ -44,7 +44,7 @@ extension AudioRecorder {
     /// can render honestly.
     func configureCamPlus() {
         let d = UserDefaults.standard
-        let engine = d.string(forKey: "diarization.engine") ?? ModelLoader.pyannoteEngineID
+        let engine = d.string(forKey: "diarization.engine") ?? ShippedDefaults.diarizationEngine
         let diarOn = d.object(forKey: "diarization.enabled") as? Bool ?? true
 
         camPlusDiarizationActive = diarOn && engine == ModelLoader.camPlusEngineID

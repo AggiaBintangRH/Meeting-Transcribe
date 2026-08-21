@@ -79,7 +79,7 @@ extension AudioRecorder {
     /// final pass are done, the feature is on, and the selected engine loaded.
     func maybeStartOverlapRepair() {
         let d = UserDefaults.standard
-        guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? false else { return }
+        guard d.object(forKey: "overlap.repair.enabled") as? Bool ?? ShippedDefaults.overlapRepair else { return }
         // MOSS and spectral cannot locate overlap in their OWN turns — MOSS's
         // segments tile exactly, spectral assigns one label per frame — so under
         // those engines repair's regions come from the standalone DETECTOR, which

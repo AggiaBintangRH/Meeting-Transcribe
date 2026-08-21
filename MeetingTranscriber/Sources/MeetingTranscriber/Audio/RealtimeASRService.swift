@@ -35,10 +35,17 @@ import Foundation
 /// Configured from Settings → Models → Realtime (model, language, chunk size).
 final class RealtimeASRService: @unchecked Sendable {
 
-    /// The engine used when nothing has been chosen — i.e. every install that
-    /// predates the picker. Nemotron, so an update cannot silently change which
-    /// model transcribes a meeting.
-    static let defaultModelID = "nemotron"
+    /// The engine used when nothing has been chosen. Parakeet since 2026-08-21
+    /// (owner-requested, so a fresh Mac needs no setting up) — see
+    /// `ShippedDefaults.realtimeModel` for the measurement.
+    ///
+    /// ⚠ THIS IS NOT NEMOTRON'S ID, and it used to be. `defaultModelID` was
+    /// doing double duty: the nemotron factory below named its own Config with
+    /// it. Harmless while the two strings were equal, and the moment the default
+    /// moved it produced a Config that said "parakeet" while running
+    /// `nemotron-service.py`. Three tests caught it. Keep the two ideas apart.
+    static let defaultModelID = ShippedDefaults.realtimeModel
+    static let nemotronModelID = "nemotron"
     static let parakeetModelID = "parakeet"
     static let funasrModelID = "funasr"
 
@@ -133,7 +140,7 @@ final class RealtimeASRService: @unchecked Sendable {
 
         /// Nemotron 3.5 — the original realtime engine and the default.
         static func nemotron(language: String, chunkMs: Int, partialMs: Int) -> Config {
-            Config(modelID: RealtimeASRService.defaultModelID,
+            Config(modelID: RealtimeASRService.nemotronModelID,
                    language: language,
                    chunkMs: chunkMs,
                    partialMs: partialMs,
@@ -167,15 +174,28 @@ final class RealtimeASRService: @unchecked Sendable {
 
         /// Read the current settings.
         ///
-        /// An ABSENT `realtime.model` must produce exactly the Nemotron config
-        /// this returned before the picker existed — that is what stops the
-        /// first launch after an update from tearing down and reloading a
-        /// perfectly good sidecar (`Config` equality is the reuse test in
-        /// `ModelLoader.load`). Pinned by
-        /// `RealtimeLifecycleTests.testAnAbsentModelKeyIsExactlyTheNemotronConfig`.
+        /// An ABSENT `realtime.model` must produce exactly the SHIPPED default's
+        /// config, field for field — that is what stops the first launch after an
+        /// update from tearing down and reloading a perfectly good sidecar
+        /// (`Config` equality is the reuse test in `ModelLoader.load`). The
+        /// default itself is `ShippedDefaults.realtimeModel`, Parakeet since
+        /// 2026-08-21. Pinned by
+        /// `RealtimeLifecycleTests.testAnAbsentModelKeyIsExactlyTheShippedDefaultConfig`.
         static func fromSettings() -> Config {
             let d = UserDefaults.standard
-            let id = d.string(forKey: "realtime.model") ?? RealtimeASRService.defaultModelID
+            // ⚠ RESOLVED THROUGH THE CATALOG, not used raw, and that is the
+            // `default:` trap this project keeps recording. The chain below ends
+            // in an unconditional `.nemotron(...)`, so BEFORE 2026-08-21 an id
+            // this build does not have — a stored engine from a newer version, a
+            // typo — silently became Nemotron, which was invisible only because
+            // Nemotron was also the default. The moment the default moved, an
+            // unknown id resolved to an engine the loader would never have
+            // started. `ModelCatalog.realtimeModel(id:)` already implements
+            // "unknown → the first entry", and the first entry is asserted equal
+            // to the shipped default, so this reuses that one rule instead of
+            // keeping a second list of known ids here to drift.
+            let stored = d.string(forKey: "realtime.model") ?? RealtimeASRService.defaultModelID
+            let id = ModelCatalog.realtimeModel(id: stored).id
             let raw = d.string(forKey: "realtime.language") ?? "auto"
 
             let partialMs = d.object(forKey: "realtime.partialMs") as? Int
