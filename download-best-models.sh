@@ -374,10 +374,15 @@ fi
 # two processes at once, so a tree missing from either one is a broken role.
 # This ONE list is the only place the set of MOSS services is named here.
 for moss_svc in moss-asr moss-diar; do
-  if "$PY" -c "import sys; sys.path.insert(0, 'scripts/$moss_svc/vendor'); import moss_transcribe_diarize" 2>/dev/null; then
+  # stderr is CAPTURED, not discarded. "missing or broken" names a verdict and
+  # not a cause, and on a second Mac that is the whole distance between a fix
+  # and a round trip — the import can fail for a missing dependency just as
+  # easily as for a missing tree, and the two need opposite responses.
+  if moss_vendor_err=$("$PY" -c "import sys; sys.path.insert(0, 'scripts/$moss_svc/vendor'); import moss_transcribe_diarize" 2>&1); then
     echo "    vendored copy OK (scripts/$moss_svc/vendor/moss_transcribe_diarize)"
   else
     echo "!! scripts/$moss_svc/vendor/moss_transcribe_diarize is missing or broken — MOSS will not run"
+    echo "$moss_vendor_err" | tail -4 | sed 's/^/     /'
     FAILED+=("scripts/$moss_svc/vendor/moss_transcribe_diarize")
   fi
 done
@@ -443,10 +448,15 @@ pipi "pydantic" || FAILED+=("pydantic (spectral engine)")
 
 # The vendored copy is what runs — fail loudly here rather than at the first
 # meeting if it is missing or broken.
-if "$PY" -c "import sys; sys.path.insert(0, 'scripts/spectral/vendor'); from diarize import diarize, DiarizeResult" 2>/dev/null; then
+# stderr is CAPTURED, not discarded — see the MOSS gate above for why. This
+# tree is TRACKED IN GIT (7 files), so "missing" is the unlikely half: the
+# import reaches pydantic, numpy, soundfile and scikit-learn, and any one of
+# them failing to install looks identical in the FAILED summary without this.
+if spectral_vendor_err=$("$PY" -c "import sys; sys.path.insert(0, 'scripts/spectral/vendor'); from diarize import diarize, DiarizeResult" 2>&1); then
   echo "    vendored copy OK (scripts/spectral/vendor/diarize)"
 else
   echo "!! scripts/spectral/vendor/diarize is missing or broken — the spectral engine will not run"
+  echo "$spectral_vendor_err" | tail -4 | sed 's/^/     /'
   FAILED+=("scripts/spectral/vendor/diarize")
 fi
 
