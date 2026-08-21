@@ -5178,6 +5178,7 @@ LAYOUT_CHECKS = [
     "layout/the-moss-full-pass-rebuilds-speakers",
     "layout/the-overwriting-migration-runs-once",
     "layout/shipped-defaults-have-one-source",
+    "layout/mps-fuse-is-sized-to-the-machine",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5565,6 +5566,84 @@ def run_layout(rep: Report, ctx):
                    f"all {len(keys)} shipped defaults are declared once in "
                    f"ShippedDefaults, the one approved alias is derived from it, "
                    f"and no reader states its own",
+                   "; ".join(problems))
+
+    cid = "layout/mps-fuse-is-sized-to-the-machine"
+    if ctx.wants(cid):
+        # THE FUSE WAS TWICE THE MACHINE ON THE MACHINE THAT NEEDED IT.
+        # `MPS_MEMORY_CAP_GB` was the literal 32.0 in five sidecars, and every
+        # comment beside it said "half the machine" -- true of the 64 GB M4 all
+        # of this project's figures were measured on. On the client's 16 GB Mac
+        # it was twice the physical RAM, so no cap anywhere could fire before
+        # macOS started swapping, which is the exact failure the fuse exists to
+        # prevent. Observed there 2026-08-21: ~14.8 GB resident across six
+        # sidecars, 6.67 GB of swap, and a MOSS stop pass that looked hung.
+        #
+        # A number that is right for one machine and silently wrong for another
+        # is the shape this project keeps recording -- a value tuned to one
+        # measurement and then generalised. The rule was always "half the
+        # machine"; only the arithmetic was hand-done.
+        import ast
+        import os as _os
+        fuse_files = ["moss-asr/moss-asr-service.py", "moss-diar/moss-diar-service.py",
+                      "pyannote/pyannote-service.py", "wespeaker/wespeaker-service.py",
+                      "spectral/spectral-service.py"]
+        problems = []
+        physical_gb = (_os.sysconf("SC_PAGE_SIZE") * _os.sysconf("SC_PHYS_PAGES")
+                       / (1024 ** 3))
+        want = round(physical_gb / 2.0, 1)
+        seen = {}
+        for rel in fuse_files:
+            path = SCRIPTS / rel
+            src = path.read_text()
+            body = "\n".join(l for l in src.splitlines()
+                             if not l.strip().startswith("#"))
+            # THE NEGATIVE HALF: the literal must not come back. Comments are
+            # stripped first because this rule's own explanation names it.
+            if "MPS_MEMORY_CAP_GB = 32.0" in body:
+                problems.append(f"{rel} hardcodes the cap again — on a 16 GB Mac "
+                                "that is twice the physical RAM and the fuse can "
+                                "never fire")
+                continue
+            fns = [ast.get_source_segment(src, n) for n in ast.parse(src).body
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_half_the_physical_ram_gb"]
+            if not fns:
+                problems.append(f"{rel} no longer derives the cap from this "
+                                "machine's RAM")
+                continue
+            ns = {"os": _os}
+            exec(compile(fns[0], str(path), "exec"), ns)  # noqa: S102
+            fn = ns["_half_the_physical_ram_gb"]
+            got = fn()
+            seen[rel] = got
+            if abs(got - want) > 0.05:
+                problems.append(f"{rel} sized the fuse at {got} GB, not half of "
+                                f"this machine's {physical_gb:.1f} GB ({want})")
+
+            # ...and the POSITIVE half, which is what makes the rule act on the
+            # machine it was written for. A 16 GB Mac must get 8, not 32.
+            def fake(total_gb):
+                return lambda k: {"SC_PAGE_SIZE": 4096,
+                                  "SC_PHYS_PAGES": total_gb * (1024 ** 3) // 4096}[k]
+            ns["os"] = type("o", (), {"sysconf": staticmethod(fake(16))})
+            if abs(fn() - 8.0) > 0.05:
+                problems.append(f"{rel} would give {fn()} GB on a 16 GB Mac, not 8")
+
+            # A fuse that cannot size itself must not refuse everything.
+            def boom(_):
+                raise OSError("no such sysconf name")
+            ns["os"] = type("o", (), {"sysconf": staticmethod(boom)})
+            if fn() != 32.0:
+                problems.append(f"{rel} does not fall back to the historical "
+                                f"32.0 when the query fails (got {fn()})")
+
+        if len(set(seen.values())) > 1:
+            problems.append(f"the five sidecars disagree about the cap: {seen}")
+        rep.expect(cid, not problems,
+                   f"all {len(fuse_files)} MPS fuses derive half this machine's "
+                   f"{physical_gb:.0f} GB ({want} GB), give 8 GB on a 16 GB Mac, "
+                   f"and fall back to 32.0 if the query fails",
                    "; ".join(problems))
 
     cid = "layout/the-overwriting-migration-runs-once"

@@ -202,8 +202,43 @@ SILENCE_RMS = 0.0001
 # A first attempt set this to 20 GB and was WRONG: 18.35 GB observed against a
 # 20 GB ceiling is 1.65 GB of headroom, i.e. a fuse that could blow mid-meeting
 # on ordinary audio. The number has to sit far above the measured plateau and far
-# below the 51.8 GB runaway, and 32 GB is the only value that does both.
-MPS_MEMORY_CAP_GB = 32.0
+# below the 51.8 GB runaway, and half the machine is the only rule that does
+# both. On THAT Mac that is 32 GB; it is now derived, not typed — see below.
+def _half_the_physical_ram_gb(fallback: float = 32.0) -> float:
+    """Half this machine's physical RAM, in GB — the rule stated above, computed.
+
+    ⚠ WHY THIS IS NO LONGER THE LITERAL 32.0. That number WAS "half the machine",
+    for the 64 GB M4 every figure in this project was measured on. On a 16 GB Mac
+    it is TWICE the physical RAM, so the fuse could never blow before macOS began
+    swapping — which is exactly the failure it exists to prevent.
+
+    OBSERVED on the client's 16 GB Mac, 2026-08-21: six Python sidecars resident
+    at ~14.8 GB, 6.67 GB of swap in use, memory pressure in the red, and a MOSS
+    stop pass that looked HUNG rather than slow. Every cap in the process tree
+    was 32 GB — twice the machine — so nothing anywhere could fire.
+
+    Failing one chunk loudly beats dragging the machine into swap for twenty
+    minutes: the first is a message the user can act on, the second is
+    indistinguishable from a bug.
+
+    `sysconf` rather than `torch.mps.recommended_max_memory()` because this is a
+    module-level constant and torch is not imported yet in every service that
+    carries one. The two agree by construction on the development Mac: 64 GB
+    physical -> 32.0, byte-for-byte the value that shipped for weeks, so this
+    change is a verified no-op there and only acts on smaller machines.
+
+    Falls back to the historical constant if the query fails. A fuse that cannot
+    size itself must not become a fuse that refuses everything.
+    """
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        half = total / (1024 ** 3) / 2.0
+        return round(half, 1) if half > 0 else fallback
+    except (ValueError, OSError, AttributeError):  # noqa: BLE001
+        return fallback
+
+
+MPS_MEMORY_CAP_GB = _half_the_physical_ram_gb()
 
 
 def emit(kind: str, text: str) -> None:

@@ -125,9 +125,44 @@ SIM_THRESHOLD = 0.5          # cosine similarity to accept a profile match
 # for 67 minutes at 44.1 kHz) and embeds every speaker's spliced spans, so its
 # appetite scales with meeting length too.
 #
-# 32 GB = half the machine. Normal passes sit far below it; exceeding it fails
+# HALF THE MACHINE, derived below rather than typed. Normal passes sit far
+# below it; exceeding it fails
 # ONE request loudly instead of swapping the Mac.
-MPS_MEMORY_CAP_GB = 32.0
+def _half_the_physical_ram_gb(fallback: float = 32.0) -> float:
+    """Half this machine's physical RAM, in GB — the rule stated above, computed.
+
+    ⚠ WHY THIS IS NO LONGER THE LITERAL 32.0. That number WAS "half the machine",
+    for the 64 GB M4 every figure in this project was measured on. On a 16 GB Mac
+    it is TWICE the physical RAM, so the fuse could never blow before macOS began
+    swapping — which is exactly the failure it exists to prevent.
+
+    OBSERVED on the client's 16 GB Mac, 2026-08-21: six Python sidecars resident
+    at ~14.8 GB, 6.67 GB of swap in use, memory pressure in the red, and a MOSS
+    stop pass that looked HUNG rather than slow. Every cap in the process tree
+    was 32 GB — twice the machine — so nothing anywhere could fire.
+
+    Failing one chunk loudly beats dragging the machine into swap for twenty
+    minutes: the first is a message the user can act on, the second is
+    indistinguishable from a bug.
+
+    `sysconf` rather than `torch.mps.recommended_max_memory()` because this is a
+    module-level constant and torch is not imported yet in every service that
+    carries one. The two agree by construction on the development Mac: 64 GB
+    physical -> 32.0, byte-for-byte the value that shipped for weeks, so this
+    change is a verified no-op there and only acts on smaller machines.
+
+    Falls back to the historical constant if the query fails. A fuse that cannot
+    size itself must not become a fuse that refuses everything.
+    """
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        half = total / (1024 ** 3) / 2.0
+        return round(half, 1) if half > 0 else fallback
+    except (ValueError, OSError, AttributeError):  # noqa: BLE001
+        return fallback
+
+
+MPS_MEMORY_CAP_GB = _half_the_physical_ram_gb()
 MIN_EMBED_SEC = 1.5          # need this much speech to embed a voice
 MAX_CENTROID_COUNT = 50      # cap running-mean weight so voices can drift
 # Offset added to a REMOTE profile id before it leaves this process. Mirrors the
