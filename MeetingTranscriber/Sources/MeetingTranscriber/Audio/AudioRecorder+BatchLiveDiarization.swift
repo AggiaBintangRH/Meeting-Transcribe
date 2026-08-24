@@ -186,8 +186,13 @@ extension AudioRecorder {
                 //
                 // It CAUTIONS and never corrects, exactly as it does at Stop: the
                 // count came from the engine, and overriding a model's answer is
-                // the substitution this project refuses everywhere else. The banner
-                // names the SPK control, which is the thing that fixes it.
+                // the substitution this project refuses everywhere else.
+                //
+                // ⚠ LOG-ONLY since 2026-08-24 (owner request). It fired on every
+                // live window under the shipped Auto count, so the amber row was
+                // permanently on screen; the verdict now lands in
+                // logs/position-diarization.log instead. The rule and its
+                // measurements are untouched.
                 self.noteImplausibleSpeakerCount(turns, stream: stream)
                 // A window landed, so whatever went wrong before is over. Reset
                 // here rather than at dispatch: dispatching proves nothing about

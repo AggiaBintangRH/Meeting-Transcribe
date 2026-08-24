@@ -534,14 +534,24 @@ extension AudioRecorder {
              + "diarization engine in Settings → Models → Diarization."
     }
 
-    /// Log the caution and surface it under the transcript. Same text both places:
-    /// the log is the record, the banner is what the user can act on.
+    /// Log the caution. **LOG ONLY — it deliberately does NOT raise the banner
+    /// under the transcript** (owner, 2026-08-24: "please remove this").
+    ///
+    /// The rule itself is unchanged and still measured — see
+    /// `implausibleSpeakerCount` above — so the evidence keeps landing in
+    /// `logs/position-diarization.log` as `SPEAKER COUNT CAUTION`. What was
+    /// removed is the amber row, which fired on every live window under the
+    /// shipped Auto count and so was in front of the user constantly.
+    ///
+    /// ⚠ `diarizationCaution` is SHARED with the dead-engine warning in
+    /// `handleBatchLiveFailure` (three consecutive failed windows). That one must
+    /// keep raising it — do not "tidy up" the channel because this writer stopped
+    /// using it.
     func noteImplausibleSpeakerCount(_ turns: [SpeakerTurn],
                                      stream: PyannoteService.Stream) {
         guard let caution = Self.implausibleSpeakerCount(turns) else { return }
         let where_ = stream == .office ? "office" : "remote"
         positionLog("SPEAKER COUNT CAUTION (\(where_)) — \(caution)")
-        diarizationCaution = caution
     }
 
     /// Write 16 kHz mono float samples to a temp WAV (chunk diarization, and the

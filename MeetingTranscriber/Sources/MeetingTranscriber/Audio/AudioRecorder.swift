@@ -179,11 +179,16 @@ final class AudioRecorder: ObservableObject {
 
     @Published var diarizationError: String?
 
-    /// A speaker count that looks like clustering fragmentation — see
-    /// `implausibleSpeakerCount`. Deliberately SEPARATE from `diarizationError`:
-    /// nothing failed, the engine answered, and the answer is merely suspect.
-    /// Rendering it as an error would report a working app as broken, which is
-    /// the mistake the 2026-08-12 no-speech work already had to correct once.
+    /// A banner under the transcript for something the user can act on that is
+    /// NOT a failure. Deliberately SEPARATE from `diarizationError`, which
+    /// settles the stop gate and marks the stop panel failed: rendering a
+    /// caution as an error would report a working app as broken, the mistake the
+    /// 2026-08-12 no-speech work already had to correct once.
+    ///
+    /// ONE writer today: the dead-engine run in `handleBatchLiveFailure` (three
+    /// consecutive failed live windows). The implausible-speaker-count caution
+    /// used to write here too and was removed from the UI on 2026-08-24 at the
+    /// owner's request — it is log-only now, see `noteImplausibleSpeakerCount`.
     /// Cleared with the rest of the visible meeting state.
     @Published var diarizationCaution: String?
 
