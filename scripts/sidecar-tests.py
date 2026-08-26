@@ -5611,7 +5611,23 @@ def run_layout(rep: Report, ctx):
                             "silently shrink the population it verifies")
         physical_gb = (_os.sysconf("SC_PAGE_SIZE") * _os.sysconf("SC_PHYS_PAGES")
                        / (1024 ** 3))
-        want = round(physical_gb / 2.0, 1)
+        # ⚠ THE WHOLE RULE, NOT HALF OF IT — and getting this wrong broke a build
+        # on the client's 16 GB Mac (2026-08-26). `round(physical_gb / 2.0, 1)`
+        # is 32.0 here and 8.0 there, so the assertion demanded 8.0 from a
+        # function that correctly returns 12.0, and preflight refused to build.
+        #
+        # That is the SAME defect this check exists to catch, committed inside the
+        # check itself, for the third time in one day: a rule calibrated on the
+        # 64 GB development Mac, where the floor never binds, and therefore never
+        # exercised in the branch that matters. The lesson is not "be careful" —
+        # it is that a value verified only on this machine is not verified.
+        #
+        # This line alone would now be a TAUTOLOGY (it restates the rule it
+        # checks), and that is fine only because it is not the teeth: the
+        # simulated 16 GB and 64 GB assertions below are computed independently
+        # of whatever machine the suite happens to run on, and they are what can
+        # actually fail.
+        want = round(max(physical_gb / 2.0, 12.0), 1)
         seen = {}
         for rel in fuse_files:
             path = SCRIPTS / rel
@@ -5639,7 +5655,8 @@ def run_layout(rep: Report, ctx):
             seen[rel] = got
             if abs(got - want) > 0.05:
                 problems.append(f"{rel} sized the fuse at {got} GB, not half of "
-                                f"this machine's {physical_gb:.1f} GB ({want})")
+                                f"this machine's {physical_gb:.1f} GB floored at 12 "
+                                f"({want})")
 
             # ...and the POSITIVE half, which is what makes the rule act on the
             # machine it was written for.
