@@ -70,7 +70,47 @@ WINDOW_SEC = 10.0
 #: Hard ceiling on this process's GPU allocation, in GB. Inert while the model
 #: runs on CPU (it is tiny), armed anyway for the day that changes — the same
 #: reasoning spectral-service.py records.
-MPS_MEMORY_CAP_GB = 32.0
+#:
+#: HALF THE MACHINE, derived rather than typed, like every other MPS sidecar
+#: here. It was the literal 32.0 until 2026-08-26, which on a 16 GB Mac is twice
+#: the physical RAM: the cap is armed as
+#: `set_per_process_memory_fraction(min(CAP / ceiling, 1.0))`, and macOS reports
+#: ~13.0 GB as the ceiling there, so `32.0 / 13.0` clamped the `min` to 1.0 —
+#: the whole allocator, uncapped.
+#:
+#: ⚠ THAT WAS HARMLESS HERE AND IS STILL WORTH FIXING. This model runs on CPU,
+#: so there is no MPS allocation to cap either way; the bug was real in
+#: nemo-service.py, which does run on MPS. A fuse kept "armed for the day that
+#: changes" has to be armed CORRECTLY, or the day it matters it will not act —
+#: and that day arrives as a one-line device change nobody connects to this
+#: constant.
+def _half_the_physical_ram_gb(fallback: float = 32.0) -> float:
+    """Half this machine's physical RAM, in GB — the rule stated above, computed.
+
+    Verbatim from the other MPS sidecars. Standalone by the same decision that
+    made every sidecar standalone (owner, 2026-07-28): the copies ARE the point,
+    and `layout/mps-fuse-is-sized-to-the-machine` is what makes copying safe —
+    it discovers every caller of `set_per_process_memory_fraction` rather than
+    naming files, so a new one cannot be forgotten the way this file was.
+
+    `sysconf` rather than `torch.mps.recommended_max_memory()` because this is a
+    module-level constant and torch is not imported yet in every service that
+    carries one. On this 64 GB M4 it returns exactly 32.0 — byte-for-byte the
+    value that shipped — so the change is a verified no-op here and acts only on
+    smaller machines.
+
+    Falls back to the historical constant if the query fails. A fuse that cannot
+    size itself must not become a fuse that refuses everything.
+    """
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        half = total / (1024 ** 3) / 2.0
+        return round(half, 1) if half > 0 else fallback
+    except (ValueError, OSError, AttributeError):  # noqa: BLE001
+        return fallback
+
+
+MPS_MEMORY_CAP_GB = _half_the_physical_ram_gb()
 
 
 def emit(payload: dict) -> None:

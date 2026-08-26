@@ -156,9 +156,55 @@ os.environ["ONE_LOGGER_ENABLED"] = "false"
 # This engine is NOT inert against it, unlike spectral's: it really does run on
 # MPS, and its peak scales with audio length — measured 1.15 GB for 98 s,
 # 7.02 GB for 48 min, 13.33 GB for 67 min. A four-hour recording is the case this
-# fuse exists for. 32 GB = half the machine, the same value every other
-# MPS-capable sidecar uses.
-MPS_MEMORY_CAP_GB = 32.0
+# fuse exists for.
+#
+# HALF THE MACHINE, derived below rather than typed — the same rule the other
+# six MPS sidecars use. The literal 32.0 that used to sit here was correct for
+# this 64 GB M4 and became NO CAP AT ALL on the client's 16 GB Mac; see the
+# docstring, which carries the arithmetic.
+def _half_the_physical_ram_gb(fallback: float = 32.0) -> float:
+    """Half this machine's physical RAM, in GB — the rule stated above, computed.
+
+    ⚠ WHY THIS IS NO LONGER THE LITERAL 32.0. That number WAS "half the machine",
+    for the 64 GB M4 every figure in this project was measured on. On a 16 GB Mac
+    it is TWICE the physical RAM, so the fuse could never blow before macOS began
+    swapping — which is exactly the failure it exists to prevent.
+
+    ⚠ AND ON A 16 GB MAC THIS SIDECAR HAD NO FUSE AT ALL, not merely a loose one.
+    The cap is armed as `set_per_process_memory_fraction(min(CAP / ceiling, 1.0))`,
+    and macOS reports ~81 % of physical RAM as that ceiling — 13.0 GB on a 16 GB
+    machine. `32.0 / 13.0` is 2.46, so the `min` clamped to **1.0**: the whole
+    allocator, uncapped. This engine's own measured peak is 13.33 GB on a
+    67-minute recording, i.e. ABOVE that machine's ceiling — so the one case the
+    fuse was written for is the case it could not act on.
+
+    OBSERVED on the client's 16 GB Mac, 2026-08-21: six Python sidecars resident
+    at ~14.8 GB, 6.67 GB of swap in use, memory pressure in the red, and a stop
+    pass that looked HUNG rather than slow. Every cap in the process tree was
+    32 GB — twice the machine — so nothing anywhere could fire.
+
+    Failing one chunk loudly beats dragging the machine into swap for twenty
+    minutes: the first is a message the user can act on, the second is
+    indistinguishable from a bug.
+
+    `sysconf` rather than `torch.mps.recommended_max_memory()` because this is a
+    module-level constant and torch is not imported yet in every service that
+    carries one. The two agree by construction on the development Mac: 64 GB
+    physical -> 32.0, byte-for-byte the value that shipped for weeks, so this
+    change is a verified no-op there and only acts on smaller machines.
+
+    Falls back to the historical constant if the query fails. A fuse that cannot
+    size itself must not become a fuse that refuses everything.
+    """
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        half = total / (1024 ** 3) / 2.0
+        return round(half, 1) if half > 0 else fallback
+    except (ValueError, OSError, AttributeError):  # noqa: BLE001
+        return fallback
+
+
+MPS_MEMORY_CAP_GB = _half_the_physical_ram_gb()
 
 # ---------------------------------------------------------------- checkpoints
 #

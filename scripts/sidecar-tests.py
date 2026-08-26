@@ -5583,12 +5583,32 @@ def run_layout(rep: Report, ctx):
         # is the shape this project keeps recording -- a value tuned to one
         # measurement and then generalised. The rule was always "half the
         # machine"; only the arithmetic was hand-done.
+        #
+        # ⚠ THE FILE LIST IS DISCOVERED, NEVER TYPED — and this check was WRONG
+        # for five days because it was typed. It named five files; SEVEN carry a
+        # fuse, and the two it did not name (`nemo`, `overlap-detect`) still held
+        # the literal 32.0 while this check reported "all 5 ... derive half this
+        # machine's 64 GB" and went green. A hand-written list beside a derived
+        # truth is the shape this project keeps recording (the engine-name
+        # sentences, the MOSS notice), and it only ever drifts one way: it
+        # UNDER-reports, so the thing it was written to forbid survives inside it.
+        #
+        # The population is therefore defined by BEHAVIOUR: every sidecar that
+        # calls `set_per_process_memory_fraction` is arming a fuse, so every one
+        # of them must size it to this machine. A new MPS sidecar is covered the
+        # day it is written, by nobody remembering anything.
         import ast
         import os as _os
-        fuse_files = ["moss-asr/moss-asr-service.py", "moss-diar/moss-diar-service.py",
-                      "pyannote/pyannote-service.py", "wespeaker/wespeaker-service.py",
-                      "spectral/spectral-service.py"]
+        ARM = "set_per_process_memory_fraction"
+        fuse_files = sorted(
+            str(f.relative_to(SCRIPTS)) for f in SCRIPTS.glob("*/*-service.py")
+            if ARM in f.read_text())
         problems = []
+        if len(fuse_files) < 7:
+            problems.append(f"only {len(fuse_files)} sidecar(s) arm a fuse — this "
+                            "check discovers them by their call to "
+                            f"{ARM}, so a service that stopped arming one would "
+                            "silently shrink the population it verifies")
         physical_gb = (_os.sysconf("SC_PAGE_SIZE") * _os.sysconf("SC_PHYS_PAGES")
                        / (1024 ** 3))
         want = round(physical_gb / 2.0, 1)
@@ -5639,7 +5659,7 @@ def run_layout(rep: Report, ctx):
                                 f"32.0 when the query fails (got {fn()})")
 
         if len(set(seen.values())) > 1:
-            problems.append(f"the five sidecars disagree about the cap: {seen}")
+            problems.append(f"the {len(fuse_files)} sidecars disagree about the cap: {seen}")
         rep.expect(cid, not problems,
                    f"all {len(fuse_files)} MPS fuses derive half this machine's "
                    f"{physical_gb:.0f} GB ({want} GB), give 8 GB on a 16 GB Mac, "
