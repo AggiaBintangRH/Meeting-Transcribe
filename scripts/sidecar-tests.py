@@ -5644,39 +5644,55 @@ def run_layout(rep: Report, ctx):
             # ...and the POSITIVE half, which is what makes the rule act on the
             # machine it was written for.
             #
-            # ⚠ A 16 GB Mac must get 10, NOT 8 — the floor, added 2026-08-26 after
-            # the proportional rule alone BROKE WORKING FUNCTIONALITY there. At
-            # 8.0 the client's Mac raised "MPS backend out of memory (MPS
-            # allocated: 8.23 GiB ... max allowed: 8.00 GiB)" running NeMo, on a
-            # machine where macOS was willing to give 11.8 GB and where NeMo had
-            # run fine two days earlier in 5.7 s. A fuse stricter than the OS is
-            # the over-deletion direction wearing a new costume.
+            # ⚠ A 16 GB Mac must get 12, and the number is chosen so the fuse
+            # REFUSES NOTHING THERE. macOS reports ~11.8 GB as that machine's
+            # ceiling, so a 12 GB cap makes `min(CAP / ceiling, 1.0)` clamp to 1.0
+            # and every engine stays selectable. Owner's decision, 2026-08-26:
+            # "jangan ada yang di blokir harus bisa digunakan semuanya / untuk
+            # hang ngelag sekarang harus terlihat oleh Boss."
             #
-            # The two bounds are asserted TOGETHER because either alone is
-            # satisfiable by a wrong rule: it must clear NeMo's measured 8.23 GB
-            # and stay under MOSS's measured 18.35 GB pool, so the engine that
-            # actually took a Mac down on 2026-08-21 is still refused.
+            # ⚠ THAT IS THE SAME ARITHMETIC AS THE ORIGINAL BUG, ON PURPOSE, AND
+            # THE DIFFERENCE IS THE ONLY THING KEEPING IT HONEST. `32.0` was inert
+            # on a 16 GB Mac by ACCIDENT and said "capped at 32 GB" while capping
+            # nothing. `12.0` is inert there by DECISION, and the sidecar prints
+            # `WARNING MPS fuse NOT ARMED` instead of claiming a cap it does not
+            # have. A silent inert fuse is a lie; a declared one is a trade-off.
+            # The presence of that branch is asserted below, and it is what
+            # separates this state from the defect.
             def fake(total_gb):
                 return lambda k: {"SC_PAGE_SIZE": 4096,
                                   "SC_PHYS_PAGES": total_gb * (1024 ** 3) // 4096}[k]
             ns["os"] = type("o", (), {"sysconf": staticmethod(fake(16))})
             got16 = fn()
-            if abs(got16 - 10.0) > 0.05:
-                problems.append(f"{rel} would give {got16} GB on a 16 GB Mac, not 10")
-            if got16 < 8.23:
-                problems.append(f"{rel} gives {got16} GB on a 16 GB Mac, below NeMo's "
-                                "measured 8.23 GB — the configuration that broke there")
-            if got16 >= 18.35:
-                problems.append(f"{rel} gives {got16} GB on a 16 GB Mac, at or above "
-                                "MOSS's measured 18.35 GB pool — the engine that took "
-                                "a Mac down would no longer be refused")
+            if abs(got16 - 12.0) > 0.05:
+                problems.append(f"{rel} would give {got16} GB on a 16 GB Mac, not 12")
+            # The requirement is not the number, it is what the number DOES.
+            if min(got16 / 11.8, 1.0) < 1.0:
+                problems.append(f"{rel} gives {got16} GB, which still refuses "
+                                "allocations on the client's 16 GB Mac (ceiling "
+                                "11.8 GB) — the owner asked for nothing blocked")
 
-            # A 20 GB machine is where the floor stops acting: half is 10.0 exactly.
+            # A 64 GB machine must be untouched: half is well above the floor, so
+            # the fuse there is still real and still 32.0.
             ns["os"] = type("o", (), {"sysconf": staticmethod(fake(64))})
             if abs(fn() - 32.0) > 0.05:
                 problems.append(f"{rel} would give {fn()} GB on a 64 GB Mac, not 32 — "
-                                "the floor must not change a machine that was already "
-                                "right")
+                                "the floor must not disarm a machine big enough to "
+                                "carry a real fuse")
+            if min(fn() / 51.8, 1.0) >= 1.0:
+                problems.append(f"{rel} no longer refuses anything on a 64 GB Mac — "
+                                "the floor was meant to free SMALL machines, not to "
+                                "disarm the one where MOSS reached ~50 GB")
+
+            # AND THE DECLARATION ITSELF. An inert fuse that still logs "capped at
+            # N GB" is the original defect; this branch is what makes it a stated
+            # trade-off instead.
+            src_all = path.read_text()
+            if "MPS fuse NOT ARMED" not in src_all:
+                problems.append(f"{rel} can go inert without saying so — the "
+                                "`WARNING MPS fuse NOT ARMED` branch is gone, so a "
+                                "machine with no fuse logs the same line as one "
+                                "running under a real cap")
 
             # A fuse that cannot size itself must not refuse everything.
             def boom(_):
@@ -5690,8 +5706,8 @@ def run_layout(rep: Report, ctx):
             problems.append(f"the {len(fuse_files)} sidecars disagree about the cap: {seen}")
         rep.expect(cid, not problems,
                    f"all {len(fuse_files)} MPS fuses derive half this machine's "
-                   f"{physical_gb:.0f} GB ({want} GB) floored at 10, give 10 GB on a 16 GB Mac "
-                   f"(NeMo passes, MOSS still refused) and 32 on a 64 GB one, "
+                   f"{physical_gb:.0f} GB ({want} GB) floored at 12, refuse nothing on a "
+                   f"16 GB Mac (and say so), still cap a 64 GB one at 32, "
                    f"and fall back to 32.0 if the query fails",
                    "; ".join(problems))
 

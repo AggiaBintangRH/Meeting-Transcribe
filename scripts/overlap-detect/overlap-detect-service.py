@@ -85,7 +85,7 @@ WINDOW_SEC = 10.0
 #: and that day arrives as a one-line device change nobody connects to this
 #: constant.
 def _mps_cap_gb(fallback: float = 32.0) -> float:
-    """The MPS fuse for THIS machine, in GB: half the physical RAM, floored at 10.
+    """The MPS fuse for THIS machine, in GB: half the physical RAM, floored at 12.
 
     ⚠ WHY NOT THE LITERAL 32.0. That number WAS "half the machine", for the 64 GB
     M4 every figure in this project was measured on. On a 16 GB Mac it is TWICE
@@ -134,7 +134,7 @@ def _mps_cap_gb(fallback: float = 32.0) -> float:
     try:
         total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
         half = total / (1024 ** 3) / 2.0
-        return round(max(half, 10.0), 1) if half > 0 else fallback
+        return round(max(half, 12.0), 1) if half > 0 else fallback
     except (ValueError, OSError, AttributeError):  # noqa: BLE001
         return fallback
 
@@ -215,8 +215,24 @@ def main() -> None:
         try:
             ceiling = torch.mps.recommended_max_memory() / (1024 ** 3)
             if ceiling > 0:
-                torch.mps.set_per_process_memory_fraction(
-                    min(MPS_MEMORY_CAP_GB / ceiling, 1.0))
+                fraction = min(MPS_MEMORY_CAP_GB / ceiling, 1.0)
+                torch.mps.set_per_process_memory_fraction(fraction)
+                if fraction >= 1.0:
+                    # THE FUSE IS INERT HERE, AND IT SAYS SO. Owner's decision,
+                    # 2026-08-26: "jangan ada yang di blokir harus bisa digunakan
+                    # semuanya / untuk hang ngelag sekarang harus terlihat oleh
+                    # Boss." Every engine must stay usable on every machine, and
+                    # slowness is the evidence for a hardware budget rather than
+                    # something hidden behind a refusal.
+                    #
+                    # This line is that evidence, and it is greppable on purpose:
+                    # a machine too small to carry a fuse must not look the same
+                    # in the log as one running comfortably under one.
+                    log(f"WARNING MPS fuse NOT ARMED — this machine offers only "
+                        f"{ceiling:.1f} GB, under the {MPS_MEMORY_CAP_GB:.0f} GB "
+                        "cap, so nothing is refused and one oversized allocation "
+                        "can drive the Mac into swap. Deliberate: every engine "
+                        "stays usable and the slowdown is left visible.")
         except Exception:  # noqa: BLE001
             log("WARNING could not cap MPS memory")
 
