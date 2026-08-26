@@ -390,6 +390,51 @@ if [[ ! -d "$PBS_DIR" || ! -d "$PBS_DIARIZEN_DIR" ]]; then
   fi
 fi
 
+# --- the LAYOUT invariants. `sidecar-tests.py --only layout` is 19 pure checks
+#     -- AST and a directory listing, no model load, no audio fixture, no profile
+#     mutation -- and it costs 0.1 s. Until 2026-08-26 build.sh did not run the
+#     suite at all, so every one of those invariants was HAND-RUN ONLY.
+#
+#     What that cost, measured: the 2026-08-21 MPS-fuse fix reached five of the
+#     seven sidecars that arm a fuse, and the check written to forbid the old
+#     literal named its five files BY HAND -- so it reported "all 5 MPS fuses
+#     derive..." and went green while `nemo` still carried `= 32.0`. On a 16 GB
+#     Mac that clamps the arming fraction to 1.0, i.e. NO CAP AT ALL, in the one
+#     engine whose measured peak (13.33 GB at 67 min) is above that machine's
+#     ceiling. A bundle carrying it passed preflight, all four interpreters, every
+#     vendor tree, audio-decode, relocatability, codesign and the licence gate.
+#
+#     ⚠ ONLY the `layout` group, deliberately. The full suite is 458 s, loads
+#     models, needs audio fixtures and touches the speaker-profile store (it
+#     carries `safety/real-profiles-untouched` for exactly that reason). A build
+#     that dies because a recording fixture is absent is failing for a reason that
+#     has nothing to do with packaging.
+#
+#     AND IT CHECKS THAT LAYOUT CHECKS ACTUALLY RAN, not just the exit code. A
+#     mistyped group name matches nothing, runs zero layout checks and still exits
+#     0 -- a gate that passes because it examined nothing, which is the same shape
+#     as the bug above.
+#
+#     A pass COUNT is not enough to catch that, and this was MEASURED rather than
+#     assumed: `--only layuot` still reports "1 passed", because
+#     `safety/real-profiles-untouched` runs on every invocation regardless of the
+#     filter. So a "> 0" floor goes green on a typo -- the first version of this
+#     gate did exactly that. It therefore counts the `layout/` check ids in the
+#     output, testing the thing itself instead of a proxy for it, which needs no
+#     pinned number to stay honest.
+LAYOUT_OUT="$("$ROOT/.venv/bin/python3" "$ROOT/scripts/sidecar-tests.py" --only layout 2>&1)" && LAYOUT_RC=0 || LAYOUT_RC=$?
+LAYOUT_RAN="$(printf '%s\n' "$LAYOUT_OUT" | grep -Ec '(ok|FAIL) +layout/' || true)"
+LAYOUT_TALLY="$(printf '%s\n' "$LAYOUT_OUT" | grep -Eo '[0-9]+ passed, [0-9]+ failed' | tail -1)"
+LAYOUT_FAILED="$(printf '%s' "$LAYOUT_TALLY" | awk '{print $3}')"
+if [[ "$LAYOUT_RC" != "0" || "${LAYOUT_RAN:-0}" -lt 1 || "${LAYOUT_FAILED:-1}" != "0" ]]; then
+  preflight_fail "layout invariants failed (sidecar-tests.py --only layout)" \
+                 "$(printf '%s\n' "$LAYOUT_OUT" | grep -E 'FAIL|^  - ' | head -8)" \
+                 "Re-run it alone to see everything:" \
+                 "  .venv/bin/python3 scripts/sidecar-tests.py --only layout"
+else
+  echo "    Layout gate OK ($LAYOUT_RAN pure layout checks, 0 failed)."
+fi
+
 if [[ "$PREFLIGHT_FAILED" == "1" ]]; then
   echo "" >&2
   echo "ERROR: preflight failed — nothing was built, so nothing is half-written." >&2
