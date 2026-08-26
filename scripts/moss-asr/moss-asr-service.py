@@ -204,28 +204,49 @@ SILENCE_RMS = 0.0001
 # on ordinary audio. The number has to sit far above the measured plateau and far
 # below the 51.8 GB runaway, and half the machine is the only rule that does
 # both. On THAT Mac that is 32 GB; it is now derived, not typed — see below.
-def _half_the_physical_ram_gb(fallback: float = 32.0) -> float:
-    """Half this machine's physical RAM, in GB — the rule stated above, computed.
+def _mps_cap_gb(fallback: float = 32.0) -> float:
+    """The MPS fuse for THIS machine, in GB: half the physical RAM, floored at 10.
 
-    ⚠ WHY THIS IS NO LONGER THE LITERAL 32.0. That number WAS "half the machine",
-    for the 64 GB M4 every figure in this project was measured on. On a 16 GB Mac
-    it is TWICE the physical RAM, so the fuse could never blow before macOS began
-    swapping — which is exactly the failure it exists to prevent.
+    ⚠ WHY NOT THE LITERAL 32.0. That number WAS "half the machine", for the 64 GB
+    M4 every figure in this project was measured on. On a 16 GB Mac it is TWICE
+    the physical RAM, and because the cap is armed as
+    `set_per_process_memory_fraction(min(CAP / ceiling, 1.0))` the `min` clamped
+    to 1.0 — the whole allocator, uncapped. Captured in the wild on the client's
+    Mac, which printed it three times:
 
-    OBSERVED on the client's 16 GB Mac, 2026-08-21: six Python sidecars resident
-    at ~14.8 GB, 6.67 GB of swap in use, memory pressure in the red, and a MOSS
-    stop pass that looked HUNG rather than slow. Every cap in the process tree
-    was 32 GB — twice the machine — so nothing anywhere could fire.
+        MPS memory capped at 32 GB of the 11.8 GB macOS reports as available
 
-    Failing one chunk loudly beats dragging the machine into swap for twenty
-    minutes: the first is a message the user can act on, the second is
-    indistinguishable from a bug.
+    ⚠ AND WHY THE FLOOR OF 10, which is the half of this that was LEARNED THE
+    HARD WAY. "Half the physical RAM" alone is a rule calibrated on a 64 GB
+    machine, and it does not survive being scaled down. It leaves 19.8 GB of
+    macOS's 51.8 GB recommendation spare at 64 GB, but only 3.8 GB of 11.8 at
+    16 GB — and the OTHER sidecars need a roughly FIXED ~4 GB, not a proportion.
+    So on a small machine the proportional rule squeezes out work that fits.
+
+    Measured, on the client's 16 GB Mac: with the cap at half (8.0 GB), NeMo
+    raised `MPS backend out of memory (MPS allocated: 8.23 GiB ... max allowed:
+    8.00 GiB)` — on a machine where macOS itself was willing to give 11.8 GB, and
+    where NeMo had run FINE two days earlier, uncapped, in 5.7 s. The fuse was
+    stricter than the operating system and broke working functionality. That is
+    the over-deletion direction this project ranks worst, in a new costume.
+
+    The floor is 10.0 rather than a proportion because the number that matters is
+    absolute: it must clear NeMo's measured 8.23 GB with margin, and stay under
+    MOSS's measured 18.35 GB pool so the engine that actually took a Mac down on
+    2026-08-21 is still refused. It changes NOTHING on a machine of 20 GB or more
+    — this 64 GB M4 still gets exactly 32.0.
+
+    ⚠ THE COST, owner-accepted with it stated (2026-08-26): 10 GB of MPS pool plus
+    ~4 GB of other sidecars plus macOS is tight on a 16 GB machine, so a long NeMo
+    meeting may still fail — its peak is 13.33 GB at 67 minutes — or the machine
+    may slow down. The owner asked for exactly this: let it run, and let the lag be
+    the evidence for a hardware upgrade rather than an invisible refusal. The
+    failure stays BOUNDED either way, which is the whole point: PyTorch raises at
+    the cap instead of growing without limit.
 
     `sysconf` rather than `torch.mps.recommended_max_memory()` because this is a
     module-level constant and torch is not imported yet in every service that
-    carries one. The two agree by construction on the development Mac: 64 GB
-    physical -> 32.0, byte-for-byte the value that shipped for weeks, so this
-    change is a verified no-op there and only acts on smaller machines.
+    carries one.
 
     Falls back to the historical constant if the query fails. A fuse that cannot
     size itself must not become a fuse that refuses everything.
@@ -233,12 +254,12 @@ def _half_the_physical_ram_gb(fallback: float = 32.0) -> float:
     try:
         total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
         half = total / (1024 ** 3) / 2.0
-        return round(half, 1) if half > 0 else fallback
+        return round(max(half, 10.0), 1) if half > 0 else fallback
     except (ValueError, OSError, AttributeError):  # noqa: BLE001
         return fallback
 
 
-MPS_MEMORY_CAP_GB = _half_the_physical_ram_gb()
+MPS_MEMORY_CAP_GB = _mps_cap_gb()
 
 
 def emit(kind: str, text: str) -> None:

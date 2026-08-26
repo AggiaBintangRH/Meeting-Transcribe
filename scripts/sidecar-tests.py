@@ -5627,14 +5627,14 @@ def run_layout(rep: Report, ctx):
                 continue
             fns = [ast.get_source_segment(src, n) for n in ast.parse(src).body
                    if isinstance(n, ast.FunctionDef)
-                   and n.name == "_half_the_physical_ram_gb"]
+                   and n.name == "_mps_cap_gb"]
             if not fns:
                 problems.append(f"{rel} no longer derives the cap from this "
                                 "machine's RAM")
                 continue
             ns = {"os": _os}
             exec(compile(fns[0], str(path), "exec"), ns)  # noqa: S102
-            fn = ns["_half_the_physical_ram_gb"]
+            fn = ns["_mps_cap_gb"]
             got = fn()
             seen[rel] = got
             if abs(got - want) > 0.05:
@@ -5642,13 +5642,41 @@ def run_layout(rep: Report, ctx):
                                 f"this machine's {physical_gb:.1f} GB ({want})")
 
             # ...and the POSITIVE half, which is what makes the rule act on the
-            # machine it was written for. A 16 GB Mac must get 8, not 32.
+            # machine it was written for.
+            #
+            # ⚠ A 16 GB Mac must get 10, NOT 8 — the floor, added 2026-08-26 after
+            # the proportional rule alone BROKE WORKING FUNCTIONALITY there. At
+            # 8.0 the client's Mac raised "MPS backend out of memory (MPS
+            # allocated: 8.23 GiB ... max allowed: 8.00 GiB)" running NeMo, on a
+            # machine where macOS was willing to give 11.8 GB and where NeMo had
+            # run fine two days earlier in 5.7 s. A fuse stricter than the OS is
+            # the over-deletion direction wearing a new costume.
+            #
+            # The two bounds are asserted TOGETHER because either alone is
+            # satisfiable by a wrong rule: it must clear NeMo's measured 8.23 GB
+            # and stay under MOSS's measured 18.35 GB pool, so the engine that
+            # actually took a Mac down on 2026-08-21 is still refused.
             def fake(total_gb):
                 return lambda k: {"SC_PAGE_SIZE": 4096,
                                   "SC_PHYS_PAGES": total_gb * (1024 ** 3) // 4096}[k]
             ns["os"] = type("o", (), {"sysconf": staticmethod(fake(16))})
-            if abs(fn() - 8.0) > 0.05:
-                problems.append(f"{rel} would give {fn()} GB on a 16 GB Mac, not 8")
+            got16 = fn()
+            if abs(got16 - 10.0) > 0.05:
+                problems.append(f"{rel} would give {got16} GB on a 16 GB Mac, not 10")
+            if got16 < 8.23:
+                problems.append(f"{rel} gives {got16} GB on a 16 GB Mac, below NeMo's "
+                                "measured 8.23 GB — the configuration that broke there")
+            if got16 >= 18.35:
+                problems.append(f"{rel} gives {got16} GB on a 16 GB Mac, at or above "
+                                "MOSS's measured 18.35 GB pool — the engine that took "
+                                "a Mac down would no longer be refused")
+
+            # A 20 GB machine is where the floor stops acting: half is 10.0 exactly.
+            ns["os"] = type("o", (), {"sysconf": staticmethod(fake(64))})
+            if abs(fn() - 32.0) > 0.05:
+                problems.append(f"{rel} would give {fn()} GB on a 64 GB Mac, not 32 — "
+                                "the floor must not change a machine that was already "
+                                "right")
 
             # A fuse that cannot size itself must not refuse everything.
             def boom(_):
@@ -5662,7 +5690,8 @@ def run_layout(rep: Report, ctx):
             problems.append(f"the {len(fuse_files)} sidecars disagree about the cap: {seen}")
         rep.expect(cid, not problems,
                    f"all {len(fuse_files)} MPS fuses derive half this machine's "
-                   f"{physical_gb:.0f} GB ({want} GB), give 8 GB on a 16 GB Mac, "
+                   f"{physical_gb:.0f} GB ({want} GB) floored at 10, give 10 GB on a 16 GB Mac "
+                   f"(NeMo passes, MOSS still refused) and 32 on a 64 GB one, "
                    f"and fall back to 32.0 if the query fails",
                    "; ".join(problems))
 
