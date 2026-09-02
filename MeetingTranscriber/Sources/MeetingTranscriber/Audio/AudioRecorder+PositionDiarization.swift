@@ -63,17 +63,74 @@ extension AudioRecorder {
         positionSource = PositionSource.current(d)
 
         let diarizer = PositionDiarizer()
-        // Gate direction collection on our own VAD — the array's beam follows any
-        // sound (piano still moved it with the ATND's own SVAD on), so without
-        // this a noise source becomes a speaker position. Only possible when VAD
-        // is on; with it off there is no verdict, so the gate stays open.
-        let gateOnSpeech = d.object(forKey: "vad.enabled") as? Bool ?? true
+        // ⚠ THE BEAM IS NO LONGER GATED ON OUR VAD (owner, 2026-09-02:
+        // "speaker nya jangan ada blocking VAD kita aja / jadi full dari ATND").
+        // Direction is taken from the array for every notice it sends.
+        //
+        // WHY THE GATE EXISTED, because it was a good reason and it is not
+        // forgotten: measured 2026-07-27, the array's beam follows ANY sound —
+        // piano and loudspeaker audio still produced angle/rotation notices with
+        // the ATND's own SVAD on — so an ungated collector turns a noise source
+        // into a speaker position. The gate was the only defence available then.
+        //
+        // WHY IT CAN GO NOW, and this is the part that changed rather than the
+        // preference: the room has EXCLUSION ZONES. The client's array was
+        // reconfigured on 2026-09-02 with EX regions, which forbid the beam from
+        // fixed positions in hardware, at the source, regardless of what is
+        // playing there. CLAUDE.md already named that "the promising fix for the
+        // room-echo problem". The defence moved from a software gate that only
+        // guesses to a device rule that cannot be argued with.
+        //
+        // 🔴 AND THE GATE WAS COSTING MORE THAN IT BOUGHT. It only ever opens
+        // while `VoiceActivityDetector` says speech, and on the client's 5.8 dB
+        // SNR capture that verdict DIES PARTWAY THROUGH A MEETING. Measured on
+        // their own recording (meeting-2026-09-02T05-08-56Z.wav, 91.9 s), the
+        // heuristic engine's adaptive floor runs away:
+        //
+        //     0-10 s  49 % speaking   gate 0.0120
+        //    30-40 s  66 % speaking   gate 0.0190
+        //    50-60 s   3 % speaking   gate 0.0699
+        //    60-90 s   0 % speaking   gate 0.1897   <- shut, permanently
+        //
+        // `noiseFloor` is an EMA over every buffer that FAILS the gate, and the
+        // gate is 6x that floor. At low SNR the pauses are nearly as loud as the
+        // speech, so the floor climbs, the gate climbs with it, more buffers fail,
+        // and once the gate passes the speech level the SPEECH ITSELF feeds the
+        // floor. It is positive feedback with no ceiling. Their log shows the
+        // consequence exactly: every `SKIP gap=... samples=0` from 55.7 s to the
+        // end of the meeting, and SPEAKER UNKNOWN on every row.
+        //
+        // ⚠ THAT RUNAWAY IS A SEPARATE, STILL-OPEN DEFECT. It also drives the
+        // realtime flush (`asr?.flush()` on the speech→silence edge) and the
+        // chunk boundary, so it is not fixed by this change — it is only no
+        // longer able to blank the speaker labels. Do not read this line as
+        // closing it.
+        //
+        // The parameter STAYS, with its tests: `PositionSpeechGateTests` and
+        // `PositionBlackoutTests` drive `gateOnSpeech: true` directly, so the
+        // mechanism is still pinned and can be turned back on in one edit if a
+        // room without exclusion zones ever needs it.
+        let gateOnSpeech = false
         diarizer.start(tauDeg: tauDeg,
                        smoothingSec: smoothingMs / 1000,
                        mode: mode,
                        gateOnSpeech: gateOnSpeech,
                        now: { [weak self] in self?.recordingElapsed ?? 0 })
         positionDiarizer = diarizer
+
+        // SAY THE LAYER STARTED, not only that it did not. Until now this
+        // function logged its two OFF cases and nothing else, so a healthy
+        // session and a session whose gate never opened looked identical in the
+        // file — an absence readable two ways, which is what cost a day on
+        // 2026-08-18 (`configureMoss` had the same gap and was given the same
+        // fix). The gate state is named because it is the one thing here that a
+        // reader will want to check first.
+        positionLog("POSITION LAYER ON — source '\(positionSource.rawValue)', "
+                    + "tau \(Int(tauDeg))°, smoothing \(Int(smoothingMs)) ms, "
+                    + "beam UNGATED (direction is taken from every ATND notice; "
+                    + "our VAD no longer has to agree). Noise the array points at "
+                    + "can now become a position — exclusion zones on the device "
+                    + "are what keeps that out.")
     }
 
     /// Position-labeled ranges covering the sub-ranges of `window` that pyannote

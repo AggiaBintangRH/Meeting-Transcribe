@@ -5728,6 +5728,48 @@ def run_layout(rep: Report, ctx):
                    f"and fall back to 32.0 if the query fails",
                    "; ".join(problems))
 
+    cid = "layout/the-beam-is-not-gated-on-our-vad"
+    if ctx.wants(cid):
+        # THE POSITION LAYER TAKES DIRECTION FROM EVERY ATND NOTICE (owner,
+        # 2026-09-02: "speaker nya jangan ada blocking VAD kita aja / jadi full
+        # dari ATND"). `gateOnSpeech` is passed `false` at the one call site.
+        #
+        # This is pinned because the previous line read
+        # `d.object(forKey: "vad.enabled") as? Bool ?? true`, and re-deriving it
+        # from a setting is exactly the tidy-up a later reader would make — it
+        # LOOKS like a hard-coded false that someone forgot to wire up. It is not:
+        # the gate cost the client every speaker label in a meeting, because our
+        # VAD's adaptive floor runs away on 5.8 dB SNR audio and shuts after ~55 s
+        # (measured on their own recording), and the room now has device-side
+        # EXCLUSION ZONES doing the job the gate was invented for.
+        #
+        # The MECHANISM is deliberately untouched and still tested through the
+        # parameter (`PositionSpeechGateTests`, `PositionBlackoutTests` both drive
+        # gateOnSpeech: true), so re-arming it is one edit if a room without
+        # exclusion zones ever needs it.
+        src = (SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+               / "AudioRecorder+PositionDiarization.swift").read_text()
+        body = "\n".join(l for l in src.splitlines()
+                         if not l.strip().startswith("//"))
+        problems = []
+        if "let gateOnSpeech = false" not in body:
+            problems.append("the one call site no longer passes `false` — the beam "
+                            "is gated again, and on a low-SNR room that silently "
+                            "deletes every speaker label")
+        if 'forKey: "vad.enabled"' in body:
+            problems.append("the position layer reads `vad.enabled` again; the "
+                            "beam must not depend on our VAD's verdict")
+        # The POSITIVE half: a session that starts must say so, or an absent log
+        # is readable as both "healthy" and "never ran" (the 2026-08-18 lesson).
+        if "POSITION LAYER ON" not in src:
+            problems.append("the layer no longer logs that it STARTED, so a "
+                            "healthy session and a dead one look identical in "
+                            "position-diarization.log")
+        rep.expect(cid, not problems,
+                   "the beam takes direction from every ATND notice (gateOnSpeech "
+                   "false, no vad.enabled read) and says so when it starts",
+                   "; ".join(problems))
+
     cid = "layout/the-overwriting-migration-runs-once"
     if ctx.wants(cid):
         # `adoptMeasuredEngineDefaults` is the ONLY migration in this app that
