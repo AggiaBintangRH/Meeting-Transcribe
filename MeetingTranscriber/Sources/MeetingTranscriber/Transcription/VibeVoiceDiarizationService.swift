@@ -58,10 +58,18 @@ final class VibeVoiceDiarizationService: @unchecked Sendable {
     /// while it still ran the other script — a drifted script/log pair,
     /// invisible because both processes keep working.
     struct Config: Equatable {
-        /// The checkpoint the sidecar loads. Named `modelRepoID` rather than
-        /// `modelRepoID` (its shape in the engines this class was copied
-        /// from) because nothing here embeds anything: the model transcribes and
-        /// attributes in one pass, and the `Speaker N:` runs ARE the output.
+        /// The checkpoint the sidecar loads — a HUGGING FACE REPO ID, not a
+        /// path. Named `modelRepoID` rather than `embedderRepoID` (its shape in
+        /// the engine this class was copied from) because nothing here embeds
+        /// anything: the model transcribes and attributes in one pass, and the
+        /// `Speaker N:` runs ARE the output.
+        ///
+        /// ⚠ "REPO ID, NOT A PATH" is the whole of a bug that reached the owner
+        /// as "model loading failed". Every hand-drive during development passed
+        /// an absolute snapshot path, so all three VibeVoice sidecars read
+        /// `<model>/preprocessor_config.json` directly and all three were tested
+        /// green — while the app sends `ModelInfo.hfRepo`. They now resolve a
+        /// repo id through the offline hub cache, as upstream's own loader does.
         let modelRepoID: String
 
         static let scriptName = "vibevoice-diar/vibevoice-diar-service.py"

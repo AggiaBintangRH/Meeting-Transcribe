@@ -129,11 +129,30 @@ def brief_traceback() -> str:
     return " | ".join(traceback.format_exc().strip().splitlines()[-3:])
 
 
+def _checkpoint_dir(model_path: str) -> str:
+    """A local directory for `model_path`, which may be a REPO ID.
+
+    ⚠ THE APP SENDS A REPO ID, NOT A PATH, and this cost a "model loading
+    failed" on the first real launch. Every sidecar here is handed
+    `ModelInfo.hfRepo`; only the hand-drives during development passed an
+    absolute snapshot path, which is exactly why the bug survived three services
+    being tested. Upstream's own `load_frame_config` branches the same way.
+
+    Resolution is offline: `HF_HUB_OFFLINE=1` is set above, so this reads the
+    cache that `download-best-models.sh` filled and never reaches the network.
+    """
+    if os.path.isdir(model_path):
+        return model_path
+    from huggingface_hub import snapshot_download
+    return snapshot_download(model_path)
+
+
 def frame_config(model_path: str) -> dict:
     """Chunk and lookahead from the CHECKPOINT — upstream's own arithmetic.
     See the chunked service for why it is neither hard-coded nor imported from
     `demo/`; `layout/vibevoice-frame-config-matches-upstream` pins all copies."""
-    with open(os.path.join(model_path, "preprocessor_config.json"),
+    with open(os.path.join(_checkpoint_dir(model_path),
+                           "preprocessor_config.json"),
               encoding="utf-8") as fh:
         cfg = json.load(fh)
     missing = [k for k in ("chunk_frames", "lookahead_frames") if k not in cfg]

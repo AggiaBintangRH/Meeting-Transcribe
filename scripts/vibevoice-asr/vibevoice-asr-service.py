@@ -285,6 +285,24 @@ def main() -> None:
         buffer = np.concatenate([buffer, np.frombuffer(raw, dtype=np.float32)])
 
 
+def _checkpoint_dir(model_path: str) -> str:
+    """A local directory for `model_path`, which may be a REPO ID.
+
+    ⚠ THE APP SENDS A REPO ID, NOT A PATH, and this cost a "model loading
+    failed" on the first real launch. Every sidecar here is handed
+    `ModelInfo.hfRepo`; only the hand-drives during development passed an
+    absolute snapshot path, which is exactly why the bug survived three services
+    being tested. Upstream's own `load_frame_config` branches the same way.
+
+    Resolution is offline: `HF_HUB_OFFLINE=1` is set above, so this reads the
+    cache that `download-best-models.sh` filled and never reaches the network.
+    """
+    if os.path.isdir(model_path):
+        return model_path
+    from huggingface_hub import snapshot_download
+    return snapshot_download(model_path)
+
+
 def _frame_config(model_path: str) -> dict:
     """Chunk length and lookahead come from the CHECKPOINT, never from us.
 
@@ -303,7 +321,8 @@ def _frame_config(model_path: str) -> dict:
     Measured on the shipped checkpoint: 22 frames x 3200/24000 s = 2.9333 s
     chunk, 4 frames = 0.5333 s lookahead.
     """
-    with open(os.path.join(model_path, "preprocessor_config.json"),
+    with open(os.path.join(_checkpoint_dir(model_path),
+                           "preprocessor_config.json"),
               encoding="utf-8") as fh:
         cfg = json.load(fh)
     missing = [k for k in ("chunk_frames", "lookahead_frames") if k not in cfg]

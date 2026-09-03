@@ -5815,6 +5815,57 @@ def run_layout(rep: Report, ctx):
                    "copy on sys.path",
                    "; ".join(problems))
 
+    cid = "layout/vibevoice-services-accept-a-repo-id"
+    if ctx.wants(cid):
+        # THE APP SENDS `ModelInfo.hfRepo`, NEVER A PATH — and this reached the
+        # owner as "model loading failed" on the first real launch, 2026-09-02.
+        # All three VibeVoice sidecars read `<model>/preprocessor_config.json`
+        # directly, and all three had been hand-driven green with an absolute
+        # snapshot path. A harness that does not mirror the call site can
+        # manufacture both false alarms and false comfort; this was the comfort.
+        #
+        # The realtime one additionally REQUIRED `--model`, which no realtime
+        # caller passes — `RealtimeASRService.processArguments` is `--language`
+        # plus at most one engine flag — so it was the only sidecar in the app
+        # that could not start at all. Its log said exactly that.
+        import ast as _ast
+        problems = []
+        roles = sorted(d.name for d in SCRIPTS.iterdir()
+                       if d.is_dir() and d.name.startswith("vibevoice-"))
+        if len(roles) < 3:
+            problems.append(f"only {len(roles)} VibeVoice service(s) found — this "
+                            "check discovers them by folder name")
+        for role in roles:
+            src = (SCRIPTS / role / f"{role}-service.py").read_text()
+            if "_checkpoint_dir" not in src:
+                problems.append(f"{role} has no repo-id resolver — it would open "
+                                "<repo-id>/preprocessor_config.json and fail as "
+                                "'model loading failed'")
+            elif "_checkpoint_dir(model_path)" not in src:
+                problems.append(f"{role} defines a resolver but does not use it "
+                                "where the checkpoint is read")
+            # The realtime role must START without --model, like its siblings.
+            if role.endswith("-rt"):
+                tree = _ast.parse(src)
+                required = any(isinstance(n, _ast.Call)
+                               and isinstance(n.func, _ast.Name) and n.func.id == "fail"
+                               and n.args and isinstance(n.args[0], _ast.Constant)
+                               and "--model is required" in str(n.args[0].value)
+                               for n in _ast.walk(tree))
+                if required:
+                    problems.append(f"{role} still refuses to start without "
+                                    "--model, which no realtime caller passes")
+                if not any(isinstance(n, _ast.Assign)
+                           and any(getattr(t, "id", "") == "MODEL" for t in n.targets)
+                           for n in tree.body):
+                    problems.append(f"{role} has no module-level MODEL — every "
+                                    "other realtime sidecar declares its own")
+        rep.expect(cid, not problems,
+                   f"all {len(roles)} VibeVoice services resolve a HF repo id to a "
+                   "local checkpoint, and the realtime one starts without --model "
+                   "like its siblings",
+                   "; ".join(problems))
+
     cid = "layout/every-service-is-unloaded-at-stop"
     if ctx.wants(cid):
         # EVERY SIDECAR STOPS WHEN THE MEETING DOES (owner, 2026-09-02: "pas stop

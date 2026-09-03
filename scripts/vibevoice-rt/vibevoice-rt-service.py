@@ -120,6 +120,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ven
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+#: The checkpoint, HARD-CODED like every other realtime sidecar's (parakeet,
+#: funasr, nemotron all declare their own `MODEL`). `RealtimeASRService` passes
+#: no `--model` to any of them — its `processArguments` are `--language` plus at
+#: most one engine-specific flag — so requiring one here made this service the
+#: only one that could not start. It said so, in `logs/vibevoice-rt.log`:
+#: "FATAL --model is required".
+MODEL = "microsoft/VibeVoice-ASR-Streaming-1.5B"
+
 SR = 16_000
 #: Cap a lane's buffer. Unlike the other realtime engines this is NOT about cost
 #: — the KV cache advances per window, so a long utterance is not re-transcribed
@@ -160,12 +168,31 @@ def read_exact(n: int) -> bytes:
     return buf
 
 
+def _checkpoint_dir(model_path: str) -> str:
+    """A local directory for `model_path`, which may be a REPO ID.
+
+    ⚠ THE APP SENDS A REPO ID, NOT A PATH, and this cost a "model loading
+    failed" on the first real launch. Every sidecar here is handed
+    `ModelInfo.hfRepo`; only the hand-drives during development passed an
+    absolute snapshot path, which is exactly why the bug survived three services
+    being tested. Upstream's own `load_frame_config` branches the same way.
+
+    Resolution is offline: `HF_HUB_OFFLINE=1` is set above, so this reads the
+    cache that `download-best-models.sh` filled and never reaches the network.
+    """
+    if os.path.isdir(model_path):
+        return model_path
+    from huggingface_hub import snapshot_download
+    return snapshot_download(model_path)
+
+
 def frame_config(model_path: str) -> dict:
     """Chunk and lookahead from the CHECKPOINT — see the chunked service's copy
     of this function for why it is not hard-coded and not imported from `demo/`.
     `vibevoice/frame-config-matches-upstream` pins both copies to upstream's
     arithmetic."""
-    with open(os.path.join(model_path, "preprocessor_config.json"),
+    with open(os.path.join(_checkpoint_dir(model_path),
+                           "preprocessor_config.json"),
               encoding="utf-8") as fh:
         cfg = json.load(fh)
     missing = [k for k in ("chunk_frames", "lookahead_frames") if k not in cfg]
@@ -204,16 +231,17 @@ class Lane:
 
 
 def main() -> None:
-    model_path = None
     language = None
     args = sys.argv[1:]
     for i, a in enumerate(args):
+        # `--model` is ACCEPTED but not required: no realtime caller passes one,
+        # and rejecting it outright would make a future caller's override an
+        # argparse-style failure at session start rather than a no-op.
         if a == "--model" and i + 1 < len(args):
-            model_path = args[i + 1]
+            globals()["MODEL"] = args[i + 1]
         elif a == "--language" and i + 1 < len(args):
             language = args[i + 1]
-    if not model_path:
-        fail("--model is required")
+    model_path = MODEL
     if language:
         log(f"language={language} — ACCEPTED BUT NOT HONOURED: the streaming API "
             "has no language parameter")
