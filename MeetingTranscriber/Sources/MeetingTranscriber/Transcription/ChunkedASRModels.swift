@@ -26,6 +26,27 @@ protocol ChunkedASRModel: Sendable {
     /// Map the settings language code ("id", "en", …) to what this model
     /// expects. Return nil to omit (auto-detect).
     func languageArgument(for code: String) -> String?
+
+    /// The interpreter this model's sidecar runs under, or nil for the main
+    /// `.venv` that five of the six use.
+    ///
+    /// ⚠ NOT A PREFERENCE — a dependency conflict that cannot be resolved. The
+    /// main `.venv` needs `transformers` 5.x for the MLX stack; VibeVoice pins
+    /// `>=4.51.3,<5.0.0`, so the two can never share an interpreter. Exactly the
+    /// situation that gave DiCoW `.venv-dicow` on 2026-07-16, and NeMo and
+    /// DiariZen their own after it.
+    ///
+    /// Defaulted in an extension rather than required, deliberately: the answer
+    /// for a NEW model is almost always "the main venv", and a protocol
+    /// requirement here would make every existing class restate it. That is the
+    /// opposite trade from `scriptName`, which IS required precisely because
+    /// there is no safe default — inheriting another model's sidecar is silent,
+    /// while inheriting the main venv fails loudly at import.
+    var venvName: String? { get }
+}
+
+extension ChunkedASRModel {
+    var venvName: String? { nil }
 }
 
 /// Qwen3-ASR 1.7B (bf16) — primary. Best WER, Indonesian support.
@@ -122,6 +143,27 @@ final class MossTranscribeDiarizeModel: ChunkedASRModel {
     }
 }
 
+final class VibeVoiceASRModel: ChunkedASRModel {
+    let info = ModelCatalog.chunkedModel(id: "vibevoice")
+    var repoID: String { info.hfRepo }
+    var scriptName: String { "vibevoice-asr/vibevoice-asr-service.py" }
+    var logName: String { "vibevoice-asr" }
+
+    /// The ONE model here that does not run in the main `.venv` — see
+    /// `ChunkedASRModel.venvName`. `transformers <5.0` against the MLX stack's
+    /// 5.x is a hard conflict, not a version preference.
+    var venvName: String? { ".venv-vibevoice" }
+
+    /// Selectable and forwarded, and inert — the fifth member of that group
+    /// (Granite, Voxtral, MOSS, Parakeet). `streaming_generate` has no language
+    /// parameter; checked in the vendored source on 2026-09-02, not inferred
+    /// from the model card's "10 languages". The sidecar logs what it was asked
+    /// for and ignores it, so the choice dies where the truth is.
+    func languageArgument(for code: String) -> String? {
+        code == Languages.auto.code ? nil : code
+    }
+}
+
 // MARK: - Factory
 
 enum ChunkedASRModelFactory {
@@ -132,6 +174,7 @@ enum ChunkedASRModelFactory {
         case "voxtral": return VoxtralMiniModel()
         case "granite": return GraniteSpeechModel()
         case "moss":    return MossTranscribeDiarizeModel()
+        case "vibevoice": return VibeVoiceASRModel()
         default:        return Qwen3ASRModel()
         }
     }

@@ -107,6 +107,30 @@ enum ModelCatalog {
                   detail: "Speaker-attributed ASR — transcript, speaker labels and timestamps from one model",
                   badges: ["PyTorch MPS", "float32", "~4.7x RT", "0.9B", "3.6 GB"],
                   hfRepo: "OpenMOSS-Team/MOSS-Transcribe-Diarize"),
+        // The SECOND speaker-attributed ASR here, added 2026-09-02 at the
+        // client's request. MIT, so it may ship; runs on PyTorch/MPS in the ONLY
+        // sidecar with its own interpreter on the chunked side (transformers
+        // <5.0 against the MLX stack's 5.x — see VibeVoiceASRModel.venvName).
+        //
+        // ⚠ THE BADGES ARE THE MEASURED NUMBERS, INCLUDING THE UNFLATTERING ONE.
+        // Driven on this M4 on 2026-09-02 before it was wired: 10.96 GB RSS and
+        // a 9.8 GB MPS pool, flat from 30 s to 121 s of audio. That is above the
+        // 11.8 GB ceiling of the client's 16 GB Mac once the other ~4 GB of
+        // sidecars are counted, so it is a 64 GB-machine model here. The size
+        // badge says so rather than leaving it to be discovered mid-meeting.
+        //
+        // Speaker counting, auto, no way to pin it (`streaming_generate` has no
+        // num_speakers and the package has none anywhere): Overlap123 3/3 ✓,
+        // Meeting5People 4 against 5 ✗ — where all five diarization engines get
+        // 5 — and the client's own ATND recording 1 against 5. Kept out of the
+        // detail line only because it is a diarization property and this is the
+        // ASR slot; it is in the sidecar docstring in full.
+        ModelInfo(id: "vibevoice",
+                  name: "VibeVoice-ASR-Streaming 1.5B",
+                  detail: "Speaker-attributed streaming ASR — text and speaker labels from one model",
+                  badges: ["PyTorch MPS", "float32", "~4.6x RT", "10 languages",
+                           "11 GB RAM", "own runtime"],
+                  hfRepo: "microsoft/VibeVoice-ASR-Streaming-1.5B"),
     ]
 
     static let diarization = ModelInfo(
@@ -813,6 +837,15 @@ enum Languages {
         // granite-service.py)" was simply wrong and has been corrected.
         case "voxtral":
             return "Voxtral's realtime checkpoint has no language parameter — it detects the language itself. You can set this, but it will not change the transcript."
+        // The FOURTH of this group, added 2026-09-02, and checked the way the
+        // Voxtral entry above taught: read the signature, do not trust the card.
+        // `VibeVoiceASRForConditionalGeneration.streaming_generate` takes
+        // prompt_text, chunk_duration, text_audio_delay, sample_rate,
+        // max_new_tokens_per_chunk, temperature, context_info, encode_mode,
+        // repetition_penalty and pad_last_chunk — and no language. The model
+        // card advertises 10 languages; the API offers no way to ask for one.
+        case "vibevoice":
+            return "VibeVoice has no language parameter — it detects the language itself. You can set this, but it will not change the transcript."
         default:
             return nil
         }

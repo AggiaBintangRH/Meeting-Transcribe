@@ -29,6 +29,7 @@ PBS_DIR="$CACHE/python-runtime"
 PBS_DICOW_DIR="$CACHE/python-runtime-dicow"
 PBS_NEMO_DIR="$CACHE/python-runtime-nemo"
 PBS_DIARIZEN_DIR="$CACHE/python-runtime-diarizen"
+PBS_VIBEVOICE_DIR="$CACHE/python-runtime-vibevoice"
 APP_NAME="Meeting Transcriber"
 
 # Fail the build if a bundled native lib cannot actually load on a client Mac.
@@ -333,7 +334,7 @@ preflight_fail() {
 # --- the four venvs. `download-best-models.sh` creates them; without one the
 #     build dies much later, inside a pip freeze whose error names a path rather
 #     than the thing to run.
-for v in .venv .venv-dicow .venv-nemo .venv-diarizen; do
+for v in .venv .venv-dicow .venv-nemo .venv-diarizen .venv-vibevoice; do
   if [[ ! -x "$ROOT/$v/bin/python3" && ! -x "$ROOT/$v/bin/python" ]]; then
     preflight_fail "$v is missing (no interpreter in $v/bin)" \
                    "Run ./RUN-SETUP.command — it creates all four."
@@ -1106,6 +1107,102 @@ find "$RES/.venv-diarizen" -name '*torchaudio_ffmpeg*.so' -o -name '*torchaudio_
 echo "    Pruned torchaudio's ffmpeg/sox backends (Homebrew-only, lazily loaded)."
 prune_pyannoteai_sdk "$RES/.venv-diarizen" "DiariZen runtime"
 check_relocatable "$RES/.venv-diarizen" "DiariZen runtime"
+
+# ===========================================================================
+# B2e — FIFTH portable interpreter for VibeVoice ASR (.venv-vibevoice)
+#
+# `ChunkedASRService` probes Contents/Resources/.venv-vibevoice/bin/python3 when
+# the selected chunked model declares `venvName` — see
+# `ChunkedASRModel.venvName`, which VibeVoice is the only model to override.
+#
+# WHY A FIFTH INTERPRETER AT ALL. VibeVoice pins `transformers>=4.51.3,<5.0.0`
+# and the main `.venv` needs 5.x for the MLX stack. That is the DiCoW conflict
+# exactly (2026-07-16), and it has the same only-answer: its own runtime. ~1.2 GB.
+#
+# THE VENDORED PACKAGE IS THE PART THAT GOES MISSING IN SILENCE. `vibevoice` is
+# installed from GitHub upstream, so a `pip freeze` writes it as a `git+` ref and
+# the strip below removes it — correctly. The engine therefore comes from
+# scripts/vibevoice-asr/vendor/, reinstalled explicitly afterwards, and the
+# sidecar ALSO inserts that folder on sys.path itself so dev and the bundle run
+# identical code. Without both, this ships an interpreter with the dependencies
+# and no model class: the DiCoW failure of 2026-07-27, wearing a third hat.
+# ===========================================================================
+echo ""
+echo "==> [B2e] Provisioning portable Python for VibeVoice ASR..."
+
+if [[ ! -x "$ROOT/.venv-vibevoice/bin/pip" ]]; then
+  echo "ERROR: .venv-vibevoice is missing — cannot bundle the VibeVoice runtime." >&2
+  echo "       Run ./download-best-models.sh (section 3f) first, then rebuild." >&2
+  exit 1
+fi
+
+if [[ ! -d "$ROOT/scripts/vibevoice-asr/vendor/vibevoice" ]]; then
+  echo "ERROR: scripts/vibevoice-asr/vendor/vibevoice is missing." >&2
+  echo "       The package is not on PyPI; this tree is the only source the" >&2
+  echo "       bundled interpreter and the sidecar's sys.path can use." >&2
+  exit 1
+fi
+
+FROZEN_VV="$CACHE/requirements-frozen-vibevoice.txt"
+echo "    Freezing .venv-vibevoice packages..."
+"$ROOT/.venv-vibevoice/bin/pip" freeze --exclude-editable > "$FROZEN_VV.raw"
+grep -vE '^pip==|file://|@ file://|git\+' "$FROZEN_VV.raw" > "$FROZEN_VV" || true
+if grep -qE 'file://|git\+' "$FROZEN_VV"; then
+  echo "ERROR: local (file://) or VCS (git+) requirements remain after strip:" >&2
+  grep -nE 'file://|git\+' "$FROZEN_VV" >&2
+  exit 1
+fi
+# THE PIN THAT DEFINES THIS INTERPRETER. If transformers ever drifts to 5.x here
+# the model does not merely warn — `VibeVoiceASRProcessor` fails to import, and
+# it fails inside a client's first meeting rather than at build time.
+if ! grep -qE '^transformers==4\.' "$FROZEN_VV"; then
+  echo "ERROR: transformers 4.x is not in the frozen requirements." >&2
+  echo "       VibeVoice pins >=4.51.3,<5.0.0; 5.x is what the MAIN venv needs," >&2
+  echo "       and mixing them is the whole reason this interpreter exists." >&2
+  grep -iE '^transformers' "$FROZEN_VV" >&2 || echo "       (no transformers at all)" >&2
+  exit 1
+fi
+
+NEW_SHA_VV="$(shasum "$FROZEN_VV" | awk '{print $1}')"
+SHA_FILE_VV="$CACHE/requirements-vibevoice.sha"
+OLD_SHA_VV="$(cat "$SHA_FILE_VV" 2>/dev/null || echo "")"
+
+if [[ "$NEW_SHA_VV" == "$OLD_SHA_VV" && -x "$PBS_VIBEVOICE_DIR/bin/python3" ]]; then
+  echo "    Requirements unchanged and runtime present — skipping reinstall."
+else
+  echo "    (Re)extracting interpreter + installing packages..."
+  rm -rf "$PBS_VIBEVOICE_DIR"
+  mkdir -p "$PBS_VIBEVOICE_DIR"
+  tar -xzf "$ASSET_PATH" -C "$PBS_VIBEVOICE_DIR" --strip-components=1
+  PIP_LOG_VV="$CACHE/build-pip-install-vibevoice.log"
+  if ! "$PBS_VIBEVOICE_DIR/bin/python3" -m pip install --no-compile --progress-bar off -q \
+        -r "$FROZEN_VV" >"$PIP_LOG_VV" 2>&1; then
+    echo "    pip install FAILED — last 30 lines of $PIP_LOG_VV:"
+    tail -30 "$PIP_LOG_VV"
+    exit 1
+  fi
+  echo "$NEW_SHA_VV" > "$SHA_FILE_VV"
+fi
+
+rm -rf "$RES/.venv-vibevoice"
+cp -Rc "$PBS_VIBEVOICE_DIR" "$RES/.venv-vibevoice"
+
+# Import gate (mandatory). Asserts the MODEL CLASS imports off the vendored tree,
+# not merely that transformers is present — the vendored half is the part that
+# can go missing without a word.
+echo "    Import gate (VibeVoice)..."
+PYTHONPATH="$ROOT/scripts/vibevoice-asr/vendor" "$RES/.venv-vibevoice/bin/python3" -c "
+import transformers, torch
+assert transformers.__version__.startswith('4.'), \
+    'expected transformers 4.x, got ' + transformers.__version__
+transformers.logging.set_verbosity_error()
+from vibevoice.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
+from vibevoice.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
+print('VIBEVOICE IMPORTS OK', transformers.__version__, torch.__version__)
+"
+
+echo "    Portability checks (VibeVoice)..."
+check_relocatable "$RES/.venv-vibevoice" "VibeVoice runtime"
 
 # ===========================================================================
 # B3 — scripts + models (siblings under Resources/)

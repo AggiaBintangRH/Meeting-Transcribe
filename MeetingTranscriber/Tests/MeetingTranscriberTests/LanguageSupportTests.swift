@@ -114,23 +114,53 @@ final class LanguageSupportTests: XCTestCase {
     /// returned the same 226 characters without raising. Only Whisper and Qwen3
     /// genuinely act on the setting; three of the five only look like they do,
     /// which is exactly why the note is asserted rather than trusted.
-    func testEveryModelsPickerIsSelectableButThreeStillWarn() {
-        for id in ["granite", "moss", "moss-diar", "whisper", "qwen3", "voxtral"] {
-            XCTAssertTrue(Languages.acceptsLanguage(model: id),
-                          "\(id): the picker must be usable")
+    /// Every chunked model's picker is usable, and every one that cannot act on
+    /// the choice says so.
+    ///
+    /// ⚠ THE POPULATION IS DERIVED FROM `ModelCatalog.chunked`, NOT LISTED. It
+    /// was a hand-written list of ids until 2026-09-02, and VibeVoice was added
+    /// that day without appearing in it — so this test went green while saying
+    /// nothing at all about the new model. That is the under-reporting shape
+    /// this project keeps finding (the MPS-fuse pin named five files while seven
+    /// carried a fuse); a list beside a catalog only ever drifts one way.
+    ///
+    /// Now a new model must be CLASSIFIED to pass: either it is one of the two
+    /// that genuinely honour the flag, or it must carry the note. Silence is no
+    /// longer an option.
+    func testEveryChunkedModelIsSelectableAndSaysIfTheChoiceIsInert() {
+        // The only two the setting actually reaches. Every measurement behind
+        // this is in `noLanguageParameterNote` — Granite, MOSS, Voxtral and
+        // VibeVoice were each driven directly and returned identical output for
+        // different codes.
+        let honoursLanguage: Set<String> = ["whisper", "qwen3"]
+
+        XCTAssertFalse(ModelCatalog.chunked.isEmpty, "no models to sweep")
+        for model in ModelCatalog.chunked {
+            XCTAssertTrue(Languages.acceptsLanguage(model: model.id),
+                          "\(model.id): the picker must be usable — a control that "
+                          + "vanishes reads as a bug, one with a reason reads as "
+                          + "an answer (the 2026-07-31 reversal)")
+            let note = Languages.noLanguageParameterNote(forModel: model.id)
+            if honoursLanguage.contains(model.id) {
+                XCTAssertNil(note,
+                             "\(model.id) is one of the two the setting reaches, "
+                             + "so a warning here would be a lie in the other "
+                             + "direction")
+            } else {
+                XCTAssertNotNil(note,
+                                "\(model.id): a model that ignores the language "
+                                + "MUST say so — dropping the note leaves a silent "
+                                + "lie, and a NEW model with no note fails here "
+                                + "rather than slipping through")
+                XCTAssertTrue(note?.contains("will not change the transcript") ?? false,
+                              "\(model.id): the note must state the setting has no "
+                              + "effect, in those words")
+            }
         }
-        // The three that cannot act on it MUST still say so.
-        for id in ["granite", "moss", "moss-diar", "voxtral"] {
-            let note = Languages.noLanguageParameterNote(forModel: id)
-            XCTAssertNotNil(note, "\(id): dropping this note leaves a silent lie")
-            XCTAssertTrue(note?.contains("will not change the transcript") ?? false,
-                          "\(id): the note must state the setting has no effect")
-        }
-        // …and the only two that really use it must NOT carry a warning.
-        for id in ["whisper", "qwen3"] {
-            XCTAssertNil(Languages.noLanguageParameterNote(forModel: id),
-                         "\(id) is one of the two models the setting actually reaches")
-        }
+
+        // The diarization-role MOSS id is not in `chunked` and is checked apart:
+        // it reaches the same picker through `diarizationEngineValue`.
+        XCTAssertNotNil(Languages.noLanguageParameterNote(forModel: "moss-diar"))
     }
 
     /// The choice now travels the WHOLE path rather than being dropped at the

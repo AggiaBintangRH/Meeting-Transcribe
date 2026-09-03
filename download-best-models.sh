@@ -843,6 +843,92 @@ EOF
 [ $? -eq 0 ] || FAILED+=("CAM++ load test — diarization.engine=campplus will not start until this passes")
 
 # -------------------------------------------------------------
+# 3f. CHUNKED ASR 6 — VibeVoice-ASR-Streaming (its own venv, .venv-vibevoice)
+#     microsoft/VibeVoice-ASR-Streaming-1.5B, MIT. Speaker-attributed streaming
+#     ASR: one model emits text AND "who said it". Selectable as
+#     chunked.model = vibevoice. Added 2026-09-02 at the client's request.
+#
+#     ITS OWN INTERPRETER, and like DiCoW's this is a conflict rather than a
+#     preference: VibeVoice pins transformers >=4.51.3,<5.0.0 while the main
+#     .venv needs 5.x for the MLX stack. They can never share one.
+#
+#     THE PACKAGE IS NOT ON PyPI — it is vendored under
+#     scripts/vibevoice-asr/vendor/ and the sidecar puts that folder on sys.path
+#     itself. A pip install from GitHub freezes as a `git+` ref and build.sh
+#     strips those, which is the exact failure that shipped a broken DiCoW to a
+#     client machine on 2026-07-27.
+#
+#     ⚠ MEASURED BEFORE IT WAS WIRED, and recorded so nobody has to rediscover
+#     it: 10.96 GB RSS / 9.8 GB MPS pool, 4.6x realtime, and auto speaker counts
+#     of 3/3 ✓, 4-of-5 ✗ and 1-of-5 ✗ on this project's known-answer fixtures.
+#     It does NOT fit a 16 GB Mac alongside the other sidecars. Installed
+#     because the owner asked for it with that stated.
+# -------------------------------------------------------------
+echo ""
+echo "==> Setting up the VibeVoice ASR runtime venv (.venv-vibevoice)..."
+VV_VENV="$SCRIPT_DIR/.venv-vibevoice"
+VV_PY="$VV_VENV/bin/python3"
+VV_VENDOR="$SCRIPT_DIR/scripts/vibevoice-asr/vendor"
+
+vv_venv_ok() {
+  [ -x "$VV_PY" ] && PYTHONPATH="$VV_VENDOR" "$VV_PY" - <<'EOF' >/dev/null 2>&1
+import transformers
+assert transformers.__version__.startswith("4."), transformers.__version__
+transformers.logging.set_verbosity_error()
+from vibevoice.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
+from vibevoice.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
+EOF
+}
+
+if [ ! -d "$VV_VENDOR/vibevoice" ]; then
+  echo "!! scripts/vibevoice-asr/vendor/vibevoice is missing — it is tracked in"
+  echo "   git; a fresh clone should have it. Nothing to install from."
+  FAILED+=("VibeVoice vendored package")
+elif vv_venv_ok; then
+  echo "   OK: .venv-vibevoice already satisfies transformers 4.x + VibeVoice — skipping"
+else
+  if [ ! -x "$VV_PY" ]; then
+    echo "   creating $VV_VENV ..."
+    python3 -m venv "$VV_VENV" || FAILED+=(".venv-vibevoice creation")
+  fi
+  if [ -x "$VV_VENV/bin/pip" ]; then
+    VV_PIP_LOG="$SCRIPT_DIR/.build-cache/setup-pip-vibevoice.log"
+    mkdir -p "$(dirname "$VV_PIP_LOG")"; : >"$VV_PIP_LOG"
+    vv_pip() {
+      if ! "$VV_VENV/bin/pip" install --progress-bar off "$@" >>"$VV_PIP_LOG" 2>&1; then
+        echo "!! pip install FAILED ($1 …) — last 30 lines of $VV_PIP_LOG:"
+        tail -30 "$VV_PIP_LOG"
+        FAILED+=("VibeVoice venv deps (.venv-vibevoice)")
+        return 1
+      fi
+    }
+    # Upstream's pyproject minus its web stack. `gradio`, `fastapi`, `uvicorn`,
+    # `aiortc` and `av` exist only for the demo server and its WebSocket page —
+    # this app never starts one, and a 100% offline build has no business
+    # carrying an HTTP server it cannot use. The RUNTIME half is complete:
+    # transformers, torch, accelerate, librosa/soundfile/scipy for audio, and
+    # diffusers + ml-collections + absl-py + numba/llvmlite, which the acoustic
+    # tokenizer imports.
+    vv_pip torch torchaudio "transformers==4.51.3" accelerate \
+           librosa soundfile scipy numpy tqdm ml-collections absl-py diffusers \
+           "llvmlite>=0.40.0" "numba>=0.57.0"
+    vv_venv_ok || FAILED+=("VibeVoice venv verification (.venv-vibevoice)")
+  fi
+fi
+
+echo ""
+echo "==> Fetching the VibeVoice checkpoint (microsoft/VibeVoice-ASR-Streaming-1.5B, 5.3 GB)..."
+if [ -x "$VV_PY" ]; then
+  HF_HOME="$HF_HOME" "$VV_PY" - <<'EOF' || FAILED+=("VibeVoice checkpoint")
+# The one moment the network is allowed. HF_HUB_OFFLINE is deliberately NOT set
+# here and IS set by the sidecar at runtime.
+from huggingface_hub import snapshot_download
+p = snapshot_download("microsoft/VibeVoice-ASR-Streaming-1.5B")
+print("   OK:", p)
+EOF
+fi
+
+# -------------------------------------------------------------
 # 4. VAD — Silero VAD v6.2.1 (weights ship inside the pip package)
 # -------------------------------------------------------------
 echo ""

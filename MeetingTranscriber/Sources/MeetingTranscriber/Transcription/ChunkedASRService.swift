@@ -48,6 +48,11 @@ final class ChunkedASRService: @unchecked Sendable {
         /// another model's log. Declared next to the script by the model itself
         /// (`ChunkedASRModel.logName`), so the pair cannot drift.
         let logName: String
+        /// Interpreter for this model's sidecar, nil = the main `.venv`.
+        /// Part of Config (Equatable), so switching to or from VibeVoice
+        /// recreates the process rather than leaving the previous
+        /// interpreter answering for a model it cannot import.
+        let venvName: String?
 
         // Each model's own sidecar, named here so the constants have one home;
         // WHICH one a model uses is declared by the model class, not chosen here.
@@ -309,7 +314,8 @@ final class ChunkedASRService: @unchecked Sendable {
                           // is where "one service per model" is enforced at
                           // compile time (see ChunkedASRModel.scriptName).
                           scriptName: model.scriptName,
-                          logName: model.logName)
+                          logName: model.logName,
+                          venvName: model.venvName)
         }
 
         /// The MOSS sidecar, used purely as the DIARIZATION engine while a
@@ -330,7 +336,11 @@ final class ChunkedASRService: @unchecked Sendable {
                    whisper: nil,
                    qwen3: nil,
                    scriptName: mossDiarScriptName,
-                   logName: "moss-diar")
+                   logName: "moss-diar",
+                   // The main `.venv`, stated rather than left to a default:
+                   // this factory hand-builds a Config and does not go through
+                   // a `ChunkedASRModel`, so nothing else would supply it.
+                   venvName: nil)
         }
     }
 
@@ -359,11 +369,17 @@ final class ChunkedASRService: @unchecked Sendable {
         case scriptMissing(String)
         case launchFailed(String)
         case startupFailed(String)
+        /// A model whose sidecar needs its OWN interpreter, and it is not there.
+        case runtimeMissing(String, String)
 
         var errorDescription: String? {
             switch self {
             case .scriptMissing(let name):
                 return "scripts/\(name) not found in the project folder."
+            case .runtimeMissing(let model, let venv):
+                return "\(model) needs its own Python runtime (\(venv)), and it "
+                    + "is missing. Run ./RUN-SETUP.command — it creates every "
+                    + "interpreter the app needs."
             case .launchFailed(let reason):
                 return "Could not launch chunked ASR sidecar: \(reason)"
             case .startupFailed(let reason):
@@ -441,7 +457,22 @@ final class ChunkedASRService: @unchecked Sendable {
             throw ServiceError.scriptMissing(config.scriptName)
         }
 
-        let command = PythonRuntime.command(forScript: script)
+        // A model with its own interpreter must FIND it. `command(forScript:
+        // venvName:)` returns nil when the venv is absent, and falling back to
+        // the main `.venv` would be the worst outcome available: the sidecar
+        // would launch, import `transformers` 5.x, and fail somewhere inside the
+        // model load with a message about an attribute rather than about a
+        // missing runtime. The DiCoW precedent — it shipped to a client machine
+        // in 2026-07 with exactly that shape.
+        let command: (executable: URL, arguments: [String])
+        if let venv = config.venvName {
+            guard let own = PythonRuntime.command(forScript: script, venvName: venv) else {
+                throw ServiceError.runtimeMissing(config.modelName, venv)
+            }
+            command = own
+        } else {
+            command = PythonRuntime.command(forScript: script)
+        }
         process.executableURL = command.executable
         var arguments = command.arguments + ["--model", config.repoID]
         if config.language != "auto" {

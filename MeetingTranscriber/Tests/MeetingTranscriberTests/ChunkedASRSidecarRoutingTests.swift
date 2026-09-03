@@ -35,6 +35,8 @@ final class ChunkedASRSidecarRoutingTests: XCTestCase {
         ("granite", GraniteSpeechModel(), "granite/granite-service.py", "granite"),
         ("voxtral", VoxtralMiniModel(), "voxtral/voxtral-service.py", "voxtral"),
         ("moss", MossTranscribeDiarizeModel(), "moss-asr/moss-asr-service.py", "moss-asr"),
+        ("vibevoice", VibeVoiceASRModel(),
+         "vibevoice-asr/vibevoice-asr-service.py", "vibevoice-asr"),
     ]
 
     /// The repo's `scripts/` directory, from this file's own path — the app's
@@ -142,5 +144,43 @@ final class ChunkedASRSidecarRoutingTests: XCTestCase {
                 atPath: scriptsDir.appendingPathComponent(script).path),
                           "\(script) does not exist")
         }
+    }
+}
+
+// MARK: - The one model with its own interpreter
+
+extension ChunkedASRSidecarRoutingTests {
+
+    /// VibeVoice is the ONLY chunked model that does not run in the main `.venv`,
+    /// and the asymmetry is a dependency conflict rather than a preference:
+    /// `transformers <5.0` against the MLX stack's 5.x. Both halves are asserted
+    /// together because either alone is satisfiable by a wrong rule — a build
+    /// where every model claimed its own runtime would pass a "VibeVoice has
+    /// one" check, and a build where none did would pass "the others do not".
+    func testOnlyVibeVoiceRunsInItsOwnInterpreter() {
+        XCTAssertEqual(VibeVoiceASRModel().venvName, ".venv-vibevoice",
+                       "VibeVoice needs transformers <5.0 and cannot share the "
+                       + "main .venv with the MLX stack")
+        for model: any ChunkedASRModel in [Qwen3ASRModel(), WhisperLargeV3Model(),
+                                           VoxtralMiniModel(), GraniteSpeechModel(),
+                                           MossTranscribeDiarizeModel()] {
+            XCTAssertNil(model.venvName,
+                         "\(model.info.id) must run in the main .venv — a second "
+                         + "interpreter costs ~1.2 GB in the bundle and is only "
+                         + "justified by a conflict that cannot be resolved")
+        }
+    }
+
+    /// The catalog entry must be VibeVoice's own. `chunkedModel(id:)` falls back
+    /// to `chunked[0]` for an unknown id, so a missing entry does not fail to
+    /// compile — it silently hands VibeVoice Qwen3's name, badges and repo, and
+    /// the sidecar would then be launched with `--model` pointing at Qwen3's
+    /// weights. Caught exactly this way while wiring it on 2026-09-02.
+    func testVibeVoiceHasItsOwnCatalogEntryRatherThanTheFallback() {
+        let info = VibeVoiceASRModel().info
+        XCTAssertEqual(info.id, "vibevoice")
+        XCTAssertEqual(info.hfRepo, "microsoft/VibeVoice-ASR-Streaming-1.5B")
+        XCTAssertNotEqual(info.id, ModelCatalog.chunked[0].id,
+                          "this is the fallback entry, not VibeVoice's own")
     }
 }

@@ -124,3 +124,8 @@ logs/
 # reason /.venv-nemo is: it was untracked-but-not-ignored, and one `git add -A`
 # committed 46 files of it on 2026-08-13 (7806f274d).
 /numba-cache
+
+# The VibeVoice runtime — transformers <5.0, a hard conflict with the MLX stack
+# in the main .venv (which needs 5.x). Same reason .venv-dicow exists. Listed
+# explicitly because `.venv/` above is an exact directory name, not a prefix.
+/.venv-vibevoice

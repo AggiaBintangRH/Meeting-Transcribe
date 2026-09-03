@@ -5735,6 +5735,14 @@ def run_layout(rep: Report, ctx):
         # apapun"). `ModelLoader.unloadAll()` names each service individually
         # because they are distinct types and cannot be looped over.
         #
+        # ⚠ NAMED `live_services`, NOT `services`. `run_layout` already holds a
+        # `services` from `service_layout()` — the folder-per-service map that
+        # `layout/log-name-matches-folder` counts in its own message. Reusing the
+        # name here overwrote it, and that check went on reporting "13/13" for a
+        # population of 21 while still passing, because its verdict is computed
+        # earlier than its message. A check that passes while printing a false
+        # population is the same defect this file spent 2026-08-26 removing.
+        #
         # ⚠ A HAND-WRITTEN LIST BESIDE A DERIVED TRUTH IS THE SHAPE THIS PROJECT
         # KEEPS RECORDING, most recently on 2026-08-26 when the MPS-fuse pin named
         # five files and seven carried a fuse. It only ever drifts one way — it
@@ -5759,13 +5767,13 @@ def run_layout(rep: Report, ctx):
             rest = body[m.end():]
             end = _re.search(r"\n    (?:@|/|func |var |let |private |static )", rest)
             fn_body = rest[:end.start()] if end else rest
-            services = sorted(set(_re.findall(r"(\w+)\?\.terminate\(\)", body)))
-            if len(services) < 13:
-                problems.append(f"only {len(services)} service(s) are terminated "
+            live_services = sorted(set(_re.findall(r"(\w+)\?\.terminate\(\)", body)))
+            if len(live_services) < 13:
+                problems.append(f"only {len(live_services)} service(s) are terminated "
                                 "anywhere in ModelLoader — this check discovers "
                                 "them by that call, so a shrinking population "
                                 "would silently shrink what it verifies")
-            for name in services:
+            for name in live_services:
                 if f"{name}?.terminate()" not in fn_body:
                     problems.append(f"`{name}` is a live process that unloadAll "
                                     "never stops — it survives the meeting")
