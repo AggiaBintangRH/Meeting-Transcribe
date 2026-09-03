@@ -214,6 +214,11 @@ final class ModelLoader: ObservableObject {
     /// `diarization.engine` is `campplus`.
     private(set) var camPlus: CamPlusService?
 
+    /// The VibeVoice engine's sidecar. The ONLY diarization engine with its own
+    /// interpreter (`.venv-vibevoice`): transformers <5.0 against the MLX
+    /// stack's 5.x. Persistent; nil unless `diarization.engine` is `vibevoice`.
+    private(set) var vibeVoiceDiar: VibeVoiceDiarizationService?
+
     /// Speaker-identity sidecar (WeSpeaker + the two profile stores); persistent.
     /// The other half of the former `diarize-service.py`.
     ///
@@ -304,6 +309,7 @@ final class ModelLoader: ObservableObject {
     /// The CAM++ diarization engine id — the sixth engine (2026-08-11). Same
     /// string as its catalog id, like every engine except MOSS.
     nonisolated static let camPlusEngineID = "campplus"
+ nonisolated static let vibeVoiceEngineID = "vibevoice"
 
     /// Whether this session loads the forced aligner.
     ///
@@ -469,6 +475,8 @@ final class ModelLoader: ObservableObject {
             return .diarizen
         case camPlusEngineID:
             return .camPlus
+        case vibeVoiceEngineID:
+            return .vibeVoiceDiar
         default:
             // An UNKNOWN stored value still resolves to pyannote, which is what
             // `diarizationEngine(forEngine:)` shows and what the recorder's
@@ -488,6 +496,7 @@ final class ModelLoader: ObservableObject {
         case nemo               // nemo-service (.venv-nemo) + wespeaker-service
         case diarizen           // diarizen-service (.venv-diarizen) + wespeaker-service
         case camPlus            // campplus-service (main .venv) + wespeaker-service
+        case vibeVoiceDiar      // vibevoice-diar-service (.venv-vibevoice) + wespeaker
         case mossSecondProcess  // a second MOSS process, ASR done by another model
         case mossOwnASR         // MOSS is ALSO the chunked model — no second
                                 // process to load, but identity is still wanted
@@ -571,8 +580,14 @@ final class ModelLoader: ObservableObject {
         // engine mark its own overlap" has the same answer for pyannote and
         // DiariZen but different verdicts, so deriving one from the other would
         // silently move pyannote the next time someone tidies this.
+        // VibeVoice joins this set too, and again STRUCTURALLY rather than by
+        // resemblance to the other whole-file engines: its spans are cut on the
+        // chunk grid and then merged by label, so two speakers can never hold one
+        // instant and `overlapRegions()` is empty under it whatever the audio
+        // does. It is speaker-attributed ASR like MOSS and lands with MOSS.
         if diarEngine == mossEngineID || diarEngine == spectralEngineID
-            || diarEngine == nemoEngineID || diarEngine == camPlusEngineID {
+            || diarEngine == nemoEngineID || diarEngine == camPlusEngineID
+            || diarEngine == vibeVoiceEngineID {
             guard detectEnabled else { return nil }
         }
         return engineID
@@ -801,6 +816,7 @@ final class ModelLoader: ObservableObject {
         nemo?.terminate();             nemo = nil
         diarizen?.terminate();         diarizen = nil
         camPlus?.terminate();          camPlus = nil
+        vibeVoiceDiar?.terminate();    vibeVoiceDiar = nil
         embedding?.terminate();        embedding = nil
         mossDiarization?.terminate();  mossDiarization = nil
         overlapRepair?.terminate();    overlapRepair = nil
@@ -915,6 +931,11 @@ final class ModelLoader: ObservableObject {
         // being loaded by a switch and stopped by nothing (1.70 GB resident until
         // quit). CAM++ is the smallest of them (66 MB of weights plus torch), but
         // "small" is not a reason to be the one service without a teardown.
+        if wantedDiar != .vibeVoiceDiar, vibeVoiceDiar != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.vibeVoiceEngineID).name)
+            vibeVoiceDiar?.terminate()
+            vibeVoiceDiar = nil
+        }
         if wantedDiar != .camPlus, camPlus != nil {
             noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.camPlusEngineID).name)
             camPlus?.terminate()
@@ -1132,6 +1153,13 @@ final class ModelLoader: ObservableObject {
             // orders its steps differently is a difference someone has to explain.
             steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
             steps.append(Step(model: ModelCatalog.camPlusDiarization, checkInstalled: true))
+        case .vibeVoiceDiar:
+            // Embedder first, as every pipeline engine does — and here the
+            // ordering genuinely buys something: 26 MB against 5.6 GB, so a
+            // missing embedder is reported in seconds rather than after the
+            // slowest model load in the app.
+            steps.append(Step(model: ModelCatalog.speakerEmbedding, checkInstalled: true))
+            steps.append(Step(model: ModelCatalog.vibeVoiceDiarization, checkInstalled: true))
         case .pyannote:
             // TWO steps for the pyannote engine since the 2026-07-30 split: the
             // embedder and the pipeline are separate processes now, and the
@@ -1342,6 +1370,23 @@ final class ModelLoader: ObservableObject {
         // Fatal on failure for the same reason as every other diarization stack
         // member: no live path, so a broken sidecar surfaces as a meeting with no
         // speakers at all, at Stop, with nothing left to re-run.
+        // Diarization: start the persistent VIBEVOICE sidecar, in its OWN
+        // `.venv-vibevoice`. Fatal on failure like every other stack member, and
+        // here the failure is more likely than most: 5.6 GB onto MPS, ~5 s, in an
+        // interpreter that exists only for this engine.
+        if step.model.id == ModelCatalog.vibeVoiceDiarization.id {
+            let config = VibeVoiceDiarizationService.Config.fromSettings()
+            if let existing = vibeVoiceDiar, existing.config == config {
+                return
+            }
+            vibeVoiceDiar?.terminate()
+            vibeVoiceDiar = nil
+            vibeVoiceDiar = try await Task.detached(priority: .userInitiated) {
+                try VibeVoiceDiarizationService(config: config)
+            }.value
+            return
+        }
+
         if step.model.id == ModelCatalog.camPlusDiarization.id {
             let config = CamPlusService.Config.fromSettings()
             if let existing = camPlus, existing.config == config {

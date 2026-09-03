@@ -5766,8 +5766,20 @@ def run_layout(rep: Report, ctx):
                     return parts
             return None
 
-        roles = ["vibevoice-asr/vibevoice-asr-service.py",
-                 "vibevoice-rt/vibevoice-rt-service.py"]
+        # ⚠ DISCOVERED, NOT LISTED — and this line was a hand-written pair for
+        # about an hour, during which a THIRD role (vibevoice-diar) was added and
+        # the check went on reporting "both … byte-identical" about two of three.
+        # The population is every service folder that carries a vendored copy, so
+        # a fourth role is covered the day it is written.
+        roles = sorted(f"{d.name}/{d.name}-service.py"
+                       for d in SCRIPTS.iterdir()
+                       if d.is_dir() and d.name.startswith("vibevoice-")
+                       and (d / "vendor" / "vibevoice").is_dir())
+        if len(roles) < 2:
+            problems.append(f"only {len(roles)} VibeVoice service(s) carry a "
+                            "vendored tree — this check discovers them by that "
+                            "folder, so a shrinking population would silently "
+                            "shrink what it verifies")
         for rel in roles:
             parts = inserted_path_parts(rel)
             if parts is None:
@@ -5798,9 +5810,9 @@ def run_layout(rep: Report, ctx):
                                 "one role would run different model code from the "
                                 "other, silently")
         rep.expect(cid, not problems,
-                   "both VibeVoice services carry their own vendored package, "
-                   "byte-identical to each other, and each puts its OWN copy on "
-                   "sys.path",
+                   f"all {len(roles)} VibeVoice services carry their own vendored "
+                   "package, byte-identical to each other, and each puts its OWN "
+                   "copy on sys.path",
                    "; ".join(problems))
 
     cid = "layout/every-service-is-unloaded-at-stop"

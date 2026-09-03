@@ -75,13 +75,21 @@ struct DiarizationTab: View {
     /// CAM++, the sixth engine (2026-08-11). Same SPECTRAL shape again — no live
     /// pass, one whole-file pass at Stop, no tail — so it joins the batch group.
     private var isCamPlus: Bool { engine == ModelLoader.camPlusEngineID }
+    /// VibeVoice, the seventh engine (2026-09-02). SPECTRAL SHAPE in every way
+    /// the shared controls care about — no live pass, one whole-file pass at
+    /// Stop, no tail — so it joins the batch group. It is speaker-attributed ASR
+    /// like MOSS, but it does NOT take MOSS's branch: MOSS's advice is about
+    /// chunk length, and this engine reads no chunk setting at all.
+    private var isVibeVoice: Bool { engine == ModelLoader.vibeVoiceEngineID }
     /// The two WHOLE-FILE BATCH engines. Shared pyannote controls apply to
     /// neither: there is no live pass to time, no live labels for a tail to
     /// continue from, and the stop pass is not optional — it IS the labels.
     /// `runsBatchOfficePass` reads none of the three, so hiding them here is not
     /// hiding something still in force; it is the UI agreeing with a rule that
     /// already ignores them.
-    private var isBatchEngine: Bool { isSpectral || isNemo || isDiarizen || isCamPlus }
+    private var isBatchEngine: Bool {
+        isSpectral || isNemo || isDiarizen || isCamPlus || isVibeVoice
+    }
 
     /// The first two lines of every whole-file engine's note, DERIVED from the
     /// settings actually in force.
@@ -273,6 +281,24 @@ struct DiarizationTab: View {
                 // this comment, where the next maintainer needs them and the client
                 // does not. Do not grow it back.
                 Text(batchEngineNote)
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if isVibeVoice {
+                // ITS OWN BRANCH, for the reason CAM++'s and DiariZen's exist:
+                // without one it falls through to the `else` and hands the user
+                // MOSS's advice about chunk length, which this engine does not
+                // read. What it needs said instead is the thing no other engine
+                // here has to say — the SPK control does nothing under it.
+                Text(batchEngineNote)
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("The speaker count beside the record button has no effect "
+                     + "here: this model has no such parameter, so the count is "
+                     + "always automatic. It also transcribes as it labels, so "
+                     + "its turn boundaries fall on a ~2.9 s grid rather than on "
+                     + "the word.")
                     .font(.system(size: 11))
                     .foregroundColor(Theme.textFaint)
                     .fixedSize(horizontal: false, vertical: true)

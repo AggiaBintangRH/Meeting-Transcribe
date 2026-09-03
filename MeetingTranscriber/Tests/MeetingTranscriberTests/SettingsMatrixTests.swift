@@ -21,11 +21,16 @@ import XCTest
 /// here is agreement in the app.
 final class SettingsMatrixTests: XCTestCase {
 
-    private let chunkedIDs = ["qwen3", "whisper", "granite", "voxtral", "moss"]
+    /// ⚠ BOTH DERIVED FROM THE CATALOG, not listed. They were hand-written until
+    /// 2026-09-02, when a seventh diarization engine and a sixth chunked model
+    /// were added and the 1920-configuration sweep went on sweeping the old six
+    /// and five — saying nothing at all about the new ones while staying green.
+    /// A list beside a catalog only ever drifts one way, and this file exists
+    /// precisely to ask whether the rules AGREE about a configuration; a
+    /// configuration it never visits is one it cannot answer for.
+    private var chunkedIDs: [String] { ModelCatalog.chunked.map(\.id) }
     private var engines: [String] {
-        [ModelLoader.pyannoteEngineID, ModelLoader.spectralEngineID,
-         ModelLoader.nemoEngineID, ModelLoader.diarizenEngineID,
-         ModelLoader.camPlusEngineID, ModelLoader.mossEngineID]
+        ModelCatalog.diarizationEngines.map(ModelCatalog.diarizationEngineValue)
     }
 
     /// One point of the matrix, and everything the rules say about it.
@@ -77,8 +82,11 @@ final class SettingsMatrixTests: XCTestCase {
     func testTheMatrixIsTheSizeItClaims() {
         var n = 0
         sweep { _ in n += 1 }
-        // 5 chunked models x SIX engines (CAM++ joined 2026-08-11) x six flags.
-        XCTAssertEqual(n, 5 * 6 * 2 * 2 * 2 * 2 * 2 * 2)
+        // Chunked models x engines x six boolean flags, both counts DERIVED from
+        // the catalog like the lists they sweep. A literal here would have to be
+        // edited every time a model or engine lands, and forgetting is silent —
+        // the assertion still passes for the OLD size while the sweep visits more.
+        XCTAssertEqual(n, chunkedIDs.count * engines.count * 2 * 2 * 2 * 2 * 2 * 2)
     }
 
     // MARK: - 1. Nothing is loaded that has nothing to do
@@ -214,7 +222,8 @@ final class SettingsMatrixTests: XCTestCase {
             .map { ModelCatalog.diarizationEngineValue($0) }
             .filter { $0 != ModelLoader.mossEngineID }
 
-        XCTAssertEqual(expected.count, 5, "five non-MOSS engines today — if this "
+        XCTAssertEqual(expected.count, ModelCatalog.diarizationEngines.count - 1,
+                       "every engine but MOSS — if this "
                        + "changes, the count below is what proves the sentence kept up")
         for value in expected {
             let name = ModelCatalog.diarizationEngineShortName(value) ?? "?"
@@ -246,6 +255,7 @@ final class SettingsMatrixTests: XCTestCase {
             r.nemoDiarizationActive = value == ModelLoader.nemoEngineID
             r.camPlusDiarizationActive = value == ModelLoader.camPlusEngineID
             r.diarizenDiarizationActive = value == ModelLoader.diarizenEngineID
+            r.vibeVoiceDiarizationActive = value == ModelLoader.vibeVoiceEngineID
 
             XCTAssertEqual(r.usesDetectedRegionsForRepair,
                            !ModelLoader.marksItsOwnOverlap(diarEngine: value),
@@ -261,8 +271,11 @@ final class SettingsMatrixTests: XCTestCase {
             .map { ModelCatalog.diarizationEngineValue($0) }
             .filter { !ModelLoader.marksItsOwnOverlap(diarEngine: $0) }
 
-        XCTAssertEqual(expected.count, 4,
-                       "four engines cannot mark their own overlap today")
+        // DERIVED: everything except the two that mark their own overlap
+        // (pyannote and DiariZen). A literal was 4 until VibeVoice landed and
+        // would have needed hand-editing for every engine after it.
+        XCTAssertEqual(expected.count, ModelCatalog.diarizationEngines.count - 2,
+                       "every engine but pyannote and DiariZen cannot mark overlap")
         for value in expected {
             let name = ModelCatalog.diarizationEngineShortName(value) ?? "?"
             XCTAssertTrue(sentence.contains(name),

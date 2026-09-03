@@ -148,6 +148,7 @@ struct SettingsView: View {
             // engine instead of the rail quietly naming the wrong one.
             case .pyannote:          return ("pyannote", false)
             case .spectral:          return ("spectral", false)
+            case .vibeVoiceDiar:     return ("VibeVoice", false)
             case .nemo:              return ("NeMo", false)
             case .diarizen:          return ("DiariZen", false)
             case .camPlus:           return ("CAM++", false)

@@ -1140,7 +1140,7 @@ fi
 # not shared: either service pointing its sys.path at the other's folder works
 # today and breaks the day that folder moves — the trap the MOSS split recorded
 # in 2026-07 and the reason `moss/asr-vendor-is-own-and-identical` exists.
-for role in vibevoice-asr vibevoice-rt; do
+for role in vibevoice-asr vibevoice-rt vibevoice-diar; do
   if [[ ! -d "$ROOT/scripts/$role/vendor/vibevoice" ]]; then
     echo "ERROR: scripts/$role/vendor/vibevoice is missing." >&2
     echo "       The package is not on PyPI; this tree is the only source the" >&2
