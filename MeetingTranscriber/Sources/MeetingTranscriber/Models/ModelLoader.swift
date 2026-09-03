@@ -747,7 +747,6 @@ final class ModelLoader: ObservableObject {
         return !chunkedEnabled || chunkedID != "moss"
     }
 
-    /// Load everything the session needs. Returns true if all succeeded.
     /// Stop every sidecar and drop every reference — the app holds no model
     /// process afterwards (owner, 2026-09-02: "pas stop selesai semua di unload
     /// model modelnya jadi gak akan ada proses apapun").
@@ -813,6 +812,7 @@ final class ModelLoader: ObservableObject {
         sileroVAD = nil
     }
 
+    /// Load everything the session needs. Returns true if all succeeded.
     func loadAll() async -> Bool {
         isLoading = true
         failureMessage = nil

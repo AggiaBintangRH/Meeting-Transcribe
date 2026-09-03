@@ -128,7 +128,7 @@ def _mps_cap_gb(fallback: float = 32.0) -> float:
 
         MPS memory capped at 32 GB of the 11.8 GB macOS reports as available
 
-    ⚠ AND WHY THE FLOOR OF 10, which is the half of this that was LEARNED THE
+    ⚠ AND WHY THE FLOOR OF 12, which is the half of this that was LEARNED THE
     HARD WAY. "Half the physical RAM" alone is a rule calibrated on a 64 GB
     machine, and it does not survive being scaled down. It leaves 19.8 GB of
     macOS's 51.8 GB recommendation spare at 64 GB, but only 3.8 GB of 11.8 at
@@ -142,19 +142,32 @@ def _mps_cap_gb(fallback: float = 32.0) -> float:
     stricter than the operating system and broke working functionality. That is
     the over-deletion direction this project ranks worst, in a new costume.
 
-    The floor is 10.0 rather than a proportion because the number that matters is
-    absolute: it must clear NeMo's measured 8.23 GB with margin, and stay under
-    MOSS's measured 18.35 GB pool so the engine that actually took a Mac down on
-    2026-08-21 is still refused. It changes NOTHING on a machine of 20 GB or more
-    — this 64 GB M4 still gets exactly 32.0.
+    The floor is 12.0 rather than a proportion because the number that matters is
+    absolute, and it was chosen for what it DOES rather than for what it is: macOS
+    reports ~11.8 GB as the client Mac's ceiling, so a 12 GB cap makes
+    `min(CAP / ceiling, 1.0)` clamp to 1.0 and NOTHING THERE IS EVER REFUSED. That
+    is the owner's decision, 2026-08-26: "jangan ada yang di blokir harus bisa
+    digunakan semuanya / untuk hang ngelag sekarang harus terlihat oleh Boss."
+    Every engine stays selectable, and a slowdown is wanted as evidence for a
+    hardware budget rather than hidden behind a refusal.
 
-    ⚠ THE COST, owner-accepted with it stated (2026-08-26): 10 GB of MPS pool plus
-    ~4 GB of other sidecars plus macOS is tight on a 16 GB machine, so a long NeMo
-    meeting may still fail — its peak is 13.33 GB at 67 minutes — or the machine
-    may slow down. The owner asked for exactly this: let it run, and let the lag be
-    the evidence for a hardware upgrade rather than an invisible refusal. The
-    failure stays BOUNDED either way, which is the whole point: PyTorch raises at
-    the cap instead of growing without limit.
+    It changes NOTHING on a machine of 24 GB or more, where half is already at or
+    above the floor — this 64 GB M4 still gets exactly 32.0, fraction 0.62, a real
+    fuse. The floor only binds between 8 and 24 GB.
+
+    ⚠ THIS IS THE SAME ARITHMETIC AS THE DEFECT ABOVE, ON PURPOSE, AND ONE THING
+    KEEPS IT HONEST. `32.0` was inert on a 16 GB Mac by ACCIDENT while logging
+    "capped at 32 GB" — a claim it could not keep. `12.0` is inert there by
+    DECISION, and the arming site prints `WARNING MPS fuse NOT ARMED` instead of
+    claiming a cap it does not have. A silent inert fuse is a lie; a declared one
+    is a trade-off, and `layout/mps-fuse-is-sized-to-the-machine` asserts that
+    branch exists.
+
+    ⚠ THE COST, owner-accepted with it stated: on a 16 GB machine nothing here
+    refuses anything, so a long NeMo pass (peak 13.33 GB at 67 minutes) can drive
+    that Mac into swap rather than failing fast. MOSS is still out of reach there,
+    but by the HARDWARE ceiling of 11.8 GB rather than by this cap — the block
+    moved, it did not disappear.
 
     `sysconf` rather than `torch.mps.recommended_max_memory()` because this is a
     module-level constant and torch is not imported yet in every service that
