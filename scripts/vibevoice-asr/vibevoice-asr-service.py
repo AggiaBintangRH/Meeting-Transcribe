@@ -101,6 +101,18 @@ MIN_CHUNK_SEC = 1.0
 #: `Speaker 12:` at the start of a run, however the model spaces it.
 SPEAKER_LABEL_RE = re.compile(r"\s*Speaker\s*\d+\s*:\s*", re.IGNORECASE)
 
+#: `[Silence]` — the model's own annotation for a stretch with no speech. It is
+#: GENERATED TEXT, not a special token: upstream strips only `<|…|>` markers, so
+#: this one survives into the transcript.
+#:
+#: ⚠ ONE MARKER, BECAUSE ONE IS WHAT WAS OBSERVED. Measured 2026-09-02: 20 s of
+#: digital silence produced 63 characters that were nothing but `[Silence]`, and
+#: a 98 s real recording produced NONE at all. `[Music]`, `[Noise]` and the rest
+#: are not in this pattern because this model has never been seen to emit them —
+#: the same rule the hallucination gates follow, and for the same reason: a
+#: pattern guarding an unobserved case can only delete real text.
+SILENCE_MARKER_RE = re.compile(r"\s*\[Silence\]\s*", re.IGNORECASE)
+
 
 def strip_speaker_labels(text: str) -> str:
     """Remove the model's own `Speaker N:` prefixes from transcript text.
@@ -123,8 +135,21 @@ def strip_speaker_labels(text: str) -> str:
 
     A run boundary becomes a single space rather than nothing, so two speakers'
     sentences do not fuse into one word.
+
+    ⚠ `[Silence]` GOES TOO, and a chunk that was ONLY silence therefore returns
+    the EMPTY STRING — which is what stops it becoming a transcript row at all.
+    Owner, 2026-09-02, from a real transcript that had rows reading
+    `[Silence][Silence][Silence]…`. Every other ASR sidecar here returns "" for a
+    silent chunk; this makes VibeVoice behave the same way rather than narrating
+    the silence.
+
+    ⚠ NOT A HALLUCINATION GATE, and the difference matters. The gates in the
+    Whisper and mlx-audio services decide whether MODEL-INVENTED WORDS are real
+    speech, and they are dangerous because they can delete a genuine sentence.
+    This deletes a literal annotation the model prints instead of words — there
+    is no sentence it could take with it.
     """
-    return SPEAKER_LABEL_RE.sub(" ", text).strip()
+    return SILENCE_MARKER_RE.sub(" ", SPEAKER_LABEL_RE.sub(" ", text)).strip()
 
 
 def log(message: str) -> None:

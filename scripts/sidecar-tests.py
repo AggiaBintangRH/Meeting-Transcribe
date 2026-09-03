@@ -5888,6 +5888,21 @@ def run_layout(rep: Report, ctx):
             ("Speaker 12:Twelve speaks.", "Twelve speaks."),
             ("Speaker  7 : odd spacing.", "odd spacing."),
             ("", ""),
+            # `[Silence]` — the model's own annotation for a stretch with no
+            # speech, reported by the owner as rows reading
+            # "[Silence][Silence][Silence]…". A chunk that was ONLY silence must
+            # come back EMPTY, which is what stops it becoming a row at all.
+            ("[Silence][Silence][Silence][Silence]", ""),
+            (" Speaker 0:[Silence][Silence] ", ""),
+            ("Speaker 0:Hello there.[Silence][Silence]", "Hello there."),
+            ("Speaker 0:Part one.[Silence]Speaker 1:Part two.",
+             "Part one. Part two."),
+            # ⚠ THE FALSE-POSITIVE CASE, and the reason the pattern is bracketed
+            # rather than a bare word: "silence" is an ordinary English word and a
+            # meeting may well contain it. Only the model's `[Silence]` annotation
+            # goes.
+            ("Speaker 0:We need silence in the library.",
+             "We need silence in the library."),
         ]
         roles = sorted(d.name for d in SCRIPTS.iterdir()
                        if d.is_dir() and d.name.startswith("vibevoice-"))
@@ -5897,7 +5912,8 @@ def run_layout(rep: Report, ctx):
             path = SCRIPTS / role / f"{role}-service.py"
             src = path.read_text()
             ns = {"re": __import__("re")}
-            wanted = {"SPEAKER_LABEL_RE", "strip_speaker_labels"}
+            wanted = {"SPEAKER_LABEL_RE", "SILENCE_MARKER_RE",
+                      "strip_speaker_labels"}
             for node in _ast.parse(src).body:
                 named = (getattr(node, "name", None)
                          or (getattr(node.targets[0], "id", None)
@@ -5920,7 +5936,9 @@ def run_layout(rep: Report, ctx):
                                 "to the emitted text")
         rep.expect(cid, not problems,
                    f"both VibeVoice ASR services strip the model's own speaker "
-                   f"labels from the text they emit ({len(cases)} cases each)",
+                   f"labels and [Silence] annotations from the text they emit "
+                   f"({len(cases)} cases each, including the word 'silence' in "
+                   f"real speech surviving)",
                    "; ".join(problems))
 
     cid = "layout/vibevoice-services-accept-a-repo-id"
