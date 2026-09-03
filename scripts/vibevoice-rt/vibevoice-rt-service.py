@@ -100,6 +100,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import sys
 import time
@@ -133,6 +134,35 @@ SR = 16_000
 #: — the KV cache advances per window, so a long utterance is not re-transcribed
 #: — it bounds the memory a lane can hold if FLUSH never arrives.
 MAX_BUFFER = 60 * SR
+
+
+#: `Speaker 12:` at the start of a run, however the model spaces it.
+SPEAKER_LABEL_RE = re.compile(r"\s*Speaker\s*\d+\s*:\s*", re.IGNORECASE)
+
+
+def strip_speaker_labels(text: str) -> str:
+    """Remove the model's own `Speaker N:` prefixes from transcript text.
+
+    ⚠ THIS MODEL IS SPEAKER-ATTRIBUTED ASR AND WE USE IT AS ASR ONLY. Its
+    diarization role was built and withdrawn on 2026-09-02 (see CLAUDE.md — it
+    could not reproduce its own speaker count), so the row's speaker comes from
+    the real diarizer, and the label inside the text is a SECOND naming of the
+    same row that agrees with nothing:
+
+        SPEAKER 5 · 01:24–01:28
+        Speaker 0:Can help out with the low cost.     <- two names, one row
+
+    Owner, 2026-09-02: "remove the speaker nya".
+
+    ⚠ THE LABELS ARE NOT DISCARDED SILENTLY — they were never used. Nothing
+    downstream reads them: `ChunkedASRService` decodes `text` and the aligner
+    splits it into words. Stripping here means the wire carries what every other
+    ASR sidecar's does, which is what makes VibeVoice interchangeable with them.
+
+    A run boundary becomes a single space rather than nothing, so two speakers'
+    sentences do not fuse into one word.
+    """
+    return SPEAKER_LABEL_RE.sub(" ", text).strip()
 
 
 def log(message: str) -> None:
@@ -335,11 +365,13 @@ def main() -> None:
         if lane.buffer.size > MAX_BUFFER:
             lane.buffer = lane.buffer[-MAX_BUFFER:]
         if drain(lane, flush=False):
-            emit("partial", "".join(lane.texts).strip(), remote=lane.remote)
+            emit("partial", strip_speaker_labels("".join(lane.texts)),
+                 remote=lane.remote)
 
     def flush(lane: Lane) -> None:
         drain(lane, flush=True)
-        emit("final", "".join(lane.texts).strip(), remote=lane.remote)
+        emit("final", strip_speaker_labels("".join(lane.texts)),
+             remote=lane.remote)
         lane.reset()
 
     while True:

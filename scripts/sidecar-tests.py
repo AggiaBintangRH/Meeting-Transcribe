@@ -5179,6 +5179,12 @@ LAYOUT_CHECKS = [
     "layout/the-overwriting-migration-runs-once",
     "layout/shipped-defaults-have-one-source",
     "layout/mps-fuse-is-sized-to-the-machine",
+    "layout/the-check-list-lists-every-check",
+    "layout/every-service-is-unloaded-at-stop",
+    "layout/the-beam-is-not-gated-on-our-vad",
+    "layout/vibevoice-vendor-trees-are-own-and-identical",
+    "layout/vibevoice-services-accept-a-repo-id",
+    "layout/vibevoice-asr-text-carries-no-speaker-labels",
 ]
 
 # Direct children of scripts/ that legitimately hold no *-service.py. Each carries
@@ -5728,6 +5734,45 @@ def run_layout(rep: Report, ctx):
                    f"and fall back to 32.0 if the query fails",
                    "; ".join(problems))
 
+    cid = "layout/the-check-list-lists-every-check"
+    if ctx.wants(cid):
+        # LAYOUT_CHECKS DECIDES WHETHER THIS GROUP RUNS AT ALL, and it is a
+        # hand-written list of the ids `run_layout` uses. Five checks added on
+        # 2026-08-26 and 2026-09-02 were never added to it: they still executed
+        # under `--only layout` (the pattern matches their ids once the group is
+        # selected by ANOTHER id), but they were absent from `--list`, and
+        # selecting one BY NAME chose no group and verified nothing.
+        #
+        # The population is derived from the source: every check id assigned in
+        # this file is one this group runs, and the list must name exactly those.
+        # Both directions matter — an id listed but never run is a promise the
+        # suite does not keep.
+        #
+        # ⚠ COMMENTS ARE STRIPPED FIRST, and this check needed it within a minute
+        # of being written: its own explanation contained the pattern it searches
+        # for, so it reported a check called "layout/…" as unregistered. That is
+        # the self-matching trap this file records for `assert_no_torchcodec_use`
+        # and `layout/tail-window-start-is-recorded-not-derived` — a check whose
+        # subject is its own text must not read its own text.
+        import re as _re
+        src = "\n".join(l for l in pathlib.Path(__file__).read_text().splitlines()
+                        if not l.strip().startswith("#"))
+        start = src.index("LAYOUT_CHECKS = [")
+        listed = set(_re.findall(r'"(layout/[^"]+)"', src[start:src.index("]", start)]))
+        used = set(_re.findall(r'cid = "(layout/[^"]+)"', src))
+        problems = []
+        for cid_missing in sorted(used - listed):
+            problems.append(f"{cid_missing} runs but is not in LAYOUT_CHECKS — it "
+                            "is invisible to --list and selecting it by name runs "
+                            "nothing")
+        for cid_extra in sorted(listed - used):
+            problems.append(f"{cid_extra} is listed but no check uses it — the "
+                            "list promises a check that does not exist")
+        rep.expect(cid, not problems,
+                   f"LAYOUT_CHECKS names exactly the {len(used)} checks this group "
+                   "runs, derived from the source rather than maintained by hand",
+                   "; ".join(problems))
+
     cid = "layout/vibevoice-vendor-trees-are-own-and-identical"
     if ctx.wants(cid):
         # THE SILENT TRAP THE MOSS SPLIT RECORDED, in a second model. Each
@@ -5814,6 +5859,68 @@ def run_layout(rep: Report, ctx):
                    f"all {len(roles)} VibeVoice services carry their own vendored "
                    "package, byte-identical to each other, and each puts its OWN "
                    "copy on sys.path",
+                   "; ".join(problems))
+
+    cid = "layout/vibevoice-asr-text-carries-no-speaker-labels"
+    if ctx.wants(cid):
+        # THE MODEL WRITES `Speaker N:` INTO ITS TRANSCRIPT, and we use it as ASR
+        # only — its diarization role was built and withdrawn on 2026-09-02. The
+        # row's speaker therefore comes from the real diarizer, and a label left
+        # inside the text is a SECOND naming of the same row that agrees with
+        # nothing. Reported by the owner from a real transcript:
+        #
+        #     SPEAKER 5 · 01:24–01:28
+        #     Speaker 0:Can help out with the low cost.
+        #
+        # Driven as a PURE FUNCTION — no model load, milliseconds — because the
+        # thing being pinned is the text transform, and the seven cases below
+        # include the one that matters: a run boundary with no space around it
+        # must not fuse two sentences into one word.
+        import ast as _ast
+        problems = []
+        cases = [
+            (" \n Speaker 0:Hello everyone. \n Speaker 1:Hi there. ",
+             "Hello everyone. Hi there."),
+            ("Speaker 0:End of one.Speaker 1:Start of two.",
+             "End of one. Start of two."),
+            ("Just plain text with no labels.", "Just plain text with no labels."),
+            ("Speaker 3:", ""),
+            ("Speaker 12:Twelve speaks.", "Twelve speaks."),
+            ("Speaker  7 : odd spacing.", "odd spacing."),
+            ("", ""),
+        ]
+        roles = sorted(d.name for d in SCRIPTS.iterdir()
+                       if d.is_dir() and d.name.startswith("vibevoice-"))
+        if len(roles) < 2:
+            problems.append(f"only {len(roles)} VibeVoice service(s) found")
+        for role in roles:
+            path = SCRIPTS / role / f"{role}-service.py"
+            src = path.read_text()
+            ns = {"re": __import__("re")}
+            wanted = {"SPEAKER_LABEL_RE", "strip_speaker_labels"}
+            for node in _ast.parse(src).body:
+                named = (getattr(node, "name", None)
+                         or (getattr(node.targets[0], "id", None)
+                             if isinstance(node, _ast.Assign) else None))
+                if named in wanted:
+                    exec(compile(_ast.Module([node], []), str(path), "exec"), ns)  # noqa: S102
+            fn = ns.get("strip_speaker_labels")
+            if fn is None:
+                problems.append(f"{role} has no strip_speaker_labels — its text "
+                                "would carry the model's own `Speaker N:` beside "
+                                "the row's real speaker")
+                continue
+            for raw, want in cases:
+                got = fn(raw)
+                if got != want:
+                    problems.append(f"{role}: {raw!r} -> {got!r}, expected {want!r}")
+            # …and it must actually be CALLED on what goes out on the wire.
+            if "strip_speaker_labels(" not in src.split("def strip_speaker_labels")[-1]:
+                problems.append(f"{role} defines the stripper but never applies it "
+                                "to the emitted text")
+        rep.expect(cid, not problems,
+                   f"both VibeVoice ASR services strip the model's own speaker "
+                   f"labels from the text they emit ({len(cases)} cases each)",
                    "; ".join(problems))
 
     cid = "layout/vibevoice-services-accept-a-repo-id"
@@ -7299,6 +7406,7 @@ def resolve_fixtures(args):
 class Context:
     def __init__(self, args, tmp):
         self.only = args.only
+        self.matched_filters: set = set()
         self.tmp = tmp
         self.chunked_model = args.chunked_model
         self.clip_sec = args.clip_sec
@@ -7352,7 +7460,27 @@ class Context:
     def wants(self, check_id: str) -> bool:
         if not self.only:
             return True
-        return any(pattern in check_id for pattern in self.only)
+        matched = [p for p in self.only if p in check_id]
+        # Remember what actually matched something, so `main` can refuse a filter
+        # that matched NOTHING. See `unmatched_filters`.
+        self.matched_filters.update(matched)
+        return bool(matched)
+
+    @property
+    def unmatched_filters(self) -> list:
+        """`--only` patterns that never matched a single check id.
+
+        ⚠ A FILTER THAT MATCHES NOTHING USED TO RUN NOTHING AND EXIT 0, and that
+        is a check suite reporting success for work it did not do. It bit twice on
+        2026-09-02 alone: a check registered under a `vibevoice/` id while living
+        in `run_layout` (which only executes for the `layout` group) ran zero
+        times and printed "1 passed" — the always-on `safety/` check — and was
+        read as green. The same shape had already been designed around in
+        `build.sh`'s layout gate hours earlier, by counting `layout/` ids rather
+        than trusting the exit code; this closes it at the source instead, for
+        every caller.
+        """
+        return sorted(set(self.only or []) - self.matched_filters)
 
 
 def main() -> int:
@@ -7439,6 +7567,23 @@ def main() -> int:
         rep.fail("safety/real-profiles-untouched",
                  f"REAL SPEAKER PROFILES WERE MODIFIED: {changed}")
 
+    # ⚠ A FILTER THAT MATCHED NOTHING IS A FAILURE, NOT AN EMPTY RUN. Without
+    # this, `--only layuot` (or a check registered under a group that has no
+    # runner) executes zero checks and exits 0 — a suite reporting success for
+    # work it never did. Both happened on 2026-09-02.
+    if ctx.unmatched_filters:
+        print()
+        print("=" * 72)
+        for pattern in ctx.unmatched_filters:
+            print(f"ERROR: --only {pattern!r} matched no check id. Nothing was "
+                  f"verified for it.")
+        print("       Run --list to see the ids, and remember a check's GROUP "
+              "must have a")
+        print("       runner in GROUPS: an id whose prefix has none never "
+              "executes.")
+        print("=" * 72)
+        rep.summarize()
+        return 1
     return rep.summarize()
 
 
