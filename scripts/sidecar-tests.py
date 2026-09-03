@@ -5728,6 +5728,77 @@ def run_layout(rep: Report, ctx):
                    f"and fall back to 32.0 if the query fails",
                    "; ".join(problems))
 
+    cid = "layout/every-service-is-unloaded-at-stop"
+    if ctx.wants(cid):
+        # EVERY SIDECAR STOPS WHEN THE MEETING DOES (owner, 2026-09-02: "pas stop
+        # selesai semua di unload model modelnya jadi gak akan ada proses
+        # apapun"). `ModelLoader.unloadAll()` names each service individually
+        # because they are distinct types and cannot be looped over.
+        #
+        # ⚠ A HAND-WRITTEN LIST BESIDE A DERIVED TRUTH IS THE SHAPE THIS PROJECT
+        # KEEPS RECORDING, most recently on 2026-08-26 when the MPS-fuse pin named
+        # five files and seven carried a fuse. It only ever drifts one way — it
+        # UNDER-reports — and here that means a new sidecar keeps running after
+        # every meeting, holding gigabytes, with nothing to say so.
+        #
+        # So the population is DISCOVERED from the behaviour that defines it:
+        # anything `loadAll` calls `?.terminate()` on is a live process, and every
+        # one of them must also be released by `unloadAll`. `sileroVAD` is the one
+        # exception and it is named WITH its reason — it has no public terminate
+        # and kills its process in `deinit`, so `= nil` IS its teardown.
+        import re as _re
+        src = (SWIFT_SOURCES / "MeetingTranscriber" / "Models" / "ModelLoader.swift").read_text()
+        body = "\n".join(l for l in src.splitlines() if not l.strip().startswith("//"))
+        m = _re.search(r"func unloadAll\(\)\s*\{", body)
+        problems = []
+        if not m:
+            problems.append("ModelLoader has no unloadAll() — nothing stops the "
+                            "sidecars when a meeting ends")
+        else:
+            # unloadAll runs to the next top-level `func` at the same indent.
+            rest = body[m.end():]
+            end = _re.search(r"\n    (?:@|/|func |var |let |private |static )", rest)
+            fn_body = rest[:end.start()] if end else rest
+            services = sorted(set(_re.findall(r"(\w+)\?\.terminate\(\)", body)))
+            if len(services) < 13:
+                problems.append(f"only {len(services)} service(s) are terminated "
+                                "anywhere in ModelLoader — this check discovers "
+                                "them by that call, so a shrinking population "
+                                "would silently shrink what it verifies")
+            for name in services:
+                if f"{name}?.terminate()" not in fn_body:
+                    problems.append(f"`{name}` is a live process that unloadAll "
+                                    "never stops — it survives the meeting")
+                elif f"{name} = nil" not in fn_body:
+                    problems.append(f"`{name}` is terminated but not released; "
+                                    "the reference outlives its process")
+            if "sileroVAD = nil" not in fn_body:
+                problems.append("sileroVAD is not released — it has no public "
+                                "terminate, so dropping the reference IS its "
+                                "teardown and skipping it leaks the process")
+        # THE CALL SITE, and it is the half that decides correctness. Two of the
+        # three `.processing` exits deliberately leave passes RUNNING (the 600 s
+        # watchdog and continueInBackground), so unloading from the shared
+        # `leaveProcessing()` would kill work mid-flight and truncate a transcript
+        # with no error anywhere.
+        gate = (SWIFT_SOURCES / "MeetingTranscriber" / "Audio"
+                / "AudioRecorder+StopGate.swift").read_text()
+        gbody = "\n".join(l for l in gate.splitlines() if not l.strip().startswith("//"))
+        if "modelLoader.unloadAll()" not in gbody:
+            problems.append("no exit calls unloadAll() — the sidecars stay up "
+                            "after the meeting")
+        lp = _re.search(r"private func leaveProcessing\(\) \{(.*?)\n    \}", gbody, _re.S)
+        if lp and "unloadAll" in lp.group(1):
+            problems.append("unloadAll() is called from leaveProcessing(), which "
+                            "the watchdog and continueInBackground also use — "
+                            "both leave passes running, so this kills work in "
+                            "flight and truncates the transcript silently")
+        rep.expect(cid, not problems,
+                   "every sidecar ModelLoader can start is stopped and released by "
+                   "unloadAll(), called only from the exit whose guard proves "
+                   "nothing is still running",
+                   "; ".join(problems))
+
     cid = "layout/the-beam-is-not-gated-on-our-vad"
     if ctx.wants(cid):
         # THE POSITION LAYER TAKES DIRECTION FROM EVERY ATND NOTICE (owner,

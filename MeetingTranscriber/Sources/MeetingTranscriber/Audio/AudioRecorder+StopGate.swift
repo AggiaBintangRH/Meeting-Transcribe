@@ -156,13 +156,32 @@ extension AudioRecorder {
         markMeetingFinished()
     }
 
-    /// All post-stop work landed → drop the overlay and re-enable Start.
+    /// All post-stop work landed → drop the overlay, re-enable Start, and stop
+    /// every sidecar.
     /// Idempotent; every leg's completion path calls it.
+    ///
+    /// ⚠ THE UNLOAD LIVES HERE AND NOT IN `leaveProcessing()`, and the difference
+    /// is not tidiness. Three paths leave `.processing` and TWO OF THEM
+    /// DELIBERATELY LEAVE WORK RUNNING — the 600 s watchdog and
+    /// `continueInBackground`, both of which say so in their own comments.
+    /// Terminating a sidecar on those paths would kill a pass that was still
+    /// going to land, and the only symptom would be a transcript that ends early.
+    ///
+    /// The guard above is what makes this call site safe: every leg has
+    /// reported, the repair task is nil, so there is nothing in flight to kill.
+    /// A fourth exit added later gets the mic lock from `leaveProcessing` for
+    /// free — and deliberately does NOT get the unload, because it cannot know
+    /// whether work is still running.
     func checkStopProcessingDone() {
         guard state == .processing, lastChunkDone, remoteLastChunkDone,
               finalDiarDone, remoteFinalDiarDone, mossLastChunkDone,
               !overlapRepairing, repairTask == nil else { return }
         leaveProcessing()
+        // Order matters only in one direction: the overlay must already be down,
+        // so the user sees a finished meeting rather than a panel that sits there
+        // while processes exit. Nothing after this point needs a model — export
+        // is pure Swift, and both rename paths write their own files.
+        modelLoader.unloadAll()
     }
 
     /// Last resort: never hold the controls hostage. The background work keeps

@@ -748,6 +748,83 @@ final class ModelLoader: ObservableObject {
     }
 
     /// Load everything the session needs. Returns true if all succeeded.
+    /// Stop every sidecar and drop every reference — the app holds no model
+    /// process afterwards (owner, 2026-09-02: "pas stop selesai semua di unload
+    /// model modelnya jadi gak akan ada proses apapun").
+    ///
+    /// ⚠ WHERE THIS MAY BE CALLED FROM, and it is not `leaveProcessing()`.
+    /// Three paths leave `.processing`, and TWO OF THEM DELIBERATELY LEAVE WORK
+    /// RUNNING: the 600 s watchdog ("the meeting still HAPPENED and the app is
+    /// unblocked") and `continueInBackground` ("the user stopped WAITING; the
+    /// passes did not stop RUNNING"). Terminating a sidecar mid-pass on either
+    /// would delete text that was still going to land — the over-deletion
+    /// direction this project ranks worst, and invisible because the transcript
+    /// simply ends early.
+    ///
+    /// The one safe caller is `checkStopProcessingDone()`, whose own guard is the
+    /// proof: `lastChunkDone`, `remoteLastChunkDone`, `finalDiarDone`,
+    /// `remoteFinalDiarDone`, `mossLastChunkDone`, `!overlapRepairing` and
+    /// `repairTask == nil` all hold, so nothing is in flight to kill.
+    ///
+    /// ⚠ THE COST, stated rather than discovered later: the next recording pays
+    /// the full load again — measured ~22 s for a default six-sidecar session on
+    /// the 64 GB Mac, and MOSS alone is 9.2 s. What it buys is the whole working
+    /// set back between meetings (~10 GB measured), which is why it is worth it
+    /// on the client's 16 GB machine and why the owner asked for it.
+    ///
+    /// Nothing after Stop needs a live process, checked rather than assumed:
+    /// PDF export is pure Swift, `SpeakerProfileStore.rename` reads and writes
+    /// the JSON itself, and `PositionDiarizer.rename` is an in-memory object.
+    func unloadAll() {
+        // Named individually rather than looped because they are distinct types;
+        // `layout/every-service-is-unloaded-at-stop` DERIVES the population from
+        // the `?.terminate()` calls in this file and fails if one is missing, so
+        // the list cannot silently fall behind the way a hand-written list does.
+        if realtimeASR != nil {
+            noteUnload(ModelCatalog.realtimeModel(id: realtimeASR!.config.modelID).name)
+        }
+        realtimeASR?.terminate();      realtimeASR = nil
+        if chunkedASR != nil { noteUnload(chunkedASR!.config.modelName) }
+        chunkedASR?.terminate();       chunkedASR = nil
+        if aligner != nil { noteUnload(ModelCatalog.wordAligner.name) }
+        aligner?.terminate();          aligner = nil
+        if pyannote != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.pyannoteEngineID).name)
+        }
+        pyannote?.terminate();         pyannote = nil
+        if spectral != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.spectralEngineID).name)
+        }
+        spectral?.terminate();         spectral = nil
+        if nemo != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.nemoEngineID).name)
+        }
+        nemo?.terminate();             nemo = nil
+        if diarizen != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.diarizenEngineID).name)
+        }
+        diarizen?.terminate();         diarizen = nil
+        if camPlus != nil {
+            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.camPlusEngineID).name)
+        }
+        camPlus?.terminate();          camPlus = nil
+        if embedding != nil { noteUnload(ModelCatalog.speakerEmbedding.name) }
+        embedding?.terminate();        embedding = nil
+        if mossDiarization != nil { noteUnload(ModelCatalog.mossDiarization.name) }
+        mossDiarization?.terminate();  mossDiarization = nil
+        if overlapRepair != nil { noteUnload(ModelCatalog.overlapSeparation.name) }
+        overlapRepair?.terminate();    overlapRepair = nil
+        if dicowRepair != nil { noteUnload(ModelCatalog.overlapDicow.name) }
+        dicowRepair?.terminate();      dicowRepair = nil
+        if overlapDetect != nil { noteUnload(ModelCatalog.overlapDetectPyannote.name) }
+        overlapDetect?.terminate();    overlapDetect = nil
+        // No public terminate: it kills its process in `deinit`, so dropping the
+        // last reference IS the teardown. The session's `VoiceActivityDetector`
+        // is gone by the time this runs, so this is that last reference.
+        if sileroVAD != nil { noteUnload(ModelCatalog.vad.name) }
+        sileroVAD = nil
+    }
+
     func loadAll() async -> Bool {
         isLoading = true
         failureMessage = nil
