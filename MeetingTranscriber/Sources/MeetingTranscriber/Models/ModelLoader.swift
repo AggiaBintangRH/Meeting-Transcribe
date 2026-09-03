@@ -776,52 +776,40 @@ final class ModelLoader: ObservableObject {
     /// PDF export is pure Swift, `SpeakerProfileStore.rename` reads and writes
     /// the JSON itself, and `PositionDiarizer.rename` is an in-memory object.
     func unloadAll() {
+        // ⚠ NO `noteUnload` CALLS HERE, and their absence is the point. `items`
+        // is built from `unloadRows` at exactly one place — inside `loadAll`,
+        // AFTER that same function has cleared `unloadRows` on its first line. So
+        // a row appended from outside `loadAll` is wiped before anything can
+        // render it. The first version of this function called `noteUnload`
+        // fourteen times and every one was provably dead: appended at Stop,
+        // discarded at the next Start, never on screen.
+        //
+        // Left out rather than given a surface, because there is no moment to
+        // show them: the stop overlay is already coming down when this runs. If
+        // one is ever wanted ("unloaded after the last meeting" above the load
+        // rows, explaining the ~22 s wait), `items` is the thing to build, not
+        // `unloadRows` to fill.
+        //
         // Named individually rather than looped because they are distinct types;
         // `layout/every-service-is-unloaded-at-stop` DERIVES the population from
         // the `?.terminate()` calls in this file and fails if one is missing, so
         // the list cannot silently fall behind the way a hand-written list does.
-        if realtimeASR != nil {
-            noteUnload(ModelCatalog.realtimeModel(id: realtimeASR!.config.modelID).name)
-        }
         realtimeASR?.terminate();      realtimeASR = nil
-        if chunkedASR != nil { noteUnload(chunkedASR!.config.modelName) }
         chunkedASR?.terminate();       chunkedASR = nil
-        if aligner != nil { noteUnload(ModelCatalog.wordAligner.name) }
         aligner?.terminate();          aligner = nil
-        if pyannote != nil {
-            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.pyannoteEngineID).name)
-        }
         pyannote?.terminate();         pyannote = nil
-        if spectral != nil {
-            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.spectralEngineID).name)
-        }
         spectral?.terminate();         spectral = nil
-        if nemo != nil {
-            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.nemoEngineID).name)
-        }
         nemo?.terminate();             nemo = nil
-        if diarizen != nil {
-            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.diarizenEngineID).name)
-        }
         diarizen?.terminate();         diarizen = nil
-        if camPlus != nil {
-            noteUnload(ModelCatalog.diarizationEngine(forEngine: Self.camPlusEngineID).name)
-        }
         camPlus?.terminate();          camPlus = nil
-        if embedding != nil { noteUnload(ModelCatalog.speakerEmbedding.name) }
         embedding?.terminate();        embedding = nil
-        if mossDiarization != nil { noteUnload(ModelCatalog.mossDiarization.name) }
         mossDiarization?.terminate();  mossDiarization = nil
-        if overlapRepair != nil { noteUnload(ModelCatalog.overlapSeparation.name) }
         overlapRepair?.terminate();    overlapRepair = nil
-        if dicowRepair != nil { noteUnload(ModelCatalog.overlapDicow.name) }
         dicowRepair?.terminate();      dicowRepair = nil
-        if overlapDetect != nil { noteUnload(ModelCatalog.overlapDetectPyannote.name) }
         overlapDetect?.terminate();    overlapDetect = nil
         // No public terminate: it kills its process in `deinit`, so dropping the
         // last reference IS the teardown. The session's `VoiceActivityDetector`
         // is gone by the time this runs, so this is that last reference.
-        if sileroVAD != nil { noteUnload(ModelCatalog.vad.name) }
         sileroVAD = nil
     }
 
