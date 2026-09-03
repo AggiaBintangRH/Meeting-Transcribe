@@ -880,9 +880,18 @@ from vibevoice.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
 EOF
 }
 
-if [ ! -d "$VV_VENDOR/vibevoice" ]; then
-  echo "!! scripts/vibevoice-asr/vendor/vibevoice is missing — it is tracked in"
-  echo "   git; a fresh clone should have it. Nothing to install from."
+# BOTH roles carry their own copy — chunked (vibevoice-asr) and realtime
+# (vibevoice-rt). Byte-identical and deliberately not shared: either service
+# pointing at the other's folder works until that folder moves, which is the
+# trap the MOSS split recorded and `layout/vibevoice-vendor-trees-are-own-and-
+# identical` now pins.
+VV_MISSING=""
+for role in vibevoice-asr vibevoice-rt; do
+  [ -d "$SCRIPT_DIR/scripts/$role/vendor/vibevoice" ] || VV_MISSING="$VV_MISSING $role"
+done
+if [ -n "$VV_MISSING" ]; then
+  echo "!! vendored VibeVoice package missing for:$VV_MISSING"
+  echo "   It is tracked in git; a fresh clone should have it. Nothing to install from."
   FAILED+=("VibeVoice vendored package")
 elif vv_venv_ok; then
   echo "   OK: .venv-vibevoice already satisfies transformers 4.x + VibeVoice — skipping"

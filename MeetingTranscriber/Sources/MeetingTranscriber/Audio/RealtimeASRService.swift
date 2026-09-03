@@ -48,6 +48,7 @@ final class RealtimeASRService: @unchecked Sendable {
     static let nemotronModelID = "nemotron"
     static let parakeetModelID = "parakeet"
     static let funasrModelID = "funasr"
+    static let vibevoiceModelID = "vibevoice"
 
     /// Nemotron's attention chunk size, PINNED — there is no longer a control
     /// for it (owner, 2026-08-11: *"oke hapus aja deh"*).
@@ -133,10 +134,19 @@ final class RealtimeASRService: @unchecked Sendable {
         /// was invisible. Stated once, per engine, beside the script it pairs
         /// with; `RealtimeSidecarRoutingTests` asserts the two pairs differ.
         let logName: String
+        /// Interpreter for this engine's sidecar, nil = the main `.venv`.
+        ///
+        /// Only VibeVoice overrides it, and for a conflict rather than a
+        /// preference: it pins `transformers <5.0` while the MLX stack in
+        /// the main venv needs 5.x. Part of Config (Equatable), so
+        /// switching to or from it recreates the process instead of
+        /// leaving an interpreter answering for a model it cannot import.
+        let venvName: String?
 
         static let nemotronScriptName = "nemotron/nemotron-service.py"
         static let parakeetScriptName = "parakeet/parakeet-service.py"
         static let funasrScriptName = "funasr/funasr-service.py"
+        static let vibevoiceScriptName = "vibevoice-rt/vibevoice-rt-service.py"
 
         /// Nemotron 3.5 — the original realtime engine and the default.
         static func nemotron(language: String, chunkMs: Int, partialMs: Int) -> Config {
@@ -145,7 +155,8 @@ final class RealtimeASRService: @unchecked Sendable {
                    chunkMs: chunkMs,
                    partialMs: partialMs,
                    scriptName: nemotronScriptName,
-                   logName: "nemotron")
+                   logName: "nemotron",
+                   venvName: nil)
         }
 
         /// Parakeet TDT 0.6b v3 — CC BY-4.0, 25 languages, ~130x realtime.
@@ -155,7 +166,8 @@ final class RealtimeASRService: @unchecked Sendable {
                    chunkMs: nil,
                    partialMs: partialMs,
                    scriptName: parakeetScriptName,
-                   logName: "parakeet")
+                   logName: "parakeet",
+                   venvName: nil)
         }
 
         /// Fun-ASR MLT Nano 2512 — Apache 2.0, 1.0B, ~49–97x realtime.
@@ -163,13 +175,40 @@ final class RealtimeASRService: @unchecked Sendable {
         /// The ONLY realtime engine whose `language` is actually honoured, which
         /// is why it takes the code unresolved-by-locale-table: its sidecar
         /// speaks bare ISO codes (`en`, `zh`, `ja`), not Nemotron's locale keys.
+        /// VibeVoice-ASR-Streaming — MIT, speaker-attributed, and the ONLY
+        /// realtime engine with its own interpreter.
+        ///
+        /// ⚠ SLOWEST PER SECOND OF AUDIO AND NOT THE HEAVIEST ON DUTY. Measured
+        /// 2026-09-02 with model load excluded: 5.2x realtime, CONSTANT at 30 s
+        /// and 60 s, 38 % duty with two active lanes. It advances a KV cache one
+        /// window at a time instead of re-transcribing the whole buffer, so cost
+        /// does not grow with utterance length — which is why Nemotron (~14x per
+        /// second) needs cadence stretching at 285 % duty and this does not.
+        ///
+        /// ⚠ 10.96 GB RSS, the same weights as the chunked role. Selecting
+        /// VibeVoice in BOTH slots runs two processes and ~22 GB.
+        static func vibevoice(language: String) -> Config {
+            Config(modelID: RealtimeASRService.vibevoiceModelID,
+                   language: language,
+                   chunkMs: nil,
+                   // No caption-interval knob: the cadence is the CHECKPOINT's
+                   // own chunk (2.933 s, read from preprocessor_config.json).
+                   // Offering a picker whose useful range is empty is the dead
+                   // control this project has refused five times.
+                   partialMs: nil,
+                   scriptName: vibevoiceScriptName,
+                   logName: "vibevoice-rt",
+                   venvName: ".venv-vibevoice")
+        }
+
         static func funasr(language: String, partialMs: Int) -> Config {
             Config(modelID: RealtimeASRService.funasrModelID,
                    language: language,
                    chunkMs: nil,
                    partialMs: partialMs,
                    scriptName: funasrScriptName,
-                   logName: "funasr")
+                   logName: "funasr",
+                   venvName: nil)
         }
 
         /// Read the current settings.
@@ -201,6 +240,21 @@ final class RealtimeASRService: @unchecked Sendable {
             let partialMs = d.object(forKey: "realtime.partialMs") as? Int
                 ?? RealtimeASRService.defaultPartialMs
 
+            return forEngine(id: id, rawLanguage: raw, partialMs: partialMs)
+        }
+
+        /// The id → Config mapping, PURE. Split out of `fromSettings` on
+        /// 2026-09-02 so it can be swept over `ModelCatalog.realtimeModels` in a
+        /// test — a hand-written list of ids in a test cannot notice an engine
+        /// that was never added to it, which is exactly how VibeVoice slipped
+        /// past the language test the same afternoon.
+        ///
+        /// `id` is expected to have been through `ModelCatalog.realtimeModel(id:)`
+        /// already; `fromSettings` does that, and the fallthrough below is the
+        /// last line of defence rather than the first.
+        static func forEngine(id: String,
+                              rawLanguage raw: String = "auto",
+                              partialMs: Int = RealtimeASRService.defaultPartialMs) -> Config {
             // Resolved at the READ boundary, exactly like the chunked side: a
             // code the selected engine does not have becomes "auto" rather than
             // travelling to a sidecar that has never heard of it. The user's
@@ -216,6 +270,10 @@ final class RealtimeASRService: @unchecked Sendable {
                 return .parakeet(
                     language: Languages.resolveRealtime(language: raw, forModel: id),
                     partialMs: partialMs)
+            }
+            if id == RealtimeASRService.vibevoiceModelID {
+                return .vibevoice(
+                    language: Languages.resolveRealtime(language: raw, forModel: id))
             }
             if id == RealtimeASRService.funasrModelID {
                 return .funasr(
@@ -260,11 +318,20 @@ final class RealtimeASRService: @unchecked Sendable {
         case scriptMissing(String)
         case launchFailed(String)
         case startupFailed(String)
+        /// An engine whose sidecar needs its OWN interpreter, and it is absent.
+        /// Carries the engine id and the venv, so the message names both rather
+        /// than sending the reader to a generic "could not launch".
+        case runtimeMissing(String, String)
 
         var errorDescription: String? {
             switch self {
             case .scriptMissing(let name):
                 return "scripts/\(name) not found in the project folder."
+            case .runtimeMissing(let engine, let venv):
+                return "The \(engine) realtime engine needs its own Python "
+                    + "runtime (\(venv)), and it is missing. Run "
+                    + "./RUN-SETUP.command — it creates every interpreter the "
+                    + "app needs."
             case .launchFailed(let reason):
                 return "Could not launch Python sidecar: \(reason)"
             case .startupFailed(let reason):
@@ -353,7 +420,19 @@ final class RealtimeASRService: @unchecked Sendable {
             throw ServiceError.scriptMissing(config.scriptName)
         }
 
-        let command = PythonRuntime.command(forScript: script)
+        // A model with its own interpreter must FIND it — falling back to the
+        // main `.venv` would launch, import transformers 5.x, and die inside the
+        // model load with a message about an attribute rather than about a
+        // missing runtime. Same rule and same reason as ChunkedASRService.
+        let command: (executable: URL, arguments: [String])
+        if let venv = config.venvName {
+            guard let own = PythonRuntime.command(forScript: script, venvName: venv) else {
+                throw ServiceError.runtimeMissing(config.modelID, venv)
+            }
+            command = own
+        } else {
+            command = PythonRuntime.command(forScript: script)
+        }
         process.executableURL = command.executable
         process.arguments = command.arguments + config.processArguments
         process.standardInput = stdinPipe

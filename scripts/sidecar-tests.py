@@ -5728,6 +5728,81 @@ def run_layout(rep: Report, ctx):
                    f"and fall back to 32.0 if the query fails",
                    "; ".join(problems))
 
+    cid = "layout/vibevoice-vendor-trees-are-own-and-identical"
+    if ctx.wants(cid):
+        # THE SILENT TRAP THE MOSS SPLIT RECORDED, in a second model. Each
+        # VibeVoice service owns its own `vendor/vibevoice/`. Because the two
+        # trees are byte-identical AND both present, either service pointing its
+        # `sys.path.insert` at the OTHER's folder WORKS TODAY and breaks only
+        # when that folder moves — months later, in a release.
+        #
+        # The literal is read BY AST, not by grep: both files document this path
+        # at length, so a textual search matches its own explanation. That is the
+        # mistake `moss/asr-vendor-is-own-and-identical` was written after making.
+        import ast as _ast
+        import hashlib as _hashlib
+        problems = []
+
+        def inserted_path_parts(rel: str) -> list[str] | None:
+            """Every STRING CONSTANT in the sys.path.insert expression.
+
+            ⚠ THE CONSTANTS, NOT MERELY "does 'vendor' appear". The first version
+            of this check asked the latter and passed a negative control that
+            pointed one service at the OTHER's folder — because
+            `join(dirname(dirname(__file__)), "vibevoice-asr", "vendor")` contains
+            "vendor" too. It was decoration against the exact trap it exists for.
+            The correct form yields ["vendor"] and nothing else; a sibling path
+            yields the sibling's folder name alongside it.
+            """
+            src = (SCRIPTS / rel).read_text()
+            for node in _ast.walk(_ast.parse(src)):
+                if not (isinstance(node, _ast.Call)
+                        and isinstance(node.func, _ast.Attribute)
+                        and node.func.attr == "insert"):
+                    continue
+                parts = [sub.value for arg in node.args for sub in _ast.walk(arg)
+                         if isinstance(sub, _ast.Constant) and isinstance(sub.value, str)]
+                if "vendor" in parts:
+                    return parts
+            return None
+
+        roles = ["vibevoice-asr/vibevoice-asr-service.py",
+                 "vibevoice-rt/vibevoice-rt-service.py"]
+        for rel in roles:
+            parts = inserted_path_parts(rel)
+            if parts is None:
+                problems.append(f"{rel} no longer inserts a 'vendor' folder on "
+                                "sys.path at all — the vendored package would be "
+                                "unreachable in the packaged .app")
+            elif parts != ["vendor"]:
+                problems.append(f"{rel} builds its vendor path from {parts}, not "
+                                "from its OWN folder alone — a sibling path works "
+                                "today and breaks the day that folder moves")
+
+        def tree_hash(folder: pathlib.Path) -> str:
+            digest = _hashlib.md5()
+            for f in sorted(folder.rglob("*.py")):
+                digest.update(f.relative_to(folder).as_posix().encode())
+                digest.update(f.read_bytes())
+            return digest.hexdigest()
+
+        trees = {r.split("/")[0]: SCRIPTS / r.split("/")[0] / "vendor" for r in roles}
+        missing = [n for n, d in trees.items() if not d.is_dir()]
+        if missing:
+            problems.append(f"vendored tree missing for {missing} — the package is "
+                            "not on PyPI, so nothing else can supply it")
+        else:
+            hashes = {n: tree_hash(d) for n, d in trees.items()}
+            if len(set(hashes.values())) != 1:
+                problems.append(f"the two vendored trees have DRIFTED: {hashes} — "
+                                "one role would run different model code from the "
+                                "other, silently")
+        rep.expect(cid, not problems,
+                   "both VibeVoice services carry their own vendored package, "
+                   "byte-identical to each other, and each puts its OWN copy on "
+                   "sys.path",
+                   "; ".join(problems))
+
     cid = "layout/every-service-is-unloaded-at-stop"
     if ctx.wants(cid):
         # EVERY SIDECAR STOPS WHEN THE MEETING DOES (owner, 2026-09-02: "pas stop

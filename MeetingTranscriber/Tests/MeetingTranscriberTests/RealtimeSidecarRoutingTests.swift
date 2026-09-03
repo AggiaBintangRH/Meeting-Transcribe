@@ -35,6 +35,8 @@ final class RealtimeSidecarRoutingTests: XCTestCase {
          "parakeet/parakeet-service.py", "parakeet"),
         ("funasr", .funasr(language: "auto", partialMs: RealtimeASRService.defaultPartialMs),
          "funasr/funasr-service.py", "funasr"),
+        ("vibevoice", .vibevoice(language: "auto"),
+         "vibevoice-rt/vibevoice-rt-service.py", "vibevoice-rt"),
     ]
 
     /// The repo's `scripts/` directory, from this file's own path — the app's
@@ -296,5 +298,50 @@ final class RealtimeSidecarRoutingTests: XCTestCase {
         // And the stored value is NOT rewritten — switching back to Nemotron must
         // still find the user's own choice.
         XCTAssertEqual(UserDefaults.standard.string(forKey: languageKey), "ja")
+    }
+}
+
+
+// MARK: - The engine with its own interpreter
+
+extension RealtimeSidecarRoutingTests {
+
+    /// EVERY realtime engine in the catalog must resolve to a Config, and the
+    /// venv answer must be deliberate for each.
+    ///
+    /// ⚠ SWEPT FROM `ModelCatalog.realtimeModels`, NOT LISTED. The routing table
+    /// above is hand-written, which is right for the script/log pairs it pins —
+    /// but a hand-written list cannot notice an engine that was never added to
+    /// it. VibeVoice was added on 2026-09-02 and the language test beside it went
+    /// green while saying nothing about it, which is why this sweep exists.
+    func testEveryRealtimeEngineResolvesAndOnlyVibeVoiceHasItsOwnRuntime() {
+        XCTAssertFalse(ModelCatalog.realtimeModels.isEmpty, "no engines to sweep")
+        for model in ModelCatalog.realtimeModels {
+            let config = RealtimeASRService.Config.forEngine(id: model.id)
+            XCTAssertEqual(config.modelID, model.id,
+                           "\(model.id): the catalog and the Config disagree about "
+                           + "which engine this is")
+            if model.id == RealtimeASRService.vibevoiceModelID {
+                XCTAssertEqual(config.venvName, ".venv-vibevoice",
+                               "VibeVoice pins transformers <5.0 and cannot share "
+                               + "the main .venv with the MLX stack")
+            } else {
+                XCTAssertNil(config.venvName,
+                             "\(model.id) must run in the main .venv — a second "
+                             + "interpreter costs ~1.2 GB in the bundle and is only "
+                             + "justified by a conflict that cannot be resolved")
+            }
+        }
+    }
+
+    /// VibeVoice takes no caption-interval knob, and the absence is structural
+    /// rather than an omission: its cadence is the CHECKPOINT's own chunk
+    /// (2.933 s, read from preprocessor_config.json), so a picker there would
+    /// have an empty useful range — the dead control this project has refused
+    /// five times. Parakeet's, which is real, must be unaffected.
+    func testOnlyParakeetAndFunasrCarryACaptionInterval() {
+        XCTAssertNil(RealtimeASRService.Config.vibevoice(language: "auto").partialMs)
+        XCTAssertNotNil(RealtimeASRService.Config
+            .parakeet(language: "auto", partialMs: 1500).partialMs)
     }
 }

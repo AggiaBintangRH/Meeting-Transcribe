@@ -1136,12 +1136,18 @@ if [[ ! -x "$ROOT/.venv-vibevoice/bin/pip" ]]; then
   exit 1
 fi
 
-if [[ ! -d "$ROOT/scripts/vibevoice-asr/vendor/vibevoice" ]]; then
-  echo "ERROR: scripts/vibevoice-asr/vendor/vibevoice is missing." >&2
-  echo "       The package is not on PyPI; this tree is the only source the" >&2
-  echo "       bundled interpreter and the sidecar's sys.path can use." >&2
-  exit 1
-fi
+# BOTH roles, each with its OWN copy. They are byte-identical and deliberately
+# not shared: either service pointing its sys.path at the other's folder works
+# today and breaks the day that folder moves — the trap the MOSS split recorded
+# in 2026-07 and the reason `moss/asr-vendor-is-own-and-identical` exists.
+for role in vibevoice-asr vibevoice-rt; do
+  if [[ ! -d "$ROOT/scripts/$role/vendor/vibevoice" ]]; then
+    echo "ERROR: scripts/$role/vendor/vibevoice is missing." >&2
+    echo "       The package is not on PyPI; this tree is the only source the" >&2
+    echo "       bundled interpreter and the sidecar's sys.path can use." >&2
+    exit 1
+  fi
+done
 
 FROZEN_VV="$CACHE/requirements-frozen-vibevoice.txt"
 echo "    Freezing .venv-vibevoice packages..."

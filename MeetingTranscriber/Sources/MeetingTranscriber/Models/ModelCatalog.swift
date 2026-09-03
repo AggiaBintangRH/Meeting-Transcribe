@@ -64,6 +64,29 @@ enum ModelCatalog {
                   detail: "SenseVoice encoder + Qwen3 decoder · Apache 2.0 · English, Chinese, Japanese",
                   badges: ["MLX", "3 languages", "49x RT", "1.0B", "2.0 GB"],
                   hfRepo: "mlx-community/Fun-ASR-MLT-Nano-2512-fp16"),
+        // The FOURTH realtime engine, 2026-09-02, and the same checkpoint as the
+        // "vibevoice" chunked entry in its OTHER role — two services, two logs,
+        // and two live processes if both slots pick it (~22 GB).
+        //
+        // ⚠ THE BADGE SAYS 5x AND THAT IS NOT THE WHOLE STORY, so the detail
+        // line carries the half that matters. Measured 2026-09-02 with model
+        // load excluded: 5.2x realtime, CONSTANT at 30 s and 60 s, 38 % duty on
+        // two active lanes. Every other engine here re-transcribes its lane's
+        // whole buffer per partial, so cost grows with utterance length —
+        // Nemotron is ~14x per second and still needs cadence stretching at
+        // 285 % duty. This one advances a KV cache one window at a time, so it
+        // is the slowest per second of audio and among the lightest on duty.
+        // Judge it on duty; that is what decides whether captions keep up.
+        //
+        // "11 GB RAM" and "own runtime" are on the badge for the same reason
+        // they are on the chunked entry: the cost belongs at the point of
+        // choosing, not in a log after a meeting.
+        ModelInfo(id: "vibevoice",
+                  name: "VibeVoice-ASR-Streaming 1.5B",
+                  detail: "Speaker-attributed streaming — advances a cache per window, so cost does not grow with utterance length",
+                  badges: ["PyTorch MPS", "MIT", "5x RT", "38% duty",
+                           "11 GB RAM", "own runtime"],
+                  hfRepo: "microsoft/VibeVoice-ASR-Streaming-1.5B"),
     ]
 
     /// The realtime engine for a stored id, falling back to the FIRST entry —
