@@ -886,7 +886,7 @@ EOF
 # trap the MOSS split recorded and `layout/vibevoice-vendor-trees-are-own-and-
 # identical` now pins.
 VV_MISSING=""
-for role in vibevoice-asr vibevoice-rt vibevoice-diar; do
+for role in vibevoice-asr vibevoice-rt; do
   [ -d "$SCRIPT_DIR/scripts/$role/vendor/vibevoice" ] || VV_MISSING="$VV_MISSING $role"
 done
 if [ -n "$VV_MISSING" ]; then

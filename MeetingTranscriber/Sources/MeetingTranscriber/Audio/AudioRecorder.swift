@@ -652,7 +652,6 @@ final class AudioRecorder: ObservableObject {
     /// an extension cannot hold stored properties. Inert for every other
     /// session — it stays false, so every guard that reads it is a no-op.
     var camPlusDiarizationActive = false
-    var vibeVoiceDiarizationActive = false
     /// True when the chunked ASR model IS MOSS, so one process fills both roles
     /// and the segments arriving on `onChunkSegments` describe the very text
     /// `onChunkTranscript` is about to deliver.
@@ -1287,7 +1286,6 @@ final class AudioRecorder: ObservableObject {
         configureNemo()
         configureDiarizen()
         configureCamPlus()
-        configureVibeVoiceDiar()
         configureOverlapDetect()
         // The second MOSS process for this session, or nil — captured once, like
         // `chunked`, so the escaping tap closure never touches the recorder to
@@ -1854,13 +1852,6 @@ final class AudioRecorder: ObservableObject {
             hasService: modelLoader.camPlus != nil,
             hasRecording: lastRecordingURL != nil,
             finalPass: finalOn)
-        // Its OWN rule again, and for the same reason: sharing a call would ask
-        // whether ANOTHER engine's sidecar was up for this session.
-        let runsVibeVoiceDiarPass = Self.runsBatchOfficePass(
-            batchActive: vibeVoiceDiarizationActive,
-            hasService: modelLoader.vibeVoiceDiar != nil,
-            hasRecording: lastRecordingURL != nil,
-            finalPass: finalOn)
         // A TAIL-ONLY pass, which now belongs to the stop-pass-OFF branch — the
         // owner's rule of 2026-08-14, stated once in `runsTailPassAtStop` so this
         // and the Diarization tab cannot describe the same setting differently.
@@ -1870,7 +1861,7 @@ final class AudioRecorder: ObservableObject {
                                                    continueOnStop: continueOnStop,
                                                    hasLivePath: modelLoader.pyannote != nil)
         let willRunStopPass = runsSpectralPass || runsNemoPass || runsDiarizenPass
-            || runsCamPlusPass || runsVibeVoiceDiarPass
+            || runsCamPlusPass
             || (finalOn && modelLoader.pyannote != nil)
             || runsTailPass
         // The remote pass is dispatched HERE, before the overlay is built, so the
@@ -1917,7 +1908,7 @@ final class AudioRecorder: ObservableObject {
             || diarizenDiarizationActive || camPlusDiarizationActive
         let batchBudget = batchEngineActive
             && (runsSpectralPass || runsNemoPass || runsDiarizenPass
-                || runsCamPlusPass || runsVibeVoiceDiarPass || willRunRemoteDiar)
+                || runsCamPlusPass || willRunRemoteDiar)
             ? Self.batchPassWatchdogSeconds(recordingLength: recordingElapsed)
                 * (willRunRemoteDiar ? 2 : 1)
             : 0
@@ -1961,8 +1952,6 @@ final class AudioRecorder: ObservableObject {
                 startDiarizenDiarization(recording)
             } else if runsCamPlusPass, let recording = lastRecordingURL {
                 startCamPlusDiarization(recording)
-            } else if runsVibeVoiceDiarPass, let recording = lastRecordingURL {
-                startVibeVoiceDiarDiarization(recording)
             } else if runsTailPass {
                 // ⚠ REACHED ONLY WITH `finalPass` OFF (see `runsTailPassAtStop`).
                 // With the stop pass ON this is now unconditionally the full pass

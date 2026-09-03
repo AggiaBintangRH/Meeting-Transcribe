@@ -277,33 +277,10 @@ enum ModelCatalog {
         hfRepo: "Wespeaker/wespeaker-voxceleb-campplus-LM"
     )
 
-    /// The SEVENTH engine (2026-09-02), owner-requested after the client asked
-    /// for VibeVoice by name. The same checkpoint as the chunked and realtime
-    /// entries, in its third role: it transcribes and attributes in ONE pass, so
-    /// the `Speaker N:` runs inside its transcript are the diarization. Nothing
-    /// here embeds or clusters.
-    ///
-    /// ⚠ THE BADGES CARRY THE UNFLATTERING MEASUREMENTS ON PURPOSE, because this
-    /// is where the choice is made. Auto speaker counts on the known-answer
-    /// files: Overlap123 3/3 ✓, Meeting5People 4 against 5 ✗ (every other engine
-    /// gets 5), the client's ATND recording 1 against 5. And "no SPK" is the one
-    /// that matters most — `streaming_generate` has no `num_speakers`, so the
-    /// control that rescues pyannote, spectral and CAM++ on that ATND file
-    /// (4 → 5) cannot rescue this one.
-    static let vibeVoiceDiarization = ModelInfo(
-        id: "vibevoice",
-        name: "VibeVoice speaker-attributed diarization",
-        detail: "Transcribes and attributes in one pass — one KV cache over the whole recording, so labels never need stitching · MPS · whole recording at stop",
-        badges: ["PyTorch MPS", "whole-file only", "MIT", "no SPK control",
-                 "11 GB RAM", "own runtime", "~2.9 s boundaries"],
-        hfRepo: "microsoft/VibeVoice-ASR-Streaming-1.5B"
-    )
-
     /// Engines offered on Settings → Models → Diarization (`diarization.engine`).
     static let diarizationEngines: [ModelInfo] = [diarization, spectralDiarization,
                                                   nemoDiarization, diarizenDiarization,
-                                                  camPlusDiarization, mossDiarization,
-                                                  vibeVoiceDiarization]
+                                                  camPlusDiarization, mossDiarization]
 
     /// The short name an engine goes by in prose — "NeMo", not "NVIDIA NeMo
     /// clustering diarization". Card names are too long for a sentence.
@@ -320,7 +297,6 @@ enum ModelCatalog {
         case ModelLoader.nemoEngineID:     return "NeMo"
         case ModelLoader.diarizenEngineID: return "DiariZen"
         case ModelLoader.camPlusEngineID:  return "CAM++"
-        case ModelLoader.vibeVoiceEngineID: return "VibeVoice"
         case ModelLoader.mossEngineID:     return "MOSS"
         default:                           return nil
         }
@@ -400,7 +376,6 @@ enum ModelCatalog {
         case nemoDiarization.id:     return ModelLoader.nemoEngineID
         case diarizenDiarization.id: return ModelLoader.diarizenEngineID
         case camPlusDiarization.id:  return ModelLoader.camPlusEngineID
-        case vibeVoiceDiarization.id: return ModelLoader.vibeVoiceEngineID
         default:                     return ModelLoader.pyannoteEngineID
         }
     }
@@ -413,7 +388,6 @@ enum ModelCatalog {
         case ModelLoader.nemoEngineID:     return nemoDiarization
         case ModelLoader.diarizenEngineID: return diarizenDiarization
         case ModelLoader.camPlusEngineID:  return camPlusDiarization
-        case ModelLoader.vibeVoiceEngineID: return vibeVoiceDiarization
         default:                           return diarization
         }
     }

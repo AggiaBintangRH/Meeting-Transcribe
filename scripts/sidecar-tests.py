@@ -5767,10 +5767,11 @@ def run_layout(rep: Report, ctx):
             return None
 
         # ⚠ DISCOVERED, NOT LISTED — and this line was a hand-written pair for
-        # about an hour, during which a THIRD role (vibevoice-diar) was added and
-        # the check went on reporting "both … byte-identical" about two of three.
-        # The population is every service folder that carries a vendored copy, so
-        # a fourth role is covered the day it is written.
+        # about an hour, during which a third role was added and the check went
+        # on reporting "both … byte-identical" about two of three. That role was
+        # later removed (VibeVoice is ASR only), which is exactly why the list
+        # stays DISCOVERED: the population moved twice in one day, in both
+        # directions, and a typed list would have been wrong each time.
         roles = sorted(f"{d.name}/{d.name}-service.py"
                        for d in SCRIPTS.iterdir()
                        if d.is_dir() and d.name.startswith("vibevoice-")
@@ -5832,9 +5833,10 @@ def run_layout(rep: Report, ctx):
         problems = []
         roles = sorted(d.name for d in SCRIPTS.iterdir()
                        if d.is_dir() and d.name.startswith("vibevoice-"))
-        if len(roles) < 3:
+        if len(roles) < 2:
             problems.append(f"only {len(roles)} VibeVoice service(s) found — this "
-                            "check discovers them by folder name")
+                            "check discovers them by folder name, so a shrinking "
+                            "population would silently shrink what it verifies")
         for role in roles:
             src = (SCRIPTS / role / f"{role}-service.py").read_text()
             if "_checkpoint_dir" not in src:

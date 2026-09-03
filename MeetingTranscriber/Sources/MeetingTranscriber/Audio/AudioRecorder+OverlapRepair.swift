@@ -53,13 +53,9 @@ extension AudioRecorder {
     /// Spectral (Viterbi) and NeMo (NME-SC) remain here for the reason that is
     /// genuinely structural: both assign exactly one label per instant, so
     /// `overlapRegions()` is empty under them however the audio sounds.
-    /// VibeVoice joins them for the same structural reason, not by resemblance:
-    /// its spans are built from the chunk grid and merged by label, so adjacent
-    /// spans never carry two speakers at one instant and `overlapRegions()` is
-    /// empty under it however the audio sounds.
     var usesDetectedRegionsForRepair: Bool {
         mossDiarizationActive || spectralDiarizationActive || nemoDiarizationActive
-            || camPlusDiarizationActive || vibeVoiceDiarizationActive
+            || camPlusDiarizationActive
     }
 
     /// Which engine to NAME in the log when repair is skipped for want of the

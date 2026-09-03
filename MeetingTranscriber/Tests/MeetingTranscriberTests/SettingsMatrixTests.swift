@@ -255,7 +255,6 @@ final class SettingsMatrixTests: XCTestCase {
             r.nemoDiarizationActive = value == ModelLoader.nemoEngineID
             r.camPlusDiarizationActive = value == ModelLoader.camPlusEngineID
             r.diarizenDiarizationActive = value == ModelLoader.diarizenEngineID
-            r.vibeVoiceDiarizationActive = value == ModelLoader.vibeVoiceEngineID
 
             XCTAssertEqual(r.usesDetectedRegionsForRepair,
                            !ModelLoader.marksItsOwnOverlap(diarEngine: value),
