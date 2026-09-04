@@ -688,6 +688,18 @@ final class SettingsMatrixTests: XCTestCase {
         if let saved { d.set(saved, forKey: key) } else { d.removeObject(forKey: key) }
     }
 
+    /// Removes a key, checks the effect, restores the previous value.
+    ///
+    /// ⚠ This suite runs in the OWNER'S REAL preference domain, so the restore is
+    /// not tidiness — without it a test would leave the app's own setting deleted.
+    private func withoutKey(_ key: String, _ body: () -> Void) {
+        let d = UserDefaults.standard
+        let saved = d.object(forKey: key)
+        d.removeObject(forKey: key)
+        body()
+        if let saved { d.set(saved, forKey: key) }
+    }
+
     /// `Config` is Equatable and that is what makes `ModelLoader` replace a running
     /// sidecar. A setting that does NOT change it leaves the previous process
     /// answering for the rest of the meeting while Settings claims otherwise.
@@ -804,6 +816,44 @@ final class SettingsMatrixTests: XCTestCase {
         withKey("vad.minSpeechMs", 888.0) {
             XCTAssertEqual(VoiceActivityDetector.Config.fromSettings().minSpeechMs, 888.0,
                            accuracy: 0.0001)
+        }
+    }
+
+    /// The pause that ends an utterance, and therefore starts a ROW.
+    ///
+    /// ⚠ THIS PINS A RANGE, NOT THE NUMBER, and the range is the measurement.
+    /// The lower bound is why the value moved: 300 ms is an ordinary pause
+    /// INSIDE a sentence, so the live transcript cut a new row roughly every
+    /// three seconds (measured: 120 rows / 18.0 per minute over the 43-minute
+    /// 7-person meeting, median utterance 2.9 s).
+    ///
+    /// The UPPER bound is the one that matters more, because breaching it is
+    /// silent. Every realtime sidecar caps its utterance buffer at
+    /// `MAX_BUFFER = 60 s` and trims from the FRONT, so audio past that ceiling
+    /// is discarded with nothing in the transcript to show for it. Measured
+    /// longest utterance: 27.3 s at 600 ms, but **74.4 s at 1200 ms** — past
+    /// the cap, i.e. real speech dropped. A value above ~800 ms must not be
+    /// adopted without re-measuring that column, and this assertion is what
+    /// makes someone re-read the reason before changing it.
+    func testTheUtterancePauseSitsBetweenAChoppyRowAndALostBuffer() {
+        XCTAssertGreaterThan(ShippedDefaults.vadMinSilenceMs, 300.0,
+                             "300 ms is a within-sentence pause: at that value one "
+                             + "sentence becomes several rows and the live "
+                             + "transcript reads as choppy rather than as turns")
+        XCTAssertLessThanOrEqual(ShippedDefaults.vadMinSilenceMs, 800.0,
+                                 "above ~800 ms the longest measured utterance "
+                                 + "approaches the sidecars' 60 s MAX_BUFFER, which "
+                                 + "trims from the FRONT — speech would be dropped "
+                                 + "with no trace anywhere but the audio file")
+    }
+
+    /// The value the VAD really receives is the shipped one, not a literal that
+    /// happens to match it today. Without this the two could drift apart and the
+    /// slider would show one number while the state machine used another.
+    func testAnAbsentPauseKeyIsExactlyTheShippedDefault() {
+        withoutKey("vad.minSilenceMs") {
+            XCTAssertEqual(VoiceActivityDetector.Config.fromSettings().minSilenceMs,
+                           ShippedDefaults.vadMinSilenceMs, accuracy: 0.0001)
         }
     }
 

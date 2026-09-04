@@ -53,6 +53,41 @@ enum ShippedDefaults {
     /// Both ON, owner-chosen 2026-08-21. They only add work at Stop, and repair
     /// SKIPS rather than guesses when separation cannot help — which on single-
     /// mic audio is most of the time, and is the safe outcome.
+    /// How long a pause must last before the realtime lane calls it the end of
+    /// an utterance. **One speech→silence edge is one FLUSH is one ROW**
+    /// (`AudioRecorder.swift:1458` → `:1094` / `:1174`), so this value alone
+    /// decides how often the transcript starts a new line while recording.
+    ///
+    /// ⚠ IT WAS 300 ms, AND 300 ms IS AN ORDINARY PAUSE INSIDE A SENTENCE — so
+    /// one sentence became several rows and the live transcript read as choppy
+    /// rather than as turn-taking. Measured over Silero at the real call shape
+    /// (85 ms tap buffers, the last probability per buffer, the same
+    /// hysteresis), on the 43-minute 7-person meeting:
+    ///
+    ///     300 ms   120 rows   18.0/min   median utterance 2.9 s   max  9.1 s
+    ///     400 ms    96 rows   14.4/min                    3.8 s   max 12.1 s
+    ///     500 ms    78 rows   11.7/min                    4.0 s   max 18.2 s
+    ///   → 600 ms    70 rows   10.5/min                    4.3 s   max 27.3 s
+    ///     800 ms    49 rows    7.3/min                    5.6 s   max 37.2 s
+    ///    1200 ms    24 rows    3.6/min                    9.5 s   max 74.4 s ✗
+    ///
+    /// The row RATE is what the user sees and the MAX is what makes a value
+    /// unsafe, so 600 is chosen against both. Every realtime sidecar caps its
+    /// utterance buffer at `MAX_BUFFER = 60 s` and **trims from the FRONT**, so
+    /// audio past that ceiling is discarded silently — the failure direction
+    /// this project ranks worst. At 600 ms the longest utterance measured is
+    /// 27.3 s (p95 13.6 s), i.e. 2.2× of margin; at 1200 ms it is 74.4 s and
+    /// real speech would be dropped with no trace. **Do not raise this past
+    /// ~800 ms without re-measuring that column.**
+    ///
+    /// Two couplings, both checked rather than assumed. The chunk boundary is
+    /// `elapsed >= interval && !speaking`, so a longer hold waits for a bigger
+    /// pause — which is the direction the 2026-08-13 audit wanted (3.5 % of
+    /// words are lost at boundaries). And `positionDiarizer.noteSpeech` no
+    /// longer gates anything: `gateOnSpeech` is false since the beam was
+    /// ungated, so the ATND layer is untouched by this value.
+    static let vadMinSilenceMs = 600.0
+
     static let overlapDetect = true
     static let overlapRepair = true
 }

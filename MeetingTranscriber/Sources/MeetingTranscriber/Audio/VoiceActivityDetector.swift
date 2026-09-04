@@ -19,7 +19,8 @@ final class VoiceActivityDetector {
         static func fromSettings() -> Config {
             let d = UserDefaults.standard
             let threshold = d.object(forKey: "vad.threshold") as? Double ?? 0.5
-            let minSilence = d.object(forKey: "vad.minSilenceMs") as? Double ?? 300
+            let minSilence = d.object(forKey: "vad.minSilenceMs") as? Double
+                ?? ShippedDefaults.vadMinSilenceMs
             let minSpeech = d.object(forKey: "vad.minSpeechMs") as? Double ?? 250
             return Config(threshold: Float(threshold),
                           minSilenceMs: minSilence,

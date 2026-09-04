@@ -5513,6 +5513,12 @@ def run_layout(rep: Report, ctx):
             "realtime.model": "realtimeModel",
             "diarization.engine": "diarizationEngine",
             "chunked.model": "chunkedModel",
+            # Added 2026-09-04. It arrives here rather than staying a literal
+            # because it had ALREADY grown two readers -- VADTab declared 300.0
+            # and Config.fromSettings fell back to 300 -- which is the exact
+            # shape this check exists to forbid, sitting unnoticed inside the
+            # file the check reads.
+            "vad.minSilenceMs": "vadMinSilenceMs",
         }
         # An APPROVED ALIAS is a name that is *defined as* one of these
         # constants, not a second copy of its value — `defaultModelID` reads far

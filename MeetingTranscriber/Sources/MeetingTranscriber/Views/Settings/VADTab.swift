@@ -4,7 +4,7 @@ import SwiftUI
 struct VADTab: View {
     @AppStorage("vad.enabled")      private var enabled = true
     @AppStorage("vad.threshold")    private var threshold = 0.5
-    @AppStorage("vad.minSilenceMs") private var minSilenceMs = 300.0
+    @AppStorage("vad.minSilenceMs") private var minSilenceMs = ShippedDefaults.vadMinSilenceMs
     @AppStorage("vad.minSpeechMs")  private var minSpeechMs = 250.0
 
     var body: some View {
@@ -27,6 +27,11 @@ struct VADTab: View {
             SettingBlock(title: "Min silence to split — \(Int(minSilenceMs)) ms") {
                 Slider(value: $minSilenceMs, in: 100...1000, step: 50)
                     .tint(Theme.teal)
+                Text("How long a pause must last before the live transcript "
+                     + "starts a new row. Lower splits a sentence into several "
+                     + "rows; higher waits for a real turn.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Theme.textFaint)
             }
 
             SettingBlock(title: "Min speech duration — \(Int(minSpeechMs)) ms") {
