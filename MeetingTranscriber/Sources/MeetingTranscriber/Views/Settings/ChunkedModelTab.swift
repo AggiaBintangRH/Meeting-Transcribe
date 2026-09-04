@@ -13,16 +13,16 @@ struct ChunkedModelTab: View {
     @AppStorage("diarization.engine")  private var diarizationEngine = ShippedDefaults.diarizationEngine
     @AppStorage("chunked.language")    private var language = "auto"
     @AppStorage("chunked.intervalSec") private var intervalSec = 30
-    // Pipeline-level, NOT per-model, so it is shown for every model. Default is
-    // today's behaviour.
-    //
-    // `chunked.continueOnStop` USED TO SIT BESIDE THIS ("Continue from live text
-    // (tail only)") and was removed on 2026-08-06 at the owner's request. The
-    // stop pass is now ALWAYS tail-only, which was that toggle's default and what
-    // the app has always done — and `AudioRecorder` no longer reads the stored
-    // key, so a value left over from before cannot decide behaviour a control can
-    // no longer change.
+    // Pipeline-level, NOT per-model, so both are shown for every model.
     @AppStorage("chunked.finalPass")       private var finalPass = true
+    /// The SCOPE of that pass. Restored 2026-09-04 after the owner reported the
+    /// tail-only pin as a defect — "it not remove the chunk it use the chunked
+    /// text instead re transcribe at start to stop". A predecessor key,
+    /// `chunked.continueOnStop`, sat here until 2026-08-06 with the INVERTED
+    /// sense ("Continue from live text (tail only)"); the new key is deliberately
+    /// NOT that one, so a value stored under the old name cannot be read with the
+    /// opposite meaning.
+    @AppStorage("chunked.fullPassAtStop")  private var fullPassAtStop = ShippedDefaults.chunkedFullPassAtStop
 
     /// Set when switching models drops the picked language, so the user is told
     /// which one went and why instead of finding the picker quietly on
@@ -180,11 +180,41 @@ struct ChunkedModelTab: View {
     private var stopPassBlock: some View {
         SettingBlock(title: "") {
             SettingToggle(label: "Re-transcribe at stop", isOn: $finalPass)
-            Text("After you stop, transcribe the recording with this model once more so the last "
-                 + "seconds — the part no chunk covered yet — are as accurate as the rest.")
+            Text("After you stop, transcribe with this model once more so the audio no chunk "
+                 + "covered yet is as accurate as the rest.")
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textFaint)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if finalPass {
+                SettingToggle(label: "…\(AudioRecorder.fullPassToggleLabel), not just the last seconds",
+                              isOn: $fullPassAtStop)
+                if fullPassAtStop {
+                    // The cost is the whole decision, so it is stated where the
+                    // decision is made and it names the SELECTED model — the one
+                    // line on this tab that varies per model, for that reason.
+                    Text("On: the recording is transcribed again from the beginning and the live "
+                         + "chunk text is replaced. Windows are cut at silence, so nothing is "
+                         + "split mid-word. " + AudioRecorder.fullPassCostNote(chunkedModelID: model))
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let refusal = AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: model) {
+                        // Shown where the choice is made AND enforced as a hard
+                        // startup refusal, so it cannot be discovered at Stop.
+                        Text(refusal)
+                            .font(.system(size: 11))
+                            .foregroundColor(Theme.amber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else {
+                    Text("Off: only the seconds after the last chunk are transcribed. Everything "
+                         + "before that keeps the text the live chunks produced.")
+                        .font(.system(size: 11))
+                        .foregroundColor(Theme.textFaint)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
 
             if !finalPass {
                 // Deliberately NOT naming the engine. It said "(Nemotron)" until

@@ -946,6 +946,13 @@ final class AudioRecorder: ObservableObject {
         // wait out a 4B load plus a 3.6 GB one to be told it will not work.
         let diarEngine = UserDefaults.standard.string(forKey: "diarization.engine")
             ?? ShippedDefaults.diarizationEngine
+        // Read here rather than at the refusal below purely so every refusal's
+        // inputs are resolved in one place; `stop()` reads the same two keys
+        // again when it builds the plan, and a stale value between the two reads
+        // is impossible — Settings is locked for the whole session.
+        let finalPassAtStop = UserDefaults.standard.object(forKey: "chunked.finalPass") as? Bool ?? true
+        let fullPassAtStop = UserDefaults.standard.object(forKey: "chunked.fullPassAtStop")
+            as? Bool ?? ShippedDefaults.chunkedFullPassAtStop
         if let refusal = Self.mossRefusalMessage(chunkedModelID: chunkedID,
                                                  diarizationEngine: diarEngine,
                                                  remoteChannel: mic.remoteChannel) {
@@ -955,21 +962,29 @@ final class AudioRecorder: ObservableObject {
             state = .idle
             return
         }
-        // Fourth refusal, same rule and same place: "Run a transcription pass at stop" with
-        // "Continue from live text (tail only)" OFF asks for a full re-transcription
-        // of the whole recording, which MOSS cannot do at all and Voxtral cannot
-        // do in reasonable time. Told before the meeting, not after it — the cost
-        // of finding out at Stop is an hour of processing or a truncated
-        // transcript. Refusal, never a silent downgrade to the tail: the user
-        // asked for the whole recording and would have no way to know they did
-        // not get it.
-        // NO full-pass refusal here any more. `chunkedFullPassRefusalMessage`
-        // guards a mode the tail-only pin (see `stop()`) makes unreachable, so the
-        // `if` that called it — and the two locals it read — were provably dead,
-        // and a CLEAN build said so ("will never be executed"). The pure function
-        // and its tests are KEPT: they are what restoring the toggle would need.
-        // A branch that can never run is not a safety net, it is a warning on
-        // every build.
+        // Fourth refusal, same rule and same place, and LIVE AGAIN as of
+        // 2026-09-04: "Re-transcribe at stop" with "the whole recording" ON asks
+        // for a full re-transcription, which Voxtral cannot do in reasonable time
+        // (~27 s per 30 s of audio — about 54 minutes for a 60-minute meeting,
+        // behind the blocking stop overlay).
+        //
+        // Told BEFORE the meeting, not after it: the cost of finding out at Stop
+        // is an hour of waiting. And a refusal, never a silent downgrade to the
+        // tail — the user asked for the whole recording and would have no way to
+        // know they did not get it.
+        //
+        // ⚠ THIS BLOCK WAS DELETED ON 2026-08-06 because the tail-only pin made
+        // it provably dead, and a clean build said so ("will never be executed").
+        // The pure function and its tests were kept for exactly this moment; the
+        // note there — "what restoring the toggle would need" — is now spent.
+        if fullPassAtStop, finalPassAtStop,
+           let refusal = Self.chunkedFullPassRefusalMessage(chunkedModelID: chunkedID) {
+            chunkedStopLog("REFUSED start — \(refusal)")
+            modelLoader.failStartup(step: "Re-transcribe the whole recording", message: refusal)
+            errorMessage = refusal
+            state = .idle
+            return
+        }
         let ok = await modelLoader.loadAll()
         guard ok else {
             state = .idle
@@ -1696,20 +1711,18 @@ final class AudioRecorder: ObservableObject {
         if mossPlan.runsFullPass, let recording = lastRecordingURL {
             startMossFullPass(recording: recording)
         }
-        // What the chunked pass does at stop. Both keys absent → `.tail`, which
-        // is the branch this block has always taken; the "no chunked model"
-        // early-out is now `.none`, decided in the same place rather than by an
-        // `if` here. See AudioRecorder+ChunkedStop.swift.
+        // What the chunked pass does at stop. See AudioRecorder+ChunkedStop.swift;
+        // the "no chunked model" early-out is `.none`, decided in the same place
+        // rather than by an `if` here.
         let chunkedFinalPass = UserDefaults.standard.object(forKey: "chunked.finalPass") as? Bool ?? true
-        // ALWAYS tail-only. The "Continue from live text (tail only)" toggle was
-        // removed on 2026-08-06 (owner), and its stored key is deliberately NOT
-        // read any more: leaving the read in place would let a value set before
-        // the control disappeared keep choosing the full pass, with nothing in
-        // the UI able to change it back. `true` is that toggle's own default and
-        // what the app has always done, so this is today's behaviour made fixed
-        // rather than a new one. `.full` and its machinery are kept — they are
-        // still covered by tests and reachable if the toggle ever returns.
-        let chunkedTailOnly = true
+        // THE SCOPE OF THAT PASS, and it is a real read again as of 2026-09-04.
+        // It was pinned to `true` (tail-only) on 2026-08-06 when the owner removed
+        // the toggle, and the pin is what they reported as a defect: "it not
+        // remove the chunk it use the chunked text instead re transcribe at start
+        // to stop". The toggle is back, so the key is read again — the old
+        // comment's own stale-value worry is answered by the control existing.
+        let chunkedTailOnly = !(UserDefaults.standard.object(forKey: "chunked.fullPassAtStop")
+                                as? Bool ?? ShippedDefaults.chunkedFullPassAtStop)
         let chunkedMode = Self.chunkedStopMode(
             finalPass: chunkedFinalPass,
             continueOnStop: chunkedTailOnly,

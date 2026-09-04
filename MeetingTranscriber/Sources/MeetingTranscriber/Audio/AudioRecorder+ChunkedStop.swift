@@ -307,6 +307,16 @@ extension AudioRecorder {
     /// be inconsistent, and a confirmation the user clicks through at Stop is a
     /// choice made at the worst possible moment. The tail pass — the default —
     /// still works with Voxtral.
+    /// The words on the toggle, stated ONCE.
+    ///
+    /// ⚠ The refusal below quotes them, the tab draws them, and a test asserts
+    /// the quote really is the label — so this is the thing all three read
+    /// rather than three copies that agree today. `testRefusalsSayWhatToDoAboutIt`
+    /// FAILED on exactly that coupling when the label was reworded on 2026-09-04
+    /// and the message still quoted "Continue from live text (tail only)": a
+    /// refusal pointing at a control by a name the control no longer has.
+    nonisolated static let fullPassToggleLabel = "the whole recording"
+
     nonisolated static func chunkedFullPassRefusalMessage(chunkedModelID: String) -> String? {
         switch chunkedModelID {
         // ⚠ MOSS USED TO BE REFUSED HERE, AND THE REASON HAD EXPIRED TWICE OVER
@@ -326,38 +336,64 @@ extension AudioRecorder {
             return "Voxtral cannot re-transcribe a whole recording in reasonable time. It needs "
                  + "about 27 s per 30 s chunk (Qwen3 4.3 s, Whisper 0.3–2.1 s, Granite 5.6 s), "
                  + "so a 60-minute meeting would take about 54 minutes of processing after you "
-                 + "press Stop. Keep \"Continue from live text (tail only)\" on with Voxtral, or pick "
-                 + "another chunked model."
+                 + "press Stop. Switch \"\(fullPassToggleLabel)\" off with Voxtral so only the last "
+                 + "seconds are re-transcribed, or pick another chunked model."
         default:
             return nil
         }
     }
 
     /// Plain-language cost of a full pass for this model, for the Settings copy.
-    /// The seconds are the measured per-30 s figures recorded in CLAUDE.md; the
-    /// minutes are those figures × 120 windows (a 60-minute meeting).
+    ///
+    /// 🔴 EVERY FIGURE HERE WAS WRONG UNTIL 2026-09-04, and one was wrong by 11x.
+    /// The old note took each model's per-30 s INFERENCE time from CLAUDE.md and
+    /// multiplied by 120, which is the extrapolation CLAUDE.md itself warns about
+    /// ("a per-chunk timing does not predict cost at a different chunk length").
+    /// It also ignores everything around the inference — writing the window WAV,
+    /// the round trip, the decode — which is most of the gap on the fast models.
+    ///
+    /// These are now MEASURED end to end: every window of a real recording driven
+    /// through the real sidecar over the real `-2` file-transcribe frame, at
+    /// 16 kHz mono, which is what `loadWindow` writes.
+    ///
+    /// | model | old claim | measured | |
+    /// |---|---|---|---|
+    /// | granite | ~11 min | **1.0 min** | 11x overstated |
+    /// | qwen3 | ~9 min | **2.1 min** | 4x overstated |
+    /// | whisper | 1–4 min | **4.2 min** | UNDERstated |
+    /// | moss | ~13 min | **10.2 min** | |
+    /// | voxtral | ~54 min | **42.6 min** | still refused |
+    ///
+    /// ⚠ THE ORDER WAS WRONG TOO, not merely the magnitudes. The old note implied
+    /// Whisper was the quickest (0.3–2.1 s per 30 s against Qwen3's 4.3 s); it is
+    /// the SLOWEST of the three fast models here. Anyone re-measuring should drive
+    /// the sidecar, not time `transcribe()`.
+    ///
+    /// ⚠ Measured at the shipped 30 s `chunked.intervalSec` on one recording
+    /// (`meeting-2026-08-19T02-30-22Z.wav`, 5 min of it). Longer windows change
+    /// the arithmetic for the autoregressive models — the same warning that made
+    /// the old figures wrong.
     nonisolated static func fullPassCostNote(chunkedModelID: String) -> String {
         switch chunkedModelID {
         case "whisper":
-            return "Whisper takes 0.3–2.1 s per 30 s of audio on this Mac — roughly 1–4 minutes "
-                 + "to re-transcribe a 60-minute meeting."
+            return "Measured on this Mac: about 14x realtime — roughly 4 minutes to re-transcribe "
+                 + "a 60-minute meeting."
         case "qwen3":
-            return "Qwen3-ASR takes about 4.3 s per 30 s of audio on this Mac — roughly 9 minutes "
-                 + "to re-transcribe a 60-minute meeting."
+            return "Measured on this Mac: about 28x realtime — roughly 2 minutes to re-transcribe "
+                 + "a 60-minute meeting, the quickest of the accurate models."
         case "granite":
-            return "Granite takes about 5.6 s per 30 s of audio on this Mac — roughly 11 minutes "
-                 + "to re-transcribe a 60-minute meeting."
+            return "Measured on this Mac: about 58x realtime — roughly 1 minute to re-transcribe a "
+                 + "60-minute meeting, the fastest here. It writes no capitals and almost no "
+                 + "punctuation, which is the reason to weigh against the speed."
         case "voxtral":
-            return "Voxtral takes about 27 s per 30 s of audio on this Mac — roughly 54 minutes "
-                 + "to re-transcribe a 60-minute meeting, which is why the full pass is refused "
-                 + "with it."
+            return "Measured on this Mac: about 1.4x realtime — roughly 43 minutes to re-transcribe "
+                 + "a 60-minute meeting, which is why the whole-recording pass is refused with it."
         case "moss":
-            return "MOSS takes about 6.4 s per 30 s of audio on this Mac — roughly 13 minutes to "
-                 + "re-transcribe a 60-minute meeting. It is the one model where the full pass also "
-                 + "REDIARIZES: MOSS writes speaker labels with the text, so the whole meeting is "
-                 + "re-labelled from the file. Measured on a 5-person recording, longer windows are "
-                 + "what fixes its speaker count (30 s gave 6 speakers, 120 s gave the correct 5), "
-                 + "and the pass cuts its windows at silence rather than at fixed offsets."
+            return "Measured on this Mac: about 6x realtime — roughly 10 minutes to re-transcribe a "
+                 + "60-minute meeting. It is the one model where this also REDIARIZES: MOSS writes "
+                 + "speaker labels with the text, so the whole meeting is re-labelled from the "
+                 + "file. Measured on a 5-person recording, longer windows are what fix its speaker "
+                 + "count (30 s gave 6 speakers, 120 s gave the correct 5)."
         default:
             return ""
         }

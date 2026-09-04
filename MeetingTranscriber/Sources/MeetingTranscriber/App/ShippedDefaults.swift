@@ -88,6 +88,30 @@ enum ShippedDefaults {
     /// ungated, so the ATND layer is untouched by this value.
     static let vadMinSilenceMs = 600.0
 
+    /// Whether "Re-transcribe at stop" covers the WHOLE recording or only the
+    /// tail no chunk had reached yet.
+    ///
+    /// ⚠ THE CONTROL WAS REMOVED ON 2026-08-06 AND THE MODE PINNED TO TAIL, and
+    /// the owner reported the result as a defect on 2026-09-04: *"it not remove
+    /// the chunk it use the chunked text instead re transcribe at start to
+    /// stop."* They are describing exactly what the pin did. This restores the
+    /// choice and ships it ON, which is also the only reading under which the
+    /// toggle above it — labelled **"Re-transcribe at stop"** — is telling the
+    /// truth: tail-only re-transcribes about one chunk of a meeting.
+    ///
+    /// The `.full` machinery was never removed with the toggle, deliberately —
+    /// `stop()`'s own comment said it was "reachable if the toggle ever returns"
+    /// — so this is a control coming back, not a mode being written.
+    ///
+    /// ⚠ IT COSTS TIME AT STOP, and the whole recording is the point: the pass
+    /// re-transcribes every window and `replaceOfficeSegments` deletes the live
+    /// chunk text it overlaps. At the shipped 30 s interval that is ~1–4 min for
+    /// Whisper on a 60-minute meeting and ~9 min for Qwen3 — `fullPassCostNote`
+    /// carries the per-model figure and the tab prints it. Voxtral is REFUSED at
+    /// startup rather than downgraded (~54 min), because a user who asked for
+    /// the whole recording would have no way to know they did not get it.
+    static let chunkedFullPassAtStop = true
+
     static let overlapDetect = true
     static let overlapRepair = true
 }

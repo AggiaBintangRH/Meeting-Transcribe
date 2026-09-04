@@ -5519,6 +5519,10 @@ def run_layout(rep: Report, ctx):
             # shape this check exists to forbid, sitting unnoticed inside the
             # file the check reads.
             "vad.minSilenceMs": "vadMinSilenceMs",
+            # Added 2026-09-04 with the toggle it belongs to. THREE readers from
+            # the first minute -- the tab, the startup refusal and stop() -- which
+            # is the count that made `overlap.detect.enabled` drift eight ways.
+            "chunked.fullPassAtStop": "chunkedFullPassAtStop",
         }
         # An APPROVED ALIAS is a name that is *defined as* one of these
         # constants, not a second copy of its value — `defaultModelID` reads far

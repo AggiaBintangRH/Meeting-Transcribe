@@ -223,13 +223,105 @@ final class ChunkedStopSettingsTests: XCTestCase {
         }
     }
 
+    // MARK: - The windows must COVER the recording
+
+    /// Every second of the recording lands in exactly one window.
+    ///
+    /// ⚠ NOTHING ASSERTED THIS BEFORE, and it is the property the whole mode
+    /// rests on: `replaceOfficeSegments` DELETES the live chunk text a window
+    /// overlaps and puts the new text in its place. A gap between two windows is
+    /// therefore not a gap in the re-transcription — it is **speech deleted from
+    /// the transcript**, with the live text that covered it removed by the
+    /// windows on either side. That is this project's worst failure direction and
+    /// it would leave no trace outside the log.
+    ///
+    /// Driven across adversarial profiles rather than one tidy case, because the
+    /// silence search is what can move a boundary: all-quiet (every candidate
+    /// matches, so cuts land at the target), all-loud (nothing matches, so every
+    /// cut falls back to the 1.5x cap), and a real alternating pattern.
+    func testTheWindowsTileTheRecordingWithNoGapAndNoOverlap() {
+        let frame = AudioRecorder.silenceFrameSec
+        let length = 400.0
+        let frames = Int(length / frame) + 8
+
+        let profiles: [(String, [Float])] = [
+            ("all quiet", [Float](repeating: 0.0001, count: frames)),
+            ("all loud", [Float](repeating: 0.5, count: frames)),
+            ("alternating 3 s speech / 1 s pause",
+             (0..<frames).map { Float(Int(Double($0) * frame) % 4 == 3 ? 0.0001 : 0.5) }),
+        ]
+
+        for interval in [30.0, 60.0, 120.0] {
+            for (name, energies) in profiles {
+                let windows = AudioRecorder.fullPassWindowsAtSilence(
+                    recordingLength: length, intervalSec: interval, energies: energies)
+                let label = "\(name) @ \(Int(interval))s"
+                XCTAssertFalse(windows.isEmpty, label)
+                XCTAssertEqual(windows.first?.lowerBound ?? -1, 0.0, accuracy: 1e-9,
+                               "\(label): the pass must start at the beginning of the recording")
+                // The tail may legitimately be dropped when it is under
+                // `minTailSec` — a quarter second no model can use — and nothing
+                // more than that.
+                XCTAssertEqual(windows.last?.upperBound ?? -1, length, accuracy: 0.25,
+                               "\(label): audio after the last window is deleted, not kept")
+                for (a, b) in zip(windows, windows.dropFirst()) {
+                    XCTAssertEqual(a.upperBound, b.lowerBound, accuracy: 1e-9,
+                                   "\(label): a gap or an overlap between windows — a GAP is "
+                                   + "deleted speech, because the windows either side remove "
+                                   + "the live text that covered it")
+                }
+            }
+        }
+    }
+
+    // MARK: - The scope of the stop pass (restored 2026-09-04)
+
+    /// A FRESH INSTALL re-transcribes the WHOLE recording, not the tail.
+    ///
+    /// ⚠ THIS ASSERTS THE THING THE OWNER REPORTED AS BROKEN. From 2026-08-06 the
+    /// mode was pinned to `.tail` by a hard-coded `let chunkedTailOnly = true` in
+    /// `stop()`, and their report was precise: "it not remove the chunk it use
+    /// the chunked text instead re transcribe at start to stop". Tail-only
+    /// re-transcribes roughly one chunk and leaves every earlier row exactly as
+    /// the live pass wrote it — which is what they saw.
+    ///
+    /// Written against `ShippedDefaults` rather than a literal `.full`, so
+    /// changing the shipped scope moves the assertion with it rather than
+    /// leaving a test that pins a value nobody ships.
+    func testAFreshInstallReTranscribesTheWholeRecording() {
+        let shipped = mode(finalPass: true,
+                           continueOnStop: !ShippedDefaults.chunkedFullPassAtStop)
+        XCTAssertEqual(shipped, .full,
+                       "the shipped stop pass must cover the whole recording — tail-only "
+                       + "leaves the live chunk text in place, which is the defect reported")
+        XCTAssertTrue(plan(shipped).runsFullPass)
+        XCTAssertFalse(plan(shipped).queuesTailWindow,
+                       "a full pass must not ALSO queue the tail window — that audio is "
+                       + "already inside the last full-pass window and would be transcribed twice")
+    }
+
+    /// Both scopes stay reachable, and only the scope changes between them.
+    /// Without this the fix could silently become "always full", which is the
+    /// same defect as "always tail" pointing the other way — and Voxtral has
+    /// nowhere to go if the tail is unreachable.
+    func testTheScopeIsAChoiceAndNothingElseMovesWithIt() {
+        XCTAssertEqual(mode(continueOnStop: true), .tail)
+        XCTAssertEqual(mode(continueOnStop: false), .full)
+        for m in [AudioRecorder.ChunkedStopMode.tail, .full] {
+            XCTAssertTrue(plan(m).sweepsUnconfirmedTail,
+                          "\(m): a pass DID run, so the leftover realtime text is superseded")
+            XCTAssertFalse(plan(m).settlesImmediately, "\(m): something asynchronous is coming")
+        }
+    }
+
     /// The refusal names the model, says what to do about it, and points at the
     /// setting by the words the user actually sees — the shape every other
     /// refusal in this app follows.
     func testRefusalsSayWhatToDoAboutIt() {
         for id in ["voxtral"] {
             let message = AudioRecorder.chunkedFullPassRefusalMessage(chunkedModelID: id) ?? ""
-            XCTAssertTrue(message.contains("Continue from live text (tail only)"), id)
+            XCTAssertTrue(message.contains(AudioRecorder.fullPassToggleLabel),
+                          "\(id): the refusal must point at the toggle by the words on it")
             XCTAssertTrue(message.contains("chunked model"), id)
         }
         // Every model the picker offers has a cost line for the Settings copy.
