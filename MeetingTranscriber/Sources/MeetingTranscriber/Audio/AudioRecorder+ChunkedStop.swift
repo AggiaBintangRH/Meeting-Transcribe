@@ -4,21 +4,19 @@ import Foundation
 // The stop-time chunked-ASR pass, and the two settings that govern it
 // (owner-requested 2026-08-03):
 //
-//   chunked.finalPass       "Run a transcription pass at stop"
-//   chunked.continueOnStop  RETIRED 2026-08-06 (owner). Its toggle was removed
-//                           and the key is no longer read: the pass is always
-//                           tail-only, which was this key's own default. The
-//                           `.full` mode below is KEPT — it is still pinned by
-//                           tests and is what the toggle would restore.
+//   chunked.finalPass        "Re-transcribe at stop"
+//   chunked.fullPassAtStop   "…the whole recording, not just the last seconds"
 //
-// They mirror the Diarization tab's existing pair EXACTLY in shape, and
-// deliberately NOT in default: `diarization.continueOnStop` defaults to FALSE
-// (a stop pass re-diarizes the whole recording), the retired `chunked.continueOnStop`
-// defaults to TRUE (the ASR pass covers only the tail). TRUE is what the app has
-// always done, and requirement #1 of this change is that both keys ABSENT
-// reproduce today's stop path exactly — so the default has to follow behaviour,
-// not symmetry. The Settings copy says so, because a mirrored pair with opposite
-// defaults is otherwise a trap.
+// ⚠ THE SCOPE KEY IS THE SECOND ONE THIS PAIR HAS HAD, and the two have OPPOSITE
+// senses — which is exactly why the name changed rather than being reused.
+// `chunked.continueOnStop` meant "tail only" and defaulted TRUE; it was retired
+// on 2026-08-06 when the owner removed its toggle, and `stop()` then pinned the
+// mode to tail. The owner reported that pin as a defect on 2026-09-04 ("it not
+// remove the chunk it use the chunked text instead re transcribe at start to
+// stop"), so the choice is back under a NEW key meaning "whole recording" and
+// defaulting TRUE. A stored value under the old name therefore cannot be read
+// with the opposite meaning — which it would have been, silently, had the key
+// been reused.
 //
 //   finalPass ON  + tail ON   → today's behaviour: flush the sidecar's buffer,
 //                               one tail window, one `final`.

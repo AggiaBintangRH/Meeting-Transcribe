@@ -6,10 +6,17 @@ import Foundation
 //
 // SCOPE: this drives the SECOND MOSS process only, i.e. "another model does the
 // ASR, MOSS labels the speakers". In MOSS+MOSS mode `mossDiarService` is nil —
-// one process carries both jobs and its tail is the CHUNKED tail, already
-// governed by `chunked.finalPass` (the tail/full choice was retired 2026-08-06 —
-// the chunked stop pass is always tail-only now). Two settings pairs
-// for one process would be two answers to one question.
+// one process carries both jobs, so the CHUNKED pair governs it
+// (`chunked.finalPass` + `chunked.fullPassAtStop`). Two settings pairs for one
+// process would be two answers to one question.
+//
+// ⚠ SO IN MOSS+MOSS THE WHOLE MEETING IS RE-TRANSCRIBED **AND RE-LABELLED** BY
+// THE CHUNKED PASS, not by anything here: `moss-asr`'s file-transcribe reply
+// carries its `segments`, and `replaceOfficeSegments` rebuilds pinned rows and
+// `mossTurns` from them. Verified over the wire 2026-09-04 — 60 s of the
+// 5-person recording came back as 22 segments across S01/S02/S03 in 17.3 s.
+// That pair was pinned to tail-only from 2026-08-06 until 2026-09-04, which is
+// what the owner saw as "it not remove the chunk".
 //
 // WHY THE FULL PASS USES A LONGER WINDOW, AND WHY THAT IS THE WHOLE POINT
 // ----------------------------------------------------------------------

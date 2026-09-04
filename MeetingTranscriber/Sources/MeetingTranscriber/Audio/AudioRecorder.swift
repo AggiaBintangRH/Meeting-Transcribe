@@ -229,8 +229,7 @@ final class AudioRecorder: ObservableObject {
     var stopWatchdog: Task<Void, Never>?
     var repairTask: Task<Void, Never>?
 
-    // MARK: The stop-time chunked pass (`chunked.finalPass`; always tail-only
-    // since 2026-08-06 — see `chunkedTailOnly` in `stop()`)
+    // MARK: The stop-time chunked pass (`chunked.finalPass` + `chunked.fullPassAtStop`)
     //
     // See AudioRecorder+ChunkedStop.swift. All three default to today's
     // behaviour, and `beginCapture` resets them per session.
