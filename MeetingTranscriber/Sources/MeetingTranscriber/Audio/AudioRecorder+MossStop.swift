@@ -151,12 +151,20 @@ extension AudioRecorder {
         mossLog("FULL PASS start — \(windows.count) window(s) of "
                 + "\(Int(Self.mossFullPassWindowSec))s over \(fmt(recordingElapsed))s")
 
+        // The MOSS pass runs 120 s windows at ~6x realtime, so a long meeting sits
+        // here for minutes exactly as the chunked pass does — it gets the same
+        // bar, from the same reporter, rather than a second way of saying this.
+        let startedAt = Self.monotonicNow()
         mossFullPassTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            self.setStopStepName("moss-diarize", "Identifying speakers")
+            self.setStopStepProgress("moss-diarize", done: 0, total: windows.count,
+                                     startedAt: startedAt)
             for (index, window) in windows.enumerated() {
                 if Task.isCancelled { break }
-                self.setStopStepName("moss-diarize",
-                                     "Identifying speakers (\(index + 1)/\(windows.count))")
+                // Windows FINISHED, never the one in flight — see the chunked twin.
+                self.setStopStepProgress("moss-diarize", done: index,
+                                         total: windows.count, startedAt: startedAt)
                 let samples = await Task.detached(priority: .utility) {
                     Self.loadWindow16k(from: recording,
                                        start: window.lowerBound, end: window.upperBound)
@@ -178,6 +186,11 @@ extension AudioRecorder {
             }
             self.mossFullPassTask = nil
             self.mossLog("FULL PASS done — \(self.mossTurns.count) turns")
+            // The windows are done; identity is a different job with its own
+            // duration, so the bar that described them is cleared rather than
+            // left sitting full under a row that is still working.
+            self.clearStopStepProgress("moss-diarize")
+            self.setStopStepName("moss-diarize", "Matching voices to speakers")
             await self.identifyMossTurns(recording: recording)
             self.setStopStepName("moss-diarize", "Labelling speakers")
             self.checkMossChunkDone()

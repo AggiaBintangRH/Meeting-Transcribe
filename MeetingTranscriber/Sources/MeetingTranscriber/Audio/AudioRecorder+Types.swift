@@ -242,10 +242,62 @@ extension AudioRecorder {
     /// fit here (its `loadAll` runs one item at a time, these run concurrently).
     struct StopStep: Identifiable, Equatable {
         let id: String            // "chunk" | "diarize" | "repair"
-        /// `var` since the stop-time full re-transcription: `ItemState` has no
-        /// progress payload, so a leg that runs for minutes counts its windows in
-        /// its name (`setStopStepName`). The id, not the name, identifies a step.
+        /// `var` because a leg's name changes as it works. The id, not the name,
+        /// identifies a step.
         var name: String
         var state: ModelLoader.ItemState
+        /// How far a long leg has got, when it can say. nil for every leg that
+        /// finishes too quickly to need it — and nil is drawn as no bar at all,
+        /// not as an empty one.
+        ///
+        /// ⚠ THIS USED TO BE MANGLED INTO `name` ("Re-transcribing the recording
+        /// (7/120)") because the type had nowhere to put it. That was survivable
+        /// while the full pass was unreachable; since 2026-09-04 it is the
+        /// shipped path and the user watches it for MINUTES, so the count is a
+        /// value the view can draw properly rather than a string it must parse.
+        var progress: StopProgress? = nil
+    }
+
+    /// A long leg's progress, and its own honest estimate of what is left.
+    struct StopProgress: Equatable {
+        /// Windows finished. 0 while the first one is still in flight.
+        var done: Int
+        /// Windows in total. Always > 0 where this is set.
+        var total: Int
+        /// Seconds of monotonic clock since the leg began.
+        ///
+        /// ⚠ MONOTONIC, NEVER `Date`. A stop pass can run for ten minutes; an
+        /// NTP correction or a daylight-saving jump inside that window would make
+        /// a wall-clock estimate negative, and "about -2 min left" is worse than
+        /// no estimate.
+        var elapsed: Double
+
+        var fraction: Double {
+            guard total > 0 else { return 0 }
+            return min(1, max(0, Double(done) / Double(total)))
+        }
+
+        /// Seconds still to go, or nil when there is not yet evidence to say.
+        ///
+        /// ⚠ IT ABSTAINS UNTIL **TWO** WINDOWS ARE DONE, and that is the whole
+        /// design rather than caution. The FIRST window carries the model's
+        /// warm-up — measured today at 17.3 s for MOSS against ~5 s for its
+        /// later windows — so an estimate drawn from it alone overstates the
+        /// remaining time by multiples and then visibly collapses, which reads as
+        /// a broken progress bar. Abstaining shows a bar with no number for a few
+        /// seconds; guessing shows a number that is wrong and then jumps.
+        ///
+        /// This is the same rule as the signal gate's `MIN_SPEECH_JUDGE_SEC`:
+        /// where the evidence cannot support an answer, return nil and let the
+        /// caller show nothing.
+        ///
+        /// And it is MEASURED, never a per-model table. `fullPassCostNote`'s
+        /// figures were wrong by up to 11x for exactly that reason — a stored
+        /// rate cannot know this machine, this recording, or what else is
+        /// contending for the GPU right now. Mean-so-far knows all three.
+        var secondsRemaining: Double? {
+            guard done >= 2, done < total, elapsed > 0 else { return nil }
+            return elapsed / Double(done) * Double(total - done)
+        }
     }
 }

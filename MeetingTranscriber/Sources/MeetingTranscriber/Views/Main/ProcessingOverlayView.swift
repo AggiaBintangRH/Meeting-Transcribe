@@ -35,7 +35,8 @@ struct ProcessingOverlayView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(recorder.stopSteps) { step in
-                    OverlayStepRow(name: label(step), state: step.state)
+                    OverlayStepRow(name: label(step), state: step.state,
+                                   progress: step.progress)
                 }
             }
 

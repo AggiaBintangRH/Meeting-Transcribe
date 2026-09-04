@@ -566,9 +566,19 @@ extension AudioRecorder {
         let label = isRemote ? "Re-transcribing remote audio" : "Re-transcribing the recording"
         let restingName = isRemote ? "Transcribing remote audio" : "Transcribing final audio"
 
+        // The clock the estimate is measured against, started before the first
+        // window rather than at the method's entry: what we are timing is the
+        // per-window work, and the caller's setup is not part of it.
+        let startedAt = Self.monotonicNow()
+        setStopStepName(stepID, label)
+        setStopStepProgress(stepID, done: 0, total: windows.count, startedAt: startedAt)
+
         for (index, window) in windows.enumerated() {
             if Task.isCancelled { break }
-            setStopStepName(stepID, "\(label) (\(index + 1)/\(windows.count))")
+            // `done: index` — windows FINISHED, not the one in flight. Counting
+            // the current window as done would report 100 % while the last one is
+            // still running, and make every estimate one window optimistic.
+            setStopStepProgress(stepID, done: index, total: windows.count, startedAt: startedAt)
             let span = "[\(fmt(window.lowerBound))-\(fmt(window.upperBound))] \(stream)"
 
             let samples = await Task.detached(priority: .utility) {
@@ -619,7 +629,14 @@ extension AudioRecorder {
             // paths above never created a file.
             try? FileManager.default.removeItem(at: url)
         }
+        setStopStepProgress(stepID, done: windows.count, total: windows.count,
+                            startedAt: startedAt)
         setStopStepName(stepID, restingName)
+        // The bar described THESE windows and they are done. The leg itself may
+        // still be spinning — in a dual-stream session the remote sub-pass runs
+        // next, and the gate waits on more than this — so a full bar left under a
+        // spinner would claim the leg was finished when it is not.
+        clearStopStepProgress(stepID)
     }
 
     /// Swap this window's confirmed office text for the re-transcribed version.

@@ -115,6 +115,42 @@ extension AudioRecorder {
         stopSteps[i].name = name
     }
 
+    /// Report how far a long leg has got, so the overlay can draw a bar and an
+    /// estimate instead of a count buried in the leg's name.
+    ///
+    /// `startedAt` is a MONOTONIC reading (`ContinuousClock` / `uptimeNanoseconds`),
+    /// not a wall clock — see `StopProgress.elapsed` for why a ten-minute pass
+    /// must not be timed against a clock that can be corrected underneath it.
+    func setStopStepProgress(_ id: String, done: Int, total: Int, startedAt: UInt64) {
+        guard let i = stopSteps.firstIndex(where: { $0.id == id }), total > 0 else { return }
+        let elapsed = Self.monotonicSeconds(since: startedAt)
+        let next = StopProgress(done: done, total: total, elapsed: elapsed)
+        guard stopSteps[i].progress != next else { return }
+        stopSteps[i].progress = next
+    }
+
+    /// Clear a leg's bar — it has stopped doing the thing the bar described.
+    /// Separate from `setStopStepName` on purpose: a leg that finishes its
+    /// windows and then waits on something else must not keep a full bar sitting
+    /// under a row that is still spinning.
+    func clearStopStepProgress(_ id: String) {
+        guard let i = stopSteps.firstIndex(where: { $0.id == id }) else { return }
+        guard stopSteps[i].progress != nil else { return }
+        stopSteps[i].progress = nil
+    }
+
+    /// A monotonic "now", in the same units `setStopStepProgress` expects.
+    nonisolated static func monotonicNow() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+
+    nonisolated static func monotonicSeconds(since start: UInt64) -> Double {
+        let now = DispatchTime.now().uptimeNanoseconds
+        // `uptimeNanoseconds` cannot go backwards, but a caller could hand us a
+        // future value; clamping keeps a nonsensical input out of an ETA rather
+        // than turning it into a negative one.
+        guard now > start else { return 0 }
+        return Double(now - start) / 1_000_000_000
+    }
+
     /// Whether a repair leg is worth listing — mirrors `maybeStartOverlapRepair`'s
     /// feature + engine checks, without the gates that are still pending at stop.
     var overlapRepairWillRun: Bool {
